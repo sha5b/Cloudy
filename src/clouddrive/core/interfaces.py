@@ -42,6 +42,8 @@ class ServiceModule(ABC):
     name: str = ""
     #: symbolic icon name
     icon_name: str = "application-x-addon-symbolic"
+    #: auth/secret namespace this provider belongs to, e.g. "microsoft"/"google"
+    provider: str = ""
 
     @abstractmethod
     def activate(self, ctx: "ModuleContext") -> None:
@@ -71,6 +73,22 @@ class ModuleContext:
 # --- Capability mix-ins ------------------------------------------------------
 # A module declares what it can surface by also subclassing these. The shell
 # checks isinstance() to decide which UI surfaces to offer.
+
+
+#: Ordered capability keys. The UI maps these to translated labels and icons.
+CAPABILITY_KEYS = ("files", "mail", "calendar")
+
+
+def capabilities_of(obj) -> list[str]:
+    """Return the capability keys an object supports, in display order."""
+    caps = []
+    if isinstance(obj, FilesCapability):
+        caps.append("files")
+    if isinstance(obj, MailCapability):
+        caps.append("mail")
+    if isinstance(obj, CalendarCapability):
+        caps.append("calendar")
+    return caps
 
 
 class FilesCapability(ABC):

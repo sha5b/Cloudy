@@ -65,10 +65,16 @@ class ClouddriveApplication(Adw.Application):
         prefs.present(self.props.active_window)
 
     def _on_add_account(self, *_args):
-        # TODO(stage 2): launch the account/auth assistant.
+        from .account_dialog import AddAccountDialog
+
         window = self.props.active_window
-        if window:
-            window.add_toast(_("Account setup is not implemented yet."))
+        dialog = AddAccountDialog(
+            engine=self.engine,
+            registry=self.registry,
+            on_added=lambda acct: window
+            and window.add_toast(_("Added %s. Sign in to finish.") % acct.display_name),
+        )
+        dialog.present(window)
 
     def _on_about(self, *_args):
         about = Adw.AboutDialog(

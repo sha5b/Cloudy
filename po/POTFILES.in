@@ -7,5 +7,6 @@ data/ui/preferences.blp
 src/clouddrive/application.py
 src/clouddrive/window.py
 src/clouddrive/preferences.py
+src/clouddrive/account_dialog.py
 src/clouddrive/modules/microsoft365/module.py
 src/clouddrive/modules/gmail/__init__.py

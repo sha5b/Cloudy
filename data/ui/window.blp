@@ -28,64 +28,74 @@ template $ClouddriveWindow: Adw.ApplicationWindow {
   width-request: 360;
   height-request: 294;
 
-  content: Adw.NavigationSplitView split_view {
-    min-sidebar-width: 220;
-    max-sidebar-width: 320;
+  content: Adw.ToastOverlay toast_overlay {
+    child: Adw.NavigationSplitView split_view {
+      min-sidebar-width: 240;
+      max-sidebar-width: 340;
 
-    sidebar: Adw.NavigationPage {
-      title: _("Clouddrive");
+      sidebar: Adw.NavigationPage {
+        title: _("Accounts");
 
-      child: Adw.ToolbarView {
-        [top]
-        Adw.HeaderBar {
-          [end]
-          MenuButton {
-            primary: true;
-            icon-name: "open-menu-symbolic";
-            tooltip-text: _("Main Menu");
-            menu-model: primary_menu;
+        child: Adw.ToolbarView {
+          [top]
+          Adw.HeaderBar {
+            [start]
+            Button {
+              icon-name: "list-add-symbolic";
+              tooltip-text: _("Add Account");
+              action-name: "app.add-account";
+            }
+
+            [end]
+            MenuButton {
+              primary: true;
+              icon-name: "open-menu-symbolic";
+              tooltip-text: _("Main Menu");
+              menu-model: primary_menu;
+            }
           }
-        }
 
-        content: Gtk.ScrolledWindow {
-          hscrollbar-policy: never;
+          content: Gtk.ScrolledWindow {
+            hscrollbar-policy: never;
 
-          child: ListBox sidebar_list {
-            selection-mode: single;
+            child: ListBox sidebar_list {
+              selection-mode: single;
 
-            styles [
-              "navigation-sidebar",
-            ]
+              styles [
+                "navigation-sidebar",
+              ]
+            };
           };
         };
       };
-    };
 
-    content: Adw.NavigationPage {
-      title: _("Welcome");
+      content: Adw.NavigationPage {
+        title: _("Clouddrive");
 
-      child: Adw.ToolbarView {
-        [top]
-        Adw.HeaderBar {}
+        child: Adw.NavigationView content_nav {
+          Adw.NavigationPage {
+            title: _("Welcome");
+            tag: "welcome";
 
-        content: Adw.ViewStack content_stack {
-          Adw.ViewStackPage {
-            name: "welcome";
+            child: Adw.ToolbarView {
+              [top]
+              Adw.HeaderBar {}
 
-            child: Adw.StatusPage {
-              icon-name: "weather-overcast-symbolic";
-              title: _("Welcome to Clouddrive");
-              description: _("Add an account to start using OneDrive, SharePoint and unified mail.");
+              content: Adw.StatusPage {
+                icon-name: "weather-overcast-symbolic";
+                title: _("Welcome to Clouddrive");
+                description: _("Add an account to start using OneDrive, SharePoint and unified mail.");
 
-              child: Button {
-                halign: center;
-                label: _("Add Account…");
-                action-name: "app.add-account";
+                child: Button {
+                  halign: center;
+                  label: _("Add Account…");
+                  action-name: "app.add-account";
 
-                styles [
-                  "pill",
-                  "suggested-action",
-                ]
+                  styles [
+                    "pill",
+                    "suggested-action",
+                  ]
+                };
               };
             };
           }

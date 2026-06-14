@@ -34,5 +34,14 @@ SPDX-FileCopyrightText: 2026 Fiber Elements
       <summary>The view shown when the app was last closed</summary>
     </key>
 
+    <key name="accounts" type="s">
+      <default>'[]'</default>
+      <summary>Configured accounts, serialized as a JSON array</summary>
+      <description>
+        Non-secret account metadata (id, display name, provider, module).
+        Tokens are stored separately via libsecret.
+      </description>
+    </key>
+
   </schema>
 </schemalist>

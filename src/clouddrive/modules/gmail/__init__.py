@@ -18,6 +18,7 @@ class GmailModule(ServiceModule, MailCapability, CalendarCapability):
     id = "gmail"
     name = _("Gmail")
     icon_name = "mail-unread-symbolic"
+    provider = "google"
 
     def activate(self, ctx: ModuleContext) -> None:
         self._ctx = ctx

@@ -41,6 +41,7 @@ class Microsoft365Module(
     id = "microsoft365"
     name = _("Microsoft 365")
     icon_name = "folder-remote-symbolic"
+    provider = "microsoft"
 
     def __init__(self):
         self._ctx: ModuleContext | None = None
