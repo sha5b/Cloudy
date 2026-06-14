@@ -14,7 +14,12 @@ def build_account_client(app, account):
         from ..core.auth.google_oauth import GoogleAuth
         from ..modules.gmail.google_client import GoogleClient
 
-        auth = GoogleAuth(app.google_client_id(), app.secrets, account.id)
+        auth = GoogleAuth(
+            app.google_client_id(),
+            app.secrets,
+            account.id,
+            client_secret=app.google_client_secret(),
+        )
         return GoogleClient(lambda scopes: auth.acquire_token(scopes))
 
     # Default: Microsoft 365 / Graph.

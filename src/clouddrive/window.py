@@ -217,7 +217,10 @@ class ClouddriveWindow(Adw.ApplicationWindow):
         from .core.auth.google_oauth import GoogleAuth
 
         try:
-            auth = GoogleAuth(client_id, secrets, account.id)
+            auth = GoogleAuth(
+                client_id, secrets, account.id,
+                client_secret=self.get_application().google_client_secret(),
+            )
             result = auth.sign_in_interactive(open_url=self.open_uri)
             try:
                 ident = GoogleAuth.fetch_email(result["access_token"])

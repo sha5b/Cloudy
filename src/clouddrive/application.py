@@ -43,6 +43,11 @@ class ClouddriveApplication(Adw.Application):
             "google-client-id"
         )
 
+    def google_client_secret(self) -> str:
+        return os.environ.get(
+            "CLOUDDRIVE_GOOGLE_CLIENT_SECRET"
+        ) or self.settings.get_string("google-client-secret")
+
     def _setup_actions(self) -> None:
         self._add_action("quit", self._on_quit, ["<primary>q"])
         self._add_action("about", self._on_about)

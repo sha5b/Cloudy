@@ -62,5 +62,15 @@ SPDX-FileCopyrightText: 2026 Fiber Elements
       </description>
     </key>
 
+    <key name="google-client-secret" type="s">
+      <default>''</default>
+      <summary>Google OAuth client secret (Desktop app)</summary>
+      <description>
+        Google "Desktop app" OAuth clients include a non-confidential client
+        secret used in the token exchange (override env:
+        CLOUDDRIVE_GOOGLE_CLIENT_SECRET). See docs/AUTH.md.
+      </description>
+    </key>
+
   </schema>
 </schemalist>
