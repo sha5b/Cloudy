@@ -14,6 +14,7 @@ core.auth.google_oauth).
 
 from __future__ import annotations
 
+import base64
 import json
 import urllib.error
 import urllib.parse
@@ -29,6 +30,35 @@ CALENDAR = "https://www.googleapis.com/calendar/v3"
 
 class GoogleError(Exception):
     pass
+
+
+def _decode_b64url(data: str) -> str:
+    padded = data + "=" * (-len(data) % 4)
+    try:
+        return base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _extract_body(payload: dict) -> str:
+    """Walk a Gmail payload, preferring text/plain, then text/html."""
+    mime = payload.get("mimeType", "")
+    body_data = payload.get("body", {}).get("data")
+    if mime == "text/plain" and body_data:
+        return _decode_b64url(body_data)
+    # Recurse into parts; collect a plain-text candidate, fall back to html.
+    html = ""
+    for part in payload.get("parts", []):
+        text = _extract_body(part)
+        if part.get("mimeType") == "text/plain" and text:
+            return text
+        if part.get("mimeType") == "text/html" and text and not html:
+            html = text
+        elif text and not html:
+            html = text
+    if mime == "text/html" and body_data:
+        return _decode_b64url(body_data)
+    return html
 
 
 class GoogleClient:
@@ -81,6 +111,24 @@ class GoogleClient:
             "received": received,
             "preview": msg.get("snippet", ""),
             "is_read": "UNREAD" not in msg.get("labelIds", []),
+        }
+
+    def get_message(self, message_id: str) -> dict:
+        data = self._get(f"{GMAIL}/users/me/messages/{message_id}?format=full", SCOPES_MAIL)
+        payload = data.get("payload", {})
+        headers = {h["name"].lower(): h["value"] for h in payload.get("headers", [])}
+        received = ""
+        if data.get("internalDate"):
+            received = datetime.fromtimestamp(
+                int(data["internalDate"]) / 1000, tz=timezone.utc
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return {
+            "id": data.get("id", message_id),
+            "subject": headers.get("subject", "(no subject)"),
+            "from": headers.get("from", ""),
+            "to": headers.get("to", ""),
+            "received": received,
+            "body": _extract_body(payload) or data.get("snippet", ""),
         }
 
     # -- Calendar ---------------------------------------------------------

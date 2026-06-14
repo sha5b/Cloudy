@@ -14,3 +14,4 @@ src/clouddrive/core/auth/msal_graph.py
 src/clouddrive/widgets/files_view.py
 src/clouddrive/widgets/mail_view.py
 src/clouddrive/widgets/calendar_view.py
+src/clouddrive/widgets/message_dialog.py

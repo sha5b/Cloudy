@@ -67,7 +67,34 @@ class MailView(Adw.Bin):
             dot = Gtk.Image.new_from_icon_name("media-record-symbolic")
             dot.add_css_class("accent")
             row.add_prefix(dot)
+        row.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
+        row.set_activatable(True)
+        row.connect("activated", lambda *_: self._open_message(msg["id"]))
         return row
+
+    def _open_message(self, message_id) -> None:
+        def worker():
+            try:
+                from .clients import build_account_client
+
+                client = build_account_client(
+                    self._window.get_application(), self._account
+                )
+                full = client.get_message(message_id)
+                GLib.idle_add(self._show_message, full, None)
+            except Exception as exc:  # noqa: BLE001
+                GLib.idle_add(self._show_message, None, str(exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_message(self, msg, error) -> bool:
+        if error:
+            self._window.add_toast(_("Couldn't open message: %s") % error)
+            return False
+        from .message_dialog import MessageDialog
+
+        MessageDialog(msg).present(self._window)
+        return False
 
 
 def _format_when(iso: str) -> str:

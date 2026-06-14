@@ -44,12 +44,15 @@ class GraphClient:
         self._token_provider = token_provider
 
     # -- low-level --------------------------------------------------------
-    def _get(self, path: str, scopes: Sequence[str]) -> dict:
+    def _get(self, path: str, scopes: Sequence[str], headers: dict | None = None) -> dict:
         token = self._token_provider(scopes)
         if not token:
             raise GraphError("not signed in (no token for the requested scopes)")
         url = path if path.startswith("http") else f"{BASE_URL}{path}"
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        hdrs = {"Authorization": f"Bearer {token}"}
+        if headers:
+            hdrs.update(headers)
+        req = urllib.request.Request(url, headers=hdrs)
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return json.loads(resp.read().decode())
@@ -157,6 +160,28 @@ class GraphClient:
                 "is_read": m.get("isRead", True),
             })
         return out
+
+    def get_message(self, message_id: str) -> dict:
+        """Full message with a plain-text body."""
+        data = self._get(
+            f"/me/messages/{message_id}"
+            f"?$select=subject,from,toRecipients,receivedDateTime,body",
+            SCOPES_MAIL,
+            headers={"Prefer": 'outlook.body-content-type="text"'},
+        )
+        sender = (data.get("from") or {}).get("emailAddress", {})
+        to = ", ".join(
+            r.get("emailAddress", {}).get("address", "")
+            for r in data.get("toRecipients", [])
+        )
+        return {
+            "id": data.get("id", message_id),
+            "subject": data.get("subject", "(no subject)"),
+            "from": sender.get("name") or sender.get("address", ""),
+            "to": to,
+            "received": data.get("receivedDateTime", ""),
+            "body": (data.get("body") or {}).get("content", ""),
+        }
 
     # -- Calendar ---------------------------------------------------------
     def list_calendars(self) -> list[dict]:
