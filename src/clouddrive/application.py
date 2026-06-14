@@ -57,6 +57,27 @@ class ClouddriveApplication(Adw.Application):
             self.set_accels_for_action(f"app.{name}", accels)
 
     # -- GApplication lifecycle ------------------------------------------
+    def do_dbus_register(self, connection, object_path):
+        # Register the sync-status service on the app's own bus name so the
+        # host Nautilus extension can query emblems / issue commands.
+        if not Adw.Application.do_dbus_register(self, connection, object_path):
+            return False
+        try:
+            from .core.dbus_service import SyncStatusService
+            from .modules.microsoft365.mounts import mount_root
+
+            self._sync_service = SyncStatusService(connection, mount_root())
+            self._sync_service.publish()
+        except Exception as exc:  # noqa: BLE001 - never block startup on the bus
+            print(f"[dbus] sync service not published: {exc}")
+        return True
+
+    def do_dbus_unregister(self, connection, object_path):
+        service = getattr(self, "_sync_service", None)
+        if service is not None:
+            service.unpublish()
+        Adw.Application.do_dbus_unregister(self, connection, object_path)
+
     def do_startup(self):
         Adw.Application.do_startup(self)
         # Discover modules now; activation happens per user settings.

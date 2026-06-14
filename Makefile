@@ -11,8 +11,10 @@ FLATPAK_DIR := _build/flatpak
 
 SCHEMA_DIR  := $(PREFIX)/share/glib-2.0/schemas
 
+NAUTILUS_EXT_DIR := $(HOME)/.local/share/nautilus-python/extensions
+
 .PHONY: all bootstrap setup build install run clean distclean \
-        flatpak flatpak-run lint test
+        flatpak flatpak-run lint test install-nautilus uninstall-nautilus
 
 all: build
 
@@ -48,6 +50,19 @@ flatpak:
 ## Run the installed Flatpak
 flatpak-run:
 	flatpak run $(APP_ID)
+
+## Install the host-side Nautilus extension (runs outside the sandbox)
+install-nautilus:
+	mkdir -p "$(NAUTILUS_EXT_DIR)"
+	cp nautilus-extension/clouddrive_nautilus.py "$(NAUTILUS_EXT_DIR)/"
+	-nautilus -q
+	@echo "Installed. Nautilus will reload the extension on next start."
+
+## Remove the host-side Nautilus extension
+uninstall-nautilus:
+	rm -f "$(NAUTILUS_EXT_DIR)/clouddrive_nautilus.py"
+	rm -rf "$(NAUTILUS_EXT_DIR)/__pycache__"
+	-nautilus -q
 
 ## Lint the Python sources
 lint:

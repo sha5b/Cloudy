@@ -32,5 +32,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bookmark), network-drive style; "Open in Files". Backend auto-detected with a
   clear prompt to install rclone/onedriver when absent. Sign-in now requests
   Files scopes so file access works without a second consent.
+- Nautilus integration: the app exports a D-Bus sync-status service
+  (`com.fiberelements.Clouddrive` `…/Sync`) registered on its own bus name; the
+  host `nautilus-python` (API 4.0) extension draws sync emblems (InfoProvider)
+  and adds right-click Copy share link / Free up space / Sync this folder
+  (MenuProvider) via D-Bus. Install with `make install-nautilus`.
 
 [Unreleased]: https://github.com/sha5b/Clouddrive-Fedora

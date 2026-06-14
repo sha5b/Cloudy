@@ -34,11 +34,16 @@ Staged plan. Each stage is independently useful and testable on Fedora 44.
   `onedrive --create-share-link`.
 - Host user systemd units for the mount/sync daemons.
 
-## Stage 4 — Nautilus integration (the extras)
-- `nautilus-python` (API 4.0) `MenuProvider` + `InfoProvider` layered on the
-  mount: sync-status emblems and right-click *Free up space / Copy share link /
-  Sync this folder*.
-- Extension talks to the app's D-Bus status service.
+## Stage 4 — Nautilus integration (the extras) ✅
+- App exports a **D-Bus sync-status service** (`com.fiberelements.Clouddrive`,
+  `…/Sync`): `StatusForPath`, `SyncPath`, `FreeUpSpace`, `CreateShareLink`,
+  `StatusChanged`.
+- `nautilus-python` (API 4.0) `InfoProvider` draws emblems and `MenuProvider`
+  adds *Copy share link / Free up space / Sync this folder*, all via D-Bus
+  (best-effort; silent when the app is not running).
+- Install with `make install-nautilus`.
+- Remaining: `CreateShareLink`/`FreeUpSpace`/`SyncPath` are accepted but their
+  effects land with the live mount/sync wiring (stage 5).
 
 ## Stage 5 — Full sync mode (offline copies)
 - Add `abraunegg/onedrive` selective sync as the opt-in alternative to mounting
