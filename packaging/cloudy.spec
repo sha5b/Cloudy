@@ -108,6 +108,7 @@ meson test -C %{_vpath_builddir} --print-errorlogs
 %if "%{?ms_client_id}%{?google_client_id}%{?google_client_secret}" != ""
 %{_datadir}/glib-2.0/schemas/90_%{appid}.gschema.override
 %endif
+%{_datadir}/nautilus-python/extensions/cloudy_nautilus.py
 %{_datadir}/icons/hicolor/scalable/apps/%{appid}.svg
 %{_datadir}/icons/hicolor/symbolic/apps/%{appid}-symbolic.svg
 %{_datadir}/icons/hicolor/*/apps/%{appid}.png

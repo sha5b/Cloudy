@@ -175,14 +175,15 @@ class FilesView(Adw.Bin):
             row.set_subtitle(esc(_("Mounted · click to browse")))
             button.set_icon_name("media-eject-symbolic")
             button.set_tooltip_text(_("Unmount"))
-            # Icon-only eject reads best flat; the Mount CTA stays a solid pill.
-            button.add_css_class("flat")
             button.connect("clicked", lambda *_: self._unmount(lib))
         else:
             row.set_subtitle(esc(lib["subtitle"]))
             button.set_label(_("Mount"))
             button.add_css_class("suggested-action")
             button.connect("clicked", lambda *_: self._mount(lib))
+        # Flat on both: a subtle accent "Mount" and a quiet eject icon (the solid
+        # pill was too loud in the sidebar).
+        button.add_css_class("flat")
         row.add_suffix(button)
         entry[1] = button
 

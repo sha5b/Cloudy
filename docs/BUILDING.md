@@ -63,6 +63,24 @@ flatpak run io.github.sha5b.Clouddrive
 GNOME Builder: *Open Project* → it detects `io.github.sha5b.Clouddrive.yml`
 and the Run button builds & launches the Flatpak.
 
+### Flatpak & file mounts (host-visible)
+
+A FUSE mount made *inside* the sandbox is invisible to the host file manager, so
+in Flatpak the app runs rclone **on the host** via `flatpak-spawn --host` and
+mounts into the real host `~/.local/share/cloudy/mounts` (shared into the sandbox
+via `--filesystem`). The mount then shows in the host's Nautilus and the Flatpak
+reads it through mount propagation. This needs two broad permissions in the
+manifest:
+
+- `--talk-name=org.freedesktop.Flatpak` — run host commands (rclone/fusermount).
+- `--filesystem=~/.local/share/cloudy` and `~/.config/gtk-3.0` — the mount dir
+  and the Nautilus sidebar-bookmark file.
+
+> Note: `--talk-name=org.freedesktop.Flatpak` is effectively host access and
+> would be flagged by Flathub review. It's the price of host-visible FUSE mounts;
+> the **RPM/host install** avoids the question entirely (it *is* the host).
+> rclone is bundled in the Flatpak and copied to the host dir on first mount.
+
 ## Option B — Meson into a prefix (fast iteration)
 
 Needs the host to provide GTK4, Libadwaita and PyGObject (Fedora 44 does).
@@ -154,14 +172,20 @@ sudo dnf install rclone              # optional, VFS mount
 # onedriver: see https://github.com/jstaf/onedriver (COPR / build from source)
 ```
 
-The Nautilus extension also lives on the host:
+The Nautilus extension also lives on the host, but is now **installed
+automatically** (needs `nautilus-python` present — `sudo dnf install
+nautilus-python`):
 
-```bash
-sudo dnf install nautilus-python     # python3-nautilus (API 4.0 / GTK4)
-# then install nautilus-extension/cloudy_nautilus.py into
-#   ~/.local/share/nautilus-python/extensions/
-nautilus -q   # restart Nautilus to load it
-```
+- **RPM:** packaged to `/usr/share/nautilus-python/extensions/`; `dnf remove`
+  deletes it.
+- **Flatpak:** the app copies the bundled extension to
+  `~/.local/share/nautilus-python/extensions/` on first run (the sandbox can't
+  write it at build time). `flatpak uninstall` can't remove it — the purge
+  script (`scripts/uninstall-cloudy.sh --purge`) does.
+- **Dev (`make`):** `make install-nautilus` / `make uninstall-nautilus`.
+
+Run `nautilus -q` once after first install so Nautilus loads it. It adds an
+**Unmount (Cloudy)** item when you right-click inside a mounted library.
 
 ## Troubleshooting
 

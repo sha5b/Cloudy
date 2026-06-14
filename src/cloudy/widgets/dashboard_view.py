@@ -41,7 +41,10 @@ class DashboardView(Adw.Bin):
         # -- left pane: section switcher with counts ---------------------
         self._list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
         self._list.add_css_class("navigation-sidebar")
-        self._list.connect("row-activated", self._on_section_activated)
+        # Selection (not activation): single-click on a navigation-sidebar row
+        # fires row-selected; the rows aren't activatable so row-activated never
+        # fired and the view never switched.
+        self._list.connect("row-selected", self._on_section_selected)
         sidebar_tb = Adw.ToolbarView()
         sidebar_tb.add_top_bar(Adw.HeaderBar(
             show_start_title_buttons=False, show_end_title_buttons=False,
@@ -118,11 +121,20 @@ class DashboardView(Adw.Bin):
             if key == self._section:
                 self._list.select_row(row)
 
-    def _on_section_activated(self, _list, row) -> None:
+    def _on_section_selected(self, _list, row) -> None:
+        if row is None:
+            return
         section = getattr(row, "_section", None)
         if section and section != self._section:
             self._section = section
             self._render_section()
+
+    def _goto(self, section: str) -> None:
+        """Jump to a section (e.g. from a clicked stat card) by selecting its
+        sidebar row, which drives _on_section_selected."""
+        row = self._section_rows.get(section)
+        if row is not None:
+            self._list.select_row(row)
 
     def _set_badge(self, key: str, count: int) -> None:
         row = self._section_rows.get(key)
@@ -228,9 +240,33 @@ class DashboardView(Adw.Bin):
         }.get(self._section, self._build_today)
         self._content.set_child(builder())
 
-    def _page(self) -> tuple[Adw.PreferencesPage, callable]:
-        page = Adw.PreferencesPage()
-        return page, page.add
+    def _section_page(self) -> tuple[Gtk.Widget, callable]:
+        """A full-width scrolling section (vs. Adw.PreferencesPage, which clamps
+        content to a narrow centred column). Returns (scroller, add_group)."""
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18,
+                      margin_top=18, margin_bottom=18, margin_start=24, margin_end=24)
+        scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                      vexpand=True, child=box)
+        return scroller, box.append
+
+    @staticmethod
+    def _by_account(pairs: list) -> list:
+        """Group (account, item) pairs by account, preserving first-seen order."""
+        groups: dict = {}
+        order: list = []
+        for account, item in pairs:
+            if account.id not in groups:
+                groups[account.id] = (account, [])
+                order.append(account.id)
+            groups[account.id][1].append(item)
+        return [groups[aid] for aid in order]
+
+    def _account_group(self, account, *, subtitle: str = "") -> Adw.PreferencesGroup:
+        from .format import esc
+        g = Adw.PreferencesGroup(title=esc(account.display_name))
+        if subtitle:
+            g.set_description(esc(subtitle))
+        return g
 
     def _build_today(self) -> Gtk.Widget:
         events = self._data.get("events", [])
@@ -242,17 +278,18 @@ class DashboardView(Adw.Bin):
         mounted = self._data.get("mounted", 0)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18,
-                      margin_top=18, margin_bottom=18, margin_start=18, margin_end=18)
+                      margin_top=18, margin_bottom=18, margin_start=24, margin_end=24)
 
-        # Stat cards.
+        # Stat cards (clickable → jump to the matching section).
         stats = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12,
                         homogeneous=True)
-        stats.append(self._stat(unread, _("Unread"), "mail-unread-symbolic"))
+        stats.append(self._stat(unread, _("Unread"), "mail-unread-symbolic", "mail"))
         stats.append(self._stat(events_today, _("Events today"),
-                                "x-office-calendar-symbolic"))
+                                "x-office-calendar-symbolic", "calendar"))
         stats.append(self._stat(len(self._data.get("files", [])), _("File changes"),
-                                "document-open-recent-symbolic"))
-        stats.append(self._stat(mounted, _("Mounted"), "folder-remote-symbolic"))
+                                "document-open-recent-symbolic", "files"))
+        stats.append(self._stat(mounted, _("Mounted"), "folder-remote-symbolic",
+                                "files"))
         box.append(stats)
 
         # Next event highlight.
@@ -273,87 +310,148 @@ class DashboardView(Adw.Bin):
         return Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER,
                                   vexpand=True, child=box)
 
-    def _build_calendar(self) -> Gtk.Widget:
-        page, add = self._page()
-        group = Adw.PreferencesGroup(title=_("Next 7 days"))
+    def _pinned_group(self, add, *, kind: str) -> None:
+        """Prepend a Pinned group (filtered to ``kind``: mail|calendar) so the
+        starred shared/team sources stay in view on the relevant tab."""
+        pins = [(a, p, d) for a, p, d in self._data.get("pinned", [])
+                if p.get("kind") == kind]
+        if not pins:
+            return
+        group = Adw.PreferencesGroup(title=_("Pinned"))
+        for account, pin, detail in pins:
+            group.add(self._pinned_row(account, pin, detail))
         add(group)
+
+    def _build_calendar(self) -> Gtk.Widget:
+        scroller, add = self._section_page()
+        self._pinned_group(add, kind="calendar")
         events = self._data.get("events", [])
         if not events:
-            group.add(Adw.ActionRow(title=_("No upcoming events.")))
-        last_day = None
-        for account, ev in events:
-            day = (ev.get("start", "") or "").partition("T")[0]
-            if day != last_day:
-                group = Adw.PreferencesGroup(title=_pretty_day(day))
-                add(group)
-                last_day = day
-            group.add(self._event_row(account, ev))
-        return page
+            empty = Adw.PreferencesGroup()
+            empty.add(Adw.ActionRow(title=_("No upcoming events.")))
+            add(empty)
+            return scroller
+        # Categorised by account; events within an account stay time-ordered.
+        for account, evs in self._by_account(events):
+            group = self._account_group(account)
+            for ev in evs:
+                group.add(self._event_row(account, ev))
+            add(group)
+        return scroller
 
     def _build_mail(self) -> Gtk.Widget:
-        page, add = self._page()
-        group = Adw.PreferencesGroup(title=_("Across all accounts"))
-        add(group)
+        scroller, add = self._section_page()
+        self._pinned_group(add, kind="mail")
         messages = self._data.get("messages", [])
         if not messages:
-            group.add(Adw.ActionRow(title=_("No recent mail.")))
-        for account, msg in messages[:40]:
-            group.add(self._mail_row(account, msg))
-        return page
+            empty = Adw.PreferencesGroup()
+            empty.add(Adw.ActionRow(title=_("No recent mail.")))
+            add(empty)
+            return scroller
+        for account, msgs in self._by_account(messages):
+            unread = sum(1 for m in msgs if not m.get("is_read", True))
+            group = self._account_group(
+                account, subtitle=_("%d unread") % unread if unread else "")
+            for msg in msgs[:40]:
+                group.add(self._mail_row(account, msg))
+            add(group)
+        return scroller
 
     def _build_files(self) -> Gtk.Widget:
-        page, add = self._page()
-        group = Adw.PreferencesGroup(
-            title=_("Recent changes"),
-            description=_("Newest edits in mounted or synced libraries."))
-        add(group)
+        scroller, add = self._section_page()
         files = self._data.get("files", [])
         if not files:
-            group.add(Adw.ActionRow(
+            empty = Adw.PreferencesGroup(
+                title=_("Recent changes"),
+                description=_("Newest edits in mounted or synced libraries."))
+            empty.add(Adw.ActionRow(
                 title=_("No recent changes"),
                 subtitle=_("Mount or sync a library to see activity here.")))
+            add(empty)
+            return scroller
+        # Categorised by the library (mount/sync folder) the file lives in.
+        from .format import esc
+        by_lib: dict = {}
+        order: list = []
         for f in files:
-            group.add(self._file_row(f))
-        return page
+            lib = self._file_library(f.get("path", ""))
+            if lib not in by_lib:
+                by_lib[lib] = []
+                order.append(lib)
+            by_lib[lib].append(f)
+        for lib in order:
+            group = Adw.PreferencesGroup(title=esc(lib or _("Files")))
+            for f in by_lib[lib]:
+                group.add(self._file_row(f))
+            add(group)
+        return scroller
+
+    def _file_library(self, path: str) -> str:
+        """The library (first path component under a mount/sync root) a file is
+        in, for grouping; falls back to the parent directory name."""
+        p = Path(path)
+        for root in self._scan_roots(self._accounts):
+            try:
+                rel = p.relative_to(root)
+            except ValueError:
+                continue
+            if rel.parts:
+                return rel.parts[0]
+        return p.parent.name
 
     def _build_pinned(self) -> Gtk.Widget:
-        page, add = self._page()
-        group = Adw.PreferencesGroup(
-            title=_("Pinned"),
-            description=_("Shared mailboxes and team calendars you starred."))
-        add(group)
+        scroller, add = self._section_page()
         pinned = self._data.get("pinned", [])
         if not pinned:
-            group.add(Adw.ActionRow(title=_("Nothing pinned yet.")))
-        for account, pin, detail in pinned:
-            group.add(self._pinned_row(account, pin, detail))
-        return page
+            empty = Adw.PreferencesGroup(
+                title=_("Pinned"),
+                description=_("Shared mailboxes and team calendars you starred."))
+            empty.add(Adw.ActionRow(title=_("Nothing pinned yet.")))
+            add(empty)
+            return scroller
+        for account, items in self._by_account([(a, (p, d)) for a, p, d in pinned]):
+            group = self._account_group(account)
+            for pin, detail in items:
+                group.add(self._pinned_row(account, pin, detail))
+            add(group)
+        return scroller
 
     # -- widgets ----------------------------------------------------------
-    def _stat(self, number, caption, icon) -> Gtk.Widget:
-        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2,
-                       margin_top=14, margin_bottom=14, margin_start=8, margin_end=8)
-        card.add_css_class("card")
+    def _stat(self, number, caption, icon, section: str | None = None) -> Gtk.Widget:
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6,
+                        margin_top=18, margin_bottom=18, margin_start=12,
+                        margin_end=12, halign=Gtk.Align.CENTER)
         img = Gtk.Image.new_from_icon_name(icon)
+        img.set_pixel_size(24)
         img.add_css_class("dim-label")
-        card.append(img)
+        inner.append(img)
         num = Gtk.Label(label=str(number))
         num.add_css_class("title-1")
-        card.append(num)
+        inner.append(num)
         cap = Gtk.Label(label=caption)
         cap.add_css_class("caption")
         cap.add_css_class("dim-label")
-        card.append(cap)
-        return card
+        inner.append(cap)
+        if section is None:
+            inner.add_css_class("card")
+            return inner
+        # Clickable: a flat card button that jumps to the matching section.
+        btn = Gtk.Button(child=inner)
+        btn.add_css_class("card")
+        btn.add_css_class("flat")
+        btn.set_tooltip_text(_("Open %s") % caption)
+        btn.connect("clicked", lambda *_: self._goto(section))
+        return btn
 
     def _next_event_card(self, pair) -> Gtk.Widget:
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14,
-                      margin_top=14, margin_bottom=14, margin_start=16, margin_end=16)
-        box.add_css_class("card")
+                      margin_top=16, margin_bottom=16, margin_start=16, margin_end=16)
         icon = Gtk.Image.new_from_icon_name("alarm-symbolic")
         icon.set_pixel_size(28)
+        icon.set_valign(Gtk.Align.CENTER)
         box.append(icon)
-        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True)
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3, hexpand=True,
+                       valign=Gtk.Align.CENTER)
         box.append(text)
         if pair is None:
             head = Gtk.Label(label=_("Nothing left today"), xalign=0)
@@ -362,6 +460,7 @@ class DashboardView(Adw.Bin):
             sub = Gtk.Label(label=_("Enjoy the quiet."), xalign=0)
             sub.add_css_class("dim-label")
             text.append(sub)
+            box.add_css_class("card")
             return box
         account, ev = pair
         head = Gtk.Label(label=ev.get("subject") or _("(no title)"), xalign=0,
@@ -371,10 +470,20 @@ class DashboardView(Adw.Bin):
         when = _rel_time(ev.get("start", ""))
         loc = ev.get("location")
         sub = " · ".join(x for x in (when, loc, account.display_name) if x)
-        sublbl = Gtk.Label(label=sub, xalign=0)
+        sublbl = Gtk.Label(label=sub, xalign=0, ellipsize=Pango.EllipsizeMode.END)
         sublbl.add_css_class("dim-label")
         text.append(sublbl)
-        return box
+        chevron = Gtk.Image.new_from_icon_name("go-next-symbolic")
+        chevron.add_css_class("dim-label")
+        chevron.set_valign(Gtk.Align.CENTER)
+        box.append(chevron)
+        # Clickable: open the account's calendar on the upcoming event.
+        btn = Gtk.Button(child=box)
+        btn.add_css_class("card")
+        btn.add_css_class("flat")
+        btn.connect("clicked",
+                    lambda *_: self._window.open_account_tab(account, "calendar"))
+        return btn
 
     def _preview_group(self, title, rows, empty) -> Gtk.Widget:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)

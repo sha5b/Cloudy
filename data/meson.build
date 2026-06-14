@@ -46,6 +46,16 @@ if appstream_util.found()
        args: ['validate', '--no-net', '--explain', metainfo_file])
 endif
 
+# --- Nautilus (python) extension --------------------------------------------
+# Installed to the system search path so an RPM/host install activates the
+# file-manager integration automatically (and `dnf remove` drops it). In the
+# Flatpak this lands at /app/share/...; the app copies it to the host on first
+# run (the sandbox can't write the host path at build time). See application.py.
+install_data(
+  '..' / 'nautilus-extension' / 'cloudy_nautilus.py',
+  install_dir: datadir / 'nautilus-python' / 'extensions',
+)
+
 # --- GSettings schema --------------------------------------------------------
 install_data(
   '@0@.gschema.xml'.format(application_id),

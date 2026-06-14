@@ -14,6 +14,9 @@ All D-Bus calls are best-effort: if the app is not running they fail quietly,
 so the extension never breaks the file manager.
 """
 
+import os
+import subprocess
+
 import gi
 
 # Nautilus loads its own typelib before importing us, and the version varies by
@@ -29,7 +32,7 @@ for _ver in ("4.1", "4.0"):
 from gi.repository import Gio, GLib, GObject, Nautilus  # noqa: E402
 
 BUS_NAME = "io.github.sha5b.Clouddrive"
-OBJECT_PATH = "/io.github.sha5b.Clouddrive/Sync"
+OBJECT_PATH = "/io/github/sha5b/Clouddrive/Sync"
 INTERFACE = "io.github.sha5b.Clouddrive.Sync"
 
 _DBUS_TIMEOUT_MS = 400
@@ -66,12 +69,47 @@ def _path_of(file):
     return location.get_path() if location else None
 
 
+def _cloudy_mountpoints():
+    """Set of currently-mounted Cloudy rclone mountpoints (read from the kernel
+    mount table — no dependency on the app running). A Cloudy mount is an
+    rclone FUSE mount living under a 'cloudy' path."""
+    points = set()
+    try:
+        with open("/proc/self/mountinfo", encoding="utf-8") as fh:
+            for line in fh:
+                # "... <mountpoint> ... - <fstype> <source> <opts>"
+                left, _sep, right = line.partition(" - ")
+                fields = left.split(" ")
+                if len(fields) <= 4 or not right:
+                    continue
+                fstype = right.split(" ")[0]
+                mp = (fields[4].replace("\\040", " ").replace("\\011", "\t")
+                      .replace("\\012", "\n").replace("\\134", "\\"))
+                if fstype.startswith("fuse") and "cloudy" in mp:
+                    points.add(mp)
+    except OSError:
+        pass
+    return points
+
+
 class CloudyMenuProvider(GObject.GObject, Nautilus.MenuProvider):
     """Right-click controls for Cloudy-managed files/folders."""
 
     def get_file_items(self, files):  # API 4.0: no window arg
         if not files:
             return []
+        # A single selected Cloudy mountpoint → offer a quick Unmount (the
+        # rclone FUSE equivalent of ejecting an external drive).
+        if len(files) == 1:
+            path = _path_of(files[0])
+            if path and path in _cloudy_mountpoints():
+                item = Nautilus.MenuItem(
+                    name="Cloudy::unmount",
+                    label="Unmount (Cloudy)",
+                    tip="Unmount this Cloudy network drive",
+                )
+                item.connect("activate", self._on_unmount, path)
+                return [item]
         # Only offer controls for managed paths.
         managed = [f for f in files if self._is_managed(_path_of(f))]
         if not managed:
@@ -94,6 +132,15 @@ class CloudyMenuProvider(GObject.GObject, Nautilus.MenuProvider):
 
     def get_background_items(self, folder):
         path = _path_of(folder)
+        # Right-clicking inside a mounted Cloudy drive → quick Unmount.
+        if path and path in _cloudy_mountpoints():
+            item = Nautilus.MenuItem(
+                name="Cloudy::unmount_bg",
+                label="Unmount (Cloudy)",
+                tip="Unmount this Cloudy network drive",
+            )
+            item.connect("activate", self._on_unmount, path)
+            return [item]
         if not self._is_managed(path):
             return []
         sync = Nautilus.MenuItem(
@@ -103,6 +150,29 @@ class CloudyMenuProvider(GObject.GObject, Nautilus.MenuProvider):
         )
         sync.connect("activate", self._on_sync_folder, folder)
         return [sync]
+
+    def _on_unmount(self, _menu, path):
+        # Host-side unmount (the mount lives in the host namespace). fusermount3
+        # on modern Fedora, fusermount as a fallback. Then drop the sidebar
+        # bookmark so it doesn't linger pointing at an empty folder.
+        if subprocess.run(["fusermount3", "-u", path]).returncode != 0:
+            subprocess.run(["fusermount", "-u", path], check=False)
+        self._remove_bookmark(path)
+
+    @staticmethod
+    def _remove_bookmark(path):
+        bookmarks = os.path.join(
+            GLib.get_user_config_dir(), "gtk-3.0", "bookmarks")
+        try:
+            with open(bookmarks, encoding="utf-8") as fh:
+                lines = fh.readlines()
+            uri = "file://" + GLib.Uri.escape_string(path, "/", False)
+            kept = [ln for ln in lines if ln.split(" ", 1)[0].rstrip("\n") != uri]
+            if len(kept) != len(lines):
+                with open(bookmarks, "w", encoding="utf-8") as fh:
+                    fh.writelines(kept)
+        except OSError:
+            pass
 
     # -- helpers ----------------------------------------------------------
     @staticmethod

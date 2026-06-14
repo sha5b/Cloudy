@@ -42,6 +42,34 @@ def resolve(binary: str) -> str | None:
     return str(local) if local.exists() and os.access(local, os.X_OK) else None
 
 
+def ensure_host_nautilus_extension(log=lambda _m: None) -> None:
+    """Install the Nautilus extension onto the HOST so the file manager loads it.
+
+    Only needed inside Flatpak: the host Nautilus can't read ``/app``, so we copy
+    the bundled extension to the host's per-user extensions dir (granted via
+    --filesystem). Outside Flatpak this is a no-op — the RPM/host install already
+    placed it on the system search path. Best-effort; never raises. (Flatpak
+    uninstall can't remove it; the uninstall script / purge does.)"""
+    if not os.path.exists("/.flatpak-info"):
+        return
+    src = Path("/app/share/nautilus-python/extensions/cloudy_nautilus.py")
+    if not src.exists():
+        return
+    dst = (Path.home() / ".local" / "share" / "nautilus-python"
+           / "extensions" / "cloudy_nautilus.py")
+    try:
+        # Compare CONTENT, not mtime: OSTree normalizes bundled file mtimes to a
+        # fixed value, so an mtime check would never detect an app update.
+        new = src.read_bytes()
+        if dst.exists() and dst.read_bytes() == new:
+            return
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(new)
+        log(f"Installed Nautilus extension to {dst}")
+    except OSError as exc:
+        log(f"Nautilus extension not installed: {exc}")
+
+
 def _rclone_arch() -> str:
     machine = platform.machine().lower()
     return {

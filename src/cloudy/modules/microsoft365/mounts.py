@@ -18,6 +18,7 @@ daemons run on the host (outside the Flatpak sandbox); see docs/ARCHITECTURE.md.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,7 +27,27 @@ from urllib.parse import quote
 from gi.repository import GLib
 
 
+def _in_flatpak() -> bool:
+    return os.path.exists("/.flatpak-info")
+
+
+def _host_prefix() -> list[str]:
+    """Argv prefix to run a command on the HOST instead of inside the sandbox.
+
+    Empty outside Flatpak. A FUSE mount made inside the sandbox lives in the
+    sandbox's private mount namespace and is invisible to the host file manager,
+    so in Flatpak we run rclone/fusermount on the host (needs the
+    ``org.freedesktop.Flatpak`` talk-name + ``--device=fuse``)."""
+    return ["flatpak-spawn", "--host"] if _in_flatpak() else []
+
+
 def _data_dir() -> Path:
+    # In Flatpak, mounts and the rclone config must live on a real HOST path
+    # (shared via --filesystem) so host-side rclone mounts there and the host
+    # file manager sees the drive. GLib.get_user_data_dir() is redirected into
+    # the sandbox, so use the real host XDG data dir under the (real) home.
+    if _in_flatpak():
+        return Path.home() / ".local" / "share" / "cloudy"
     return Path(GLib.get_user_data_dir()) / "cloudy"
 
 
@@ -72,7 +93,11 @@ def cache_mode() -> str:
 
 def _bookmarks_file() -> Path:
     # GTK 3 and 4 share this bookmarks file; Nautilus reads it for the sidebar.
-    return Path(GLib.get_user_config_dir()) / "gtk-3.0" / "bookmarks"
+    # In Flatpak, the HOST Nautilus reads the host file, so target the real host
+    # config dir (shared via --filesystem) rather than the sandbox-redirected one.
+    base = (Path.home() / ".config") if _in_flatpak() \
+        else Path(GLib.get_user_config_dir())
+    return base / "gtk-3.0" / "bookmarks"
 
 
 @dataclass
@@ -136,33 +161,82 @@ class MountManager:
 
         Stall-proof and reliable across sessions: parses ``/proc/self/mountinfo``
         directly, so it never stats (and never blocks on) a possibly-hung FUSE
-        mountpoint the way ``os.path.ismount`` would. Returns absolute paths."""
+        mountpoint the way ``os.path.ismount`` would. In Flatpak it reads the
+        HOST table (mounts run on the host), since the sandbox's own table
+        wouldn't show them. Returns absolute paths."""
+        if _in_flatpak():
+            try:
+                out = subprocess.run(
+                    [*_host_prefix(), "cat", "/proc/self/mountinfo"],
+                    capture_output=True, text=True, timeout=10).stdout
+            except (OSError, subprocess.SubprocessError):
+                out = ""
+            lines = out.splitlines()
+        else:
+            try:
+                with open("/proc/self/mountinfo", encoding="utf-8") as fh:
+                    lines = fh.readlines()
+            except OSError:
+                lines = []
         paths: set[str] = set()
-        try:
-            with open("/proc/self/mountinfo", encoding="utf-8") as fh:
-                for line in fh:
-                    fields = line.split(" ")
-                    if len(fields) > 4:
-                        # Field 5 is the mount point; mountinfo octal-escapes
-                        # space/tab/newline/backslash in paths.
-                        mp = (fields[4].replace("\\040", " ").replace("\\011", "\t")
-                              .replace("\\012", "\n").replace("\\134", "\\"))
-                        paths.add(mp)
-        except OSError:
-            pass
+        for line in lines:
+            fields = line.split(" ")
+            if len(fields) > 4:
+                # Field 5 is the mount point; mountinfo octal-escapes
+                # space/tab/newline/backslash in paths.
+                mp = (fields[4].replace("\\040", " ").replace("\\011", "\t")
+                      .replace("\\012", "\n").replace("\\134", "\\"))
+                paths.add(mp)
         return paths
 
     def is_mounted(self, mountpoint: Path) -> bool:
         return str(mountpoint) in self.active_mounts()
 
+    # -- host-aware rclone execution -------------------------------------
+    def _rclone_binary(self) -> str | None:
+        """Path to an rclone the mount command can execute. Outside Flatpak this
+        is the resolved/provisioned binary. Inside Flatpak the mount runs on the
+        host (flatpak-spawn), which can't see ``/app`` — so copy the bundled
+        static rclone once into the shared host dir and run that host-side path."""
+        if not _in_flatpak():
+            return RCLONE.path()
+        host_bin = _data_dir() / "bin" / "rclone"   # real host path (shared)
+        if not host_bin.exists():
+            bundled = RCLONE.path() or "/app/bin/rclone"
+            if not os.path.exists(bundled):
+                return None
+            host_bin.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(bundled, host_bin)
+            host_bin.chmod(0o755)
+        return str(host_bin)
+
+    def _rclone_argv(self, *args: str) -> list[str]:
+        """Full argv to run rclone, host-prefixed in Flatpak. Caller must have
+        checked ``_rclone_binary()`` is not None."""
+        return [*_host_prefix(), self._rclone_binary() or RCLONE.binary, *args]
+
     # -- rclone command construction (testable without running it) -------
     def rclone_mount_argv(self, remote: str, mountpoint: Path) -> list[str]:
-        return [
-            RCLONE.path() or RCLONE.binary, "mount", f"{remote}:", str(mountpoint),
+        # Tuned for: open-to-load, stay-cached, and auto-refresh on server change.
+        #   --vfs-cache-mode full  : download a file when opened, keep it on disk
+        #                            (random-access reads work — needed by most
+        #                            doc/PDF/office viewers; 'off'/'minimal' can
+        #                            otherwise read back empty/garbled).
+        #   --poll-interval 15s    : OneDrive/Drive change-polling — edits on the
+        #                            server show locally within ~15s.
+        #   --dir-cache-time 5m    : snappy listings; polling invalidates on change.
+        #   --vfs-cache-max-age 72h: keep opened files cached (instant re-open).
+        #   --vfs-read-chunk-size  : start serving large files fast, grow chunks.
+        return self._rclone_argv(
+            "mount", f"{remote}:", str(mountpoint),
             "--vfs-cache-mode", cache_mode(),
-            "--dir-cache-time", "30s",
+            "--dir-cache-time", "5m",
+            "--poll-interval", "15s",
+            "--vfs-cache-max-age", "72h",
+            "--vfs-read-chunk-size", "16M",
+            "--vfs-read-chunk-size-limit", "512M",
             "--daemon",
-        ]
+        )
 
     # -- two-way sync (rclone bisync) ------------------------------------
     def synced_dir_for(self, name: str) -> Path:
@@ -172,12 +246,12 @@ class MountManager:
                            resync: bool = False) -> list[str]:
         """rclone bisync argv. ``--resync`` establishes the baseline on the very
         first run; afterwards plain bisync propagates changes both ways."""
-        argv = [
-            RCLONE.path() or RCLONE.binary, "bisync", f"{remote}:", str(localdir),
+        argv = self._rclone_argv(
+            "bisync", f"{remote}:", str(localdir),
             "--create-empty-src-dirs",
             "--conflict-resolve", "newer",
             "--resilient",
-        ]
+        )
         if resync:
             argv.append("--resync")
         return argv
@@ -186,8 +260,7 @@ class MountManager:
         """Run a two-way sync for ``remote`` into its local folder. Resyncs once
         to seed the baseline (tracked by a marker), then bisyncs incrementally.
         Blocking — call off the UI thread. Returns the local directory."""
-        rc = RCLONE.path()
-        if not rc:
+        if not self._rclone_binary():
             raise RuntimeError("rclone is not available")
         localdir = self.synced_dir_for(name)
         localdir.mkdir(parents=True, exist_ok=True)
@@ -214,10 +287,10 @@ class MountManager:
         }.get(kind, "documentLibrary")
 
     def has_remote(self, remote: str) -> bool:
-        rc = RCLONE.path()
-        if not rc:
+        if not self._rclone_binary():
             return False
-        out = subprocess.run([rc, "listremotes"], capture_output=True, text=True)
+        out = subprocess.run(self._rclone_argv("listremotes"),
+                             capture_output=True, text=True)
         return f"{remote}:" in out.stdout.split()
 
     def authorize(self, backend: str, timeout: int = 300) -> str:
@@ -225,11 +298,10 @@ class MountManager:
         registration). Opens the system browser, waits for the redirect, and
         returns the token JSON blob. Blocking — call off the UI thread.
         """
-        rc = RCLONE.path()
-        if not rc:
+        if not self._rclone_binary():
             raise RuntimeError("rclone is not available")
         proc = subprocess.run(
-            [rc, "authorize", backend],
+            self._rclone_argv("authorize", backend),
             capture_output=True, text=True, timeout=timeout,
         )
         blob = (proc.stdout or "") + "\n" + (proc.stderr or "")
@@ -242,10 +314,9 @@ class MountManager:
         return blob[start : end + 1].strip()
 
     def create_remote(self, remote: str, backend: str, opts: dict) -> None:
-        rc = RCLONE.path()
-        if not rc:
+        if not self._rclone_binary():
             raise RuntimeError("rclone is not available")
-        args = [rc, "config", "create", remote, backend]
+        args = self._rclone_argv("config", "create", remote, backend)
         args += [f"{k}={v}" for k, v in opts.items()]
         args.append("--non-interactive")
         subprocess.run(args, check=True, capture_output=True, text=True)
@@ -262,9 +333,8 @@ class MountManager:
         })
 
     def delete_remote(self, remote: str) -> None:
-        rc = RCLONE.path()
-        if rc and self.has_remote(remote):
-            subprocess.run([rc, "config", "delete", remote], check=False)
+        if self._rclone_binary() and self.has_remote(remote):
+            subprocess.run(self._rclone_argv("config", "delete", remote), check=False)
 
     # -- mount / unmount --------------------------------------------------
     def mount(self, *, name: str, remote: str, backend: Backend | None = None,
@@ -292,8 +362,14 @@ class MountManager:
 
     def unmount(self, mountpoint: Path) -> None:
         if self.is_mounted(mountpoint):
-            # fusermount works for both rclone and onedriver FUSE mounts.
-            subprocess.run(["fusermount", "-u", str(mountpoint)], check=False)
+            # fusermount works for both rclone and onedriver FUSE mounts; run it
+            # on the host in Flatpak (the mount lives in the host namespace).
+            res = subprocess.run(
+                [*_host_prefix(), "fusermount3", "-u", str(mountpoint)],
+                capture_output=True, text=True)
+            if res.returncode != 0:
+                subprocess.run([*_host_prefix(), "fusermount", "-u", str(mountpoint)],
+                               check=False)
         self.remove_bookmark(mountpoint)
 
     # -- Nautilus sidebar bookmark ---------------------------------------

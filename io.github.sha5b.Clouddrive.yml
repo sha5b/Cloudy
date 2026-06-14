@@ -19,6 +19,17 @@ finish-args:
   # The sync/mount daemons and the Nautilus extension run on the HOST; the app
   # talks to them over the session bus.
   - --talk-name=io.github.sha5b.Clouddrive
+  # rclone FUSE mounts must run on the HOST (a mount made inside the sandbox is
+  # invisible to the host file manager), so the app spawns rclone via
+  # flatpak-spawn --host. This is a broad permission (host command execution);
+  # it is required for host-visible network drives.
+  - --talk-name=org.freedesktop.Flatpak
+  # Share the real host dirs the mounts + Nautilus sidebar bookmark live in, so
+  # host-side rclone mounts there and the host file manager shows the drive.
+  - --filesystem=~/.local/share/cloudy:create
+  - --filesystem=~/.config/gtk-3.0:create
+  # So the app can install its host Nautilus extension on first run.
+  - --filesystem=~/.local/share/nautilus-python/extensions:create
   # Secrets use the Secret Service portal (per-app keyring) — no broad hole.
 
 cleanup:
