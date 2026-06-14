@@ -110,8 +110,8 @@ class ClouddriveWindow(Adw.ApplicationWindow):
 
     def _capability_placeholder(self, account, key, label) -> Gtk.Widget:
         # Signed-in surfaces get their real views.
-        if account.signed_in and account.provider == "microsoft":
-            if key == "files":
+        if account.signed_in:
+            if key == "files" and account.provider == "microsoft":
                 from .widgets.files_view import FilesView
 
                 return FilesView(self, account)
@@ -143,23 +143,33 @@ class ClouddriveWindow(Adw.ApplicationWindow):
 
     def _on_sign_in(self, account) -> None:
         app = self.get_application()
-        if account.provider != "microsoft":
+        if account.provider == "microsoft":
+            client_id = app.microsoft_client_id()
+            label = _("Microsoft")
+        elif account.provider == "google":
+            client_id = app.google_client_id()
+            label = _("Google")
+        else:
             self.add_toast(_("Sign-in for this provider arrives later."))
             return
 
-        client_id = app.microsoft_client_id()
         if not client_id:
             self.add_toast(
-                _("No Microsoft client ID configured — see docs/AUTH.md.")
+                _("No %s client ID configured — see docs/AUTH.md.") % label
             )
             return
 
         self.add_toast(_("Opening your browser to sign in…"))
+        worker = (
+            self._microsoft_sign_in_worker
+            if account.provider == "microsoft"
+            else self._google_sign_in_worker
+        )
         threading.Thread(
-            target=self._sign_in_worker, args=(account, client_id, app.secrets), daemon=True
+            target=worker, args=(account, client_id, app.secrets), daemon=True
         ).start()
 
-    def _sign_in_worker(self, account, client_id, secrets) -> None:
+    def _microsoft_sign_in_worker(self, account, client_id, secrets) -> None:
         from .core.auth.msal_graph import (
             GraphAuth,
             SCOPES_BASE,
@@ -175,10 +185,24 @@ class ClouddriveWindow(Adw.ApplicationWindow):
                 SCOPES_BASE + SCOPES_FILES + SCOPES_MAIL
             )
             try:
-                upn = GraphAuth.fetch_userprincipalname(result["access_token"])
+                ident = GraphAuth.fetch_userprincipalname(result["access_token"])
             except Exception:  # noqa: BLE001 - identity lookup is best-effort
-                upn = None
-            GLib.idle_add(self._on_sign_in_result, account, upn, None)
+                ident = None
+            GLib.idle_add(self._on_sign_in_result, account, ident, None)
+        except Exception as exc:  # noqa: BLE001 - surface any auth failure as a toast
+            GLib.idle_add(self._on_sign_in_result, account, None, str(exc))
+
+    def _google_sign_in_worker(self, account, client_id, secrets) -> None:
+        from .core.auth.google_oauth import GoogleAuth
+
+        try:
+            auth = GoogleAuth(client_id, secrets, account.id)
+            result = auth.sign_in_interactive()
+            try:
+                ident = GoogleAuth.fetch_email(result["access_token"])
+            except Exception:  # noqa: BLE001 - identity lookup is best-effort
+                ident = None
+            GLib.idle_add(self._on_sign_in_result, account, ident, None)
         except Exception as exc:  # noqa: BLE001 - surface any auth failure as a toast
             GLib.idle_add(self._on_sign_in_result, account, None, str(exc))
 

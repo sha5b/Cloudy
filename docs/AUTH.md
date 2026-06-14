@@ -74,11 +74,19 @@ users who prefer their own registration.
 
 ## Google (Gmail + Calendar)
 
+Same UX as Microsoft: **system browser + loopback + PKCE**, implemented directly
+on urllib (no Google SDKs). Tokens (access + refresh) stored in libsecret;
+`access_token` refreshes transparently. Configurable via the `google-client-id`
+setting / `CLOUDDRIVE_GOOGLE_CLIENT_ID` env.
+
+One-time setup for the project maintainer:
+
 1. Create a **Google Cloud project** and an **OAuth client** (Desktop app type).
 2. Enable the Gmail API and Google Calendar API.
-3. Scopes: `gmail.modify` (or finer), `calendar`, plus `openid email profile`.
-4. Use the loopback/installed-app OAuth flow; store the refresh token in
-   libsecret.
+3. Scopes (read-only for now): `gmail.readonly`, `calendar.readonly`, plus
+   `openid email profile`.
+4. The installed-app flow uses a loopback redirect (`http://localhost:<port>`)
+   with PKCE; the refresh token is kept in libsecret.
 
 ## Why not EWS / Evolution-EWS?
 

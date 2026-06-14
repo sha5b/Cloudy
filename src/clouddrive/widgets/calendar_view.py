@@ -37,10 +37,12 @@ class CalendarView(Adw.Bin):
 
         def worker():
             try:
-                from .graph_helper import build_graph_client
+                from .clients import build_account_client
 
-                graph = build_graph_client(self._window.get_application(), self._account)
-                events = graph.list_events(start_iso, end_iso)
+                client = build_account_client(
+                    self._window.get_application(), self._account
+                )
+                events = client.list_events(start_iso, end_iso)
                 GLib.idle_add(self._on_loaded, events, None)
             except Exception as exc:  # noqa: BLE001
                 GLib.idle_add(self._on_loaded, None, str(exc))

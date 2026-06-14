@@ -41,5 +41,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   markers) and a 7-day upcoming-events view, each loaded off the UI thread.
   Sign-in now requests Mail/Calendar scopes too, so one consent lights up
   Files, Mail and Calendar.
+- Gmail provider: Google browser sign-in (loopback + PKCE on urllib, no Google
+  SDKs), Gmail Inbox + Google Calendar via a GoogleClient normalized to the same
+  shape as Graph. Mail/Calendar views are now provider-agnostic (one factory
+  picks Microsoft or Google per account). `google-client-id` /
+  `CLOUDDRIVE_GOOGLE_CLIENT_ID` config.
 
 [Unreleased]: https://github.com/sha5b/Clouddrive-Fedora

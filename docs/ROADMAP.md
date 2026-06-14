@@ -53,8 +53,11 @@ Staged plan. Each stage is independently useful and testable on Fedora 44.
 - GraphClient: mail folders + Inbox messages, calendars + 7-day calendarView.
 - MailView (Inbox list, unread dot) and CalendarView (upcoming events) surfaces,
   loaded off the UI thread; sign-in requests Mail/Calendar scopes up front.
+- **Gmail provider** ✅: Google browser sign-in (loopback + PKCE, urllib),
+  Gmail Inbox + Google Calendar via a GoogleClient normalized to the same shape
+  as Graph; Mail/Calendar views are now provider-agnostic.
 - Still to do: message reading/compose, folder switching, free/busy via
-  `getSchedule`, contacts; then the **Gmail API**; optional `eds_reader`.
+  `getSchedule`, contacts; optional `eds_reader`.
 
 ## Stage 7 — Packaging & polish
 - Flatpak on Flathub; Background/autostart portal for the sync service.

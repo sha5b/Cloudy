@@ -30,10 +30,12 @@ class MailView(Adw.Bin):
     def _load_async(self) -> None:
         def worker():
             try:
-                from .graph_helper import build_graph_client
+                from .clients import build_account_client
 
-                graph = build_graph_client(self._window.get_application(), self._account)
-                messages = graph.list_messages("inbox", limit=25)
+                client = build_account_client(
+                    self._window.get_application(), self._account
+                )
+                messages = client.list_messages()
                 GLib.idle_add(self._on_loaded, messages, None)
             except Exception as exc:  # noqa: BLE001
                 GLib.idle_add(self._on_loaded, None, str(exc))
