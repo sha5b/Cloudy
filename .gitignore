@@ -1,3 +1,11 @@
+# Secrets — never commit. Real creds live in ~/.config/cloudy/secrets.env
+# (outside the repo). These patterns are a defensive backstop.
+secrets.env
+*.secret
+*.local
+credentials.json
+client_secret*.json
+
 # Build output
 /_build/
 /build/
