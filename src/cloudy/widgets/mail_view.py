@@ -30,7 +30,15 @@ class MailView(Adw.Bin):
         scrolled.set_child(clamp)
         self.set_child(scrolled)
 
-        self._set_placeholder(_("Loading mail…"))
+        self._has_data = False
+        self._cache_key = f"{account.id}:messages:inbox"
+        cached = self._window.get_application().cache.get(self._cache_key)
+        if cached is not None:
+            self._render(cached[0])  # show cached instantly
+            if cached[1]:
+                return  # fresh enough; skip the network round-trip
+        else:
+            self._set_placeholder(_("Loading mail…"))
         self._load_async()
 
     # -- helpers ----------------------------------------------------------
@@ -65,15 +73,22 @@ class MailView(Adw.Bin):
 
     def _on_loaded(self, messages, error) -> bool:
         if error:
-            self._set_placeholder(_("Couldn't load mail: %s") % error)
+            # Keep any cached list on screen; only surface errors if we have none.
+            if not self._has_data:
+                self._set_placeholder(_("Couldn't load mail: %s") % error)
             return False
+        self._window.get_application().cache.set(self._cache_key, messages)
+        self._render(messages)
+        return False
+
+    def _render(self, messages) -> None:
         if not messages:
             self._set_placeholder(_("Your inbox is empty."))
-            return False
+            return
         self._clear()
         for msg in messages:
             self._list.append(self._mail_row(msg))
-        return False
+        self._has_data = True
 
     # -- a single email row (plain Gtk.Labels: no markup parsing) ---------
     def _mail_row(self, msg) -> Gtk.ListBoxRow:

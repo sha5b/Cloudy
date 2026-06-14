@@ -137,14 +137,14 @@ class FilesView(Adw.Bin):
             row.remove(old_button)
 
         mounted = self._mounts.is_mounted(self._mounts.mountpoint_for(drive.name))
+        button = Gtk.Button(valign=Gtk.Align.CENTER)
         if mounted:
             row.set_subtitle(esc(_("Mounted · in the Files sidebar")))
-            button = Gtk.Button(label=_("Unmount"), valign=Gtk.Align.CENTER)
-            button.add_css_class("flat")
+            button.set_label(_("Unmount"))
             button.connect("clicked", lambda *_: self._unmount(drive))
         else:
             row.set_subtitle(esc(base_subtitle))
-            button = Gtk.Button(label=_("Mount"), valign=Gtk.Align.CENTER)
+            button.set_label(_("Mount"))
             button.add_css_class("suggested-action")
             button.connect("clicked", lambda *_: self._mount(drive))
         row.add_suffix(button)

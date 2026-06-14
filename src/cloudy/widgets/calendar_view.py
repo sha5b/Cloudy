@@ -25,10 +25,25 @@ class CalendarView(Adw.Bin):
             title=_("Upcoming"), description=_("Events in the next 7 days.")
         )
         self._page.add(self._group)
-        self._loading = Adw.ActionRow(title=_("Loading calendar…"))
-        self._group.add(self._loading)
+        self._rows: list = []
+        self._has_data = False
 
+        self._cache_key = f"{account.id}:events:7d"
+        cached = self._window.get_application().cache.get(self._cache_key)
+        if cached is not None:
+            self._render(cached[0])
+            if cached[1]:
+                return
+        else:
+            self._set_rows([Adw.ActionRow(title=_("Loading calendar…"))])
         self._load_async()
+
+    def _set_rows(self, rows) -> None:
+        for r in self._rows:
+            self._group.remove(r)
+        self._rows = list(rows)
+        for r in self._rows:
+            self._group.add(r)
 
     def _load_async(self) -> None:
         now = datetime.now(timezone.utc)
@@ -50,18 +65,21 @@ class CalendarView(Adw.Bin):
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_loaded(self, events, error) -> bool:
-        self._group.remove(self._loading)
         if error:
-            self._group.add(
-                Adw.ActionRow(title=_("Couldn't load calendar"), subtitle=error)
-            )
+            if not self._has_data:
+                self._set_rows([Adw.ActionRow(title=_("Couldn't load calendar"),
+                                              subtitle=error)])
             return False
-        if not events:
-            self._group.add(Adw.ActionRow(title=_("No events in the next 7 days.")))
-            return False
-        for event in events:
-            self._group.add(self._event_row(event))
+        self._window.get_application().cache.set(self._cache_key, events)
+        self._render(events)
         return False
+
+    def _render(self, events) -> None:
+        if not events:
+            self._set_rows([Adw.ActionRow(title=_("No events in the next 7 days."))])
+            return
+        self._set_rows([self._event_row(e) for e in events])
+        self._has_data = True
 
     def _event_row(self, event) -> Adw.ActionRow:
         from .format import esc

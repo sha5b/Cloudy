@@ -120,6 +120,9 @@ class CloudyWindow(Adw.ApplicationWindow):
         switcher.set_stack(stack)
         header.set_title_widget(switcher)
         header.pack_end(self._account_menu_button(account))
+        refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text=_("Refresh"))
+        refresh.connect("clicked", lambda *_: self._refresh_account(account))
+        header.pack_end(refresh)
 
         switcher_bar = Adw.ViewSwitcherBar()
         switcher_bar.set_stack(stack)
@@ -133,6 +136,10 @@ class CloudyWindow(Adw.ApplicationWindow):
         page = Adw.NavigationPage(title=account.display_name, tag=f"account:{account.id}")
         page.set_child(toolbar)
         self.content_nav.replace([page])
+
+    def _refresh_account(self, account) -> None:
+        self.get_application().cache.invalidate(prefix=account.id)
+        self._show_account(account)
 
     def _account_menu_button(self, account) -> Gtk.MenuButton:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=6,

@@ -8,6 +8,7 @@ from gettext import gettext as _
 from gi.repository import Adw, Gio, Gtk
 
 from .core.account_registry import AccountRegistry
+from .core.cache import MemoryCache
 from .core.plugin_engine import PluginEngine
 from .core.secrets import SecretStore
 from .window import CloudyWindow
@@ -29,6 +30,7 @@ class CloudyApplication(Adw.Application):
         self.secrets = SecretStore()
         self.registry = AccountRegistry(self.settings)
         self.engine = PluginEngine(self.settings)
+        self.cache = MemoryCache()
 
         self._setup_actions()
 
