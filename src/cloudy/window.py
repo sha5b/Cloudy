@@ -310,6 +310,10 @@ class CloudyWindow(Adw.ApplicationWindow):
         dialog.add_response("ok", _("OK"))
         dialog.present(self)
 
+    def push_content(self, page) -> None:
+        """Push a page into the content navigation stack (e.g. a mail message)."""
+        self.content_nav.push(page)
+
     def open_uri(self, uri: str) -> None:
         """Open a URI via the portal-aware launcher, on the main thread."""
         GLib.idle_add(lambda: (Gtk.show_uri(self, uri, 0), False)[1])

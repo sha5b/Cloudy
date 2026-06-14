@@ -104,13 +104,16 @@ class GoogleClient:
             received = datetime.fromtimestamp(
                 int(internal) / 1000, tz=timezone.utc
             ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        labels = msg.get("labelIds", [])
         return {
             "id": msg.get("id", ""),
             "subject": headers.get("subject", "(no subject)"),
             "from": headers.get("from", ""),
             "received": received,
             "preview": msg.get("snippet", ""),
-            "is_read": "UNREAD" not in msg.get("labelIds", []),
+            "is_read": "UNREAD" not in labels,
+            "important": "IMPORTANT" in labels,
+            "starred": "STARRED" in labels,
         }
 
     def get_message(self, message_id: str) -> dict:

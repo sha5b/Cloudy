@@ -55,24 +55,43 @@ class MailView(Adw.Bin):
         return False
 
     def _message_row(self, msg) -> Adw.ActionRow:
-        subtitle = msg["from"]
-        when = _format_when(msg.get("received", ""))
+        from .format import sender_name, short_time
+
+        subtitle = sender_name(msg.get("from", ""))
+        when = short_time(msg.get("received", ""))
         if when:
-            subtitle = f"{subtitle} · {when}"
-        row = Adw.ActionRow(title=msg["subject"] or _("(no subject)"), subtitle=subtitle)
+            subtitle = f"{subtitle} · {when}" if subtitle else when
+        row = Adw.ActionRow(title=msg.get("subject") or _("(no subject)"), subtitle=subtitle)
         row.set_title_lines(1)
         row.set_subtitle_lines(1)
-        # Unread messages get a leading accent dot.
+
+        # Leading read/unread indicator.
         if not msg.get("is_read", True):
             dot = Gtk.Image.new_from_icon_name("media-record-symbolic")
             dot.add_css_class("accent")
+            dot.set_tooltip_text(_("Unread"))
             row.add_prefix(dot)
+        else:
+            row.add_prefix(Gtk.Image.new_from_icon_name("mail-read-symbolic"))
+
+        # Trailing flags: important (!) and starred (★).
+        if msg.get("important"):
+            imp = Gtk.Image.new_from_icon_name("mail-mark-important-symbolic")
+            imp.set_tooltip_text(_("Important"))
+            row.add_suffix(imp)
+        if msg.get("starred"):
+            star = Gtk.Image.new_from_icon_name("starred-symbolic")
+            star.set_tooltip_text(_("Starred"))
+            row.add_suffix(star)
+
         row.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
         row.set_activatable(True)
         row.connect("activated", lambda *_: self._open_message(msg["id"]))
         return row
 
     def _open_message(self, message_id) -> None:
+        self._window.add_toast(_("Opening message…"))
+
         def worker():
             try:
                 from .clients import build_account_client
@@ -91,15 +110,7 @@ class MailView(Adw.Bin):
         if error:
             self._window.add_toast(_("Couldn't open message: %s") % error)
             return False
-        from .message_dialog import MessageDialog
+        from .message_view import make_message_page
 
-        MessageDialog(msg).present(self._window)
+        self._window.push_content(make_message_page(msg))
         return False
-
-
-def _format_when(iso: str) -> str:
-    # Graph returns e.g. "2026-06-14T09:30:00Z"; show "2026-06-14 09:30".
-    if not iso or "T" not in iso:
-        return iso
-    date, _, rest = iso.partition("T")
-    return f"{date} {rest[:5]}"

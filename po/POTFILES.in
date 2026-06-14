@@ -14,5 +14,5 @@ src/cloudy/core/auth/msal_graph.py
 src/cloudy/widgets/files_view.py
 src/cloudy/widgets/mail_view.py
 src/cloudy/widgets/calendar_view.py
-src/cloudy/widgets/message_dialog.py
+src/cloudy/widgets/message_view.py
 src/cloudy/widgets/dashboard_view.py

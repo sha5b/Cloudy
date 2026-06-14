@@ -119,7 +119,9 @@ class DashboardView(Adw.Bin):
         return row
 
     def _mail_row(self, account, msg) -> Adw.ActionRow:
-        subtitle = f"{msg.get('from', '')} · {account.display_name}"
+        from .format import sender_name
+
+        subtitle = f"{sender_name(msg.get('from', ''))} · {account.display_name}"
         row = Adw.ActionRow(title=msg.get("subject") or _("(no subject)"),
                             subtitle=subtitle)
         row.set_title_lines(1)
