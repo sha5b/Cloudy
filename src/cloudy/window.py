@@ -196,14 +196,15 @@ class CloudyWindow(Adw.ApplicationWindow):
             SCOPES_BASE,
             SCOPES_FILES,
             SCOPES_MAIL,
+            SCOPES_TEAMS,
         )
 
         try:
             auth = GraphAuth(client_id, secrets, account.id)
             # Request all capability scopes up front so a single consent covers
-            # Files, Mail and Calendar (silent tokens work for every surface).
+            # Files, Teams, Mail and Calendar (silent tokens work everywhere).
             result = auth.sign_in_interactive(
-                SCOPES_BASE + SCOPES_FILES + SCOPES_MAIL
+                SCOPES_BASE + SCOPES_FILES + SCOPES_TEAMS + SCOPES_MAIL
             )
             try:
                 ident = GraphAuth.fetch_userprincipalname(result["access_token"])

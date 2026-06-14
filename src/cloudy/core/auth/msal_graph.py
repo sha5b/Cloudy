@@ -27,6 +27,8 @@ GRAPH_ME = "https://graph.microsoft.com/v1.0/me"
 SCOPES_BASE = ["User.Read"]
 SCOPES_FILES = ["Files.ReadWrite.All", "Sites.ReadWrite.All"]
 SCOPES_MAIL = ["Mail.ReadWrite", "Calendars.ReadWrite", "Contacts.ReadWrite"]
+# Enumerate the Teams the user belongs to (each Team's files = a doc library).
+SCOPES_TEAMS = ["Team.ReadBasic.All"]
 
 _CACHE_KIND = "msal-cache"
 

@@ -19,7 +19,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
-from ...core.auth.msal_graph import SCOPES_FILES, SCOPES_MAIL
+from ...core.auth.msal_graph import SCOPES_FILES, SCOPES_MAIL, SCOPES_TEAMS
 
 BASE_URL = "https://graph.microsoft.com/v1.0"
 
@@ -113,6 +113,28 @@ class GraphClient:
             drive.site_id = site_id
             drives.append(drive)
         return drives
+
+    def list_teams(self) -> list[Drive]:
+        """Each Team the user belongs to, as its default document library (drive).
+
+        We mount at the **team level** (the team's Files root), not channels or
+        subfolders. Requires the Team.ReadBasic.All scope.
+        """
+        data = self._get("/me/joinedTeams", SCOPES_TEAMS)
+        out = []
+        for team in data.get("value", []):
+            team_id = team.get("id")
+            if not team_id:
+                continue
+            try:
+                d = self._get(f"/groups/{team_id}/drive", SCOPES_FILES)
+            except GraphError:
+                continue  # some teams have no provisioned files / no access
+            drive = self._drive_from_json(d)
+            drive.name = team.get("displayName", drive.name)  # show the TEAM name
+            drive.kind = "team"
+            out.append(drive)
+        return out
 
     def create_share_link(self, drive_id: str, item_id: str, *, editable: bool = False) -> str:
         body = {"type": "edit" if editable else "view", "scope": "organization"}

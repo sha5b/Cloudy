@@ -24,6 +24,9 @@ class OneDriveFiles:
     def list_drives(self) -> list:
         return self._graph.list_drives()
 
+    def list_teams(self) -> list:
+        return self._graph.list_teams()
+
     def search_sites(self, query: str) -> list:
         return self._graph.search_sites(query)
 
