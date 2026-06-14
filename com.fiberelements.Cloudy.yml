@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Fiber Elements
 #
-# Flatpak manifest for Clouddrive. Targets the GNOME 50 runtime (Fedora 44).
+# Flatpak manifest for Cloudy. Targets the GNOME 50 runtime (Fedora 44).
 # Build:  flatpak-builder --user --install --force-clean _build/flatpak \
-#             com.fiberelements.Clouddrive.yml
+#             com.fiberelements.Cloudy.yml
 
-id: com.fiberelements.Clouddrive
+id: com.fiberelements.Cloudy
 runtime: org.gnome.Platform
 runtime-version: '50'
 sdk: org.gnome.Sdk
-command: clouddrive
+command: cloudy
 
 finish-args:
   - --share=network
@@ -18,7 +18,7 @@ finish-args:
   - --device=dri
   # The sync/mount daemons and the Nautilus extension run on the HOST; the app
   # talks to them over the session bus.
-  - --talk-name=com.fiberelements.Clouddrive
+  - --talk-name=com.fiberelements.Cloudy
   # Secrets use the Secret Service portal (per-app keyring) — no broad hole.
 
 cleanup:
@@ -64,7 +64,7 @@ modules:
       - pip3 install --prefix=/app --no-build-isolation msal
     # Stage 6 adds: google-auth-oauthlib google-api-python-client
 
-  - name: clouddrive
+  - name: cloudy
     buildsystem: meson
     sources:
       - type: dir

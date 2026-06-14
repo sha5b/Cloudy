@@ -5,12 +5,12 @@
 The app publishes per-path sync status (and accepts commands like
 "sync this folder" / "free up space" / "copy share link") on the session bus,
 under the application's own bus name. The host Nautilus extension
-(clouddrive_nautilus.py) calls this to draw emblems and menu items.
+(cloudy_nautilus.py) calls this to draw emblems and menu items.
 
 Status values returned by StatusForPath:
-  * "synced"   — path is inside an active Clouddrive mount
+  * "synced"   — path is inside an active Cloudy mount
   * "offline"  — path is a managed mount that is not currently mounted
-  * "ignored"  — path is not managed by Clouddrive (no emblem / no menu)
+  * "ignored"  — path is not managed by Cloudy (no emblem / no menu)
 """
 
 from __future__ import annotations
@@ -21,13 +21,13 @@ from typing import Callable, Optional
 
 from gi.repository import Gio, GLib
 
-BUS_NAME = "com.fiberelements.Clouddrive"
-OBJECT_PATH = "/com/fiberelements/Clouddrive/Sync"
-INTERFACE = "com.fiberelements.Clouddrive.Sync"
+BUS_NAME = "com.fiberelements.Cloudy"
+OBJECT_PATH = "/com/fiberelements/Cloudy/Sync"
+INTERFACE = "com.fiberelements.Cloudy.Sync"
 
 INTROSPECTION_XML = """
 <node>
-  <interface name="com.fiberelements.Clouddrive.Sync">
+  <interface name="com.fiberelements.Cloudy.Sync">
     <method name="StatusForPath">
       <arg type="s" name="path" direction="in"/>
       <arg type="s" name="status" direction="out"/>
@@ -55,7 +55,7 @@ INTROSPECTION_XML = """
 class SyncStatusService:
     """Registers the Sync object on an existing D-Bus connection.
 
-    ``mount_root`` is the directory holding Clouddrive mounts; status is derived
+    ``mount_root`` is the directory holding Cloudy mounts; status is derived
     from it plus ``os.path.ismount``. ``share_link_fn(path, editable) -> str`` is
     optional and used for CreateShareLink.
     """

@@ -17,7 +17,7 @@ from ..modules.microsoft365.mounts import MountManager
 
 
 class FilesView(Adw.Bin):
-    __gtype_name__ = "ClouddriveFilesView"
+    __gtype_name__ = "CloudyFilesView"
 
     def __init__(self, window, account):
         super().__init__()

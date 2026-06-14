@@ -3,7 +3,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 SPDX-FileCopyrightText: 2026 Fiber Elements
 -->
 
-# Clouddrive
+# Cloudy
 
 A native **GTK4 / Libadwaita** super-app for Fedora that makes Microsoft
 **OneDrive for Business** (including Teams / SharePoint document libraries) easy
@@ -16,7 +16,7 @@ Google accounts.
 > service modules are stubs with documented interfaces — see
 > [docs/ROADMAP.md](docs/ROADMAP.md).
 
-Clouddrive does **not** reinvent sync engines. It *orchestrates* proven Linux
+Cloudy does **not** reinvent sync engines. It *orchestrates* proven Linux
 backends — [`abraunegg/onedrive`](https://github.com/abraunegg/onedrive),
 [`onedriver`](https://github.com/jstaf/onedriver), and `rclone` — behind one
 adaptive, GNOME-native UI inspired by [Alpaca](https://github.com/Jeffser/Alpaca).
@@ -66,6 +66,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and our [CODE_OF_CONDUCT.md](CODE_OF_COND
 
 ## License
 
-Clouddrive is free software, licensed under the **GNU General Public License
+Cloudy is free software, licensed under the **GNU General Public License
 v3.0 or later**. See [COPYING](COPYING). Each source file carries an SPDX
 identifier.

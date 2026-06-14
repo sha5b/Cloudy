@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Fiber Elements
 
-moduledir = pkgdatadir / 'clouddrive'
+moduledir = pkgdatadir / 'cloudy'
 
-# Configured launcher script installed as `clouddrive` on PATH.
+# Configured launcher script installed as `cloudy` on PATH.
 conf = configuration_data()
 conf.set('PYTHON', python.full_path())
 conf.set('VERSION', meson.project_version())
@@ -12,8 +12,8 @@ conf.set('localedir', localedir)
 conf.set('pkgdatadir', pkgdatadir)
 
 configure_file(
-         input: 'clouddrive.in',
-        output: 'clouddrive',
+         input: 'cloudy.in',
+        output: 'cloudy',
   configuration: conf,
        install: true,
    install_dir: bindir,
@@ -21,4 +21,4 @@ configure_file(
 )
 
 # Install the Python package next to the GResource bundle.
-install_subdir('clouddrive', install_dir: pkgdatadir)
+install_subdir('cloudy', install_dir: pkgdatadir)

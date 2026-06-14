@@ -12,7 +12,7 @@ from gi.repository import Adw, GLib, Gtk
 
 
 class CalendarView(Adw.Bin):
-    __gtype_name__ = "ClouddriveCalendarView"
+    __gtype_name__ = "CloudyCalendarView"
 
     def __init__(self, window, account):
         super().__init__()

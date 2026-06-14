@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Fiber Elements
 
 # Architecture
 
-Clouddrive is a GNOME-native (GTK4 / Libadwaita) Python application that
+Cloudy is a GNOME-native (GTK4 / Libadwaita) Python application that
 **orchestrates** existing Linux backends rather than reimplementing sync or mail
 protocols. It is modeled on [Alpaca](https://github.com/Jeffser/Alpaca): pure
 Python (PyGObject), Meson build, Blueprint UI compiled into a GResource, packaged
@@ -16,7 +16,7 @@ class" module pattern.
 
 ```
                         ┌──────────────────────────────────────┐
-                        │  Clouddrive (Flatpak, sandboxed UI)    │
+                        │  Cloudy (Flatpak, sandboxed UI)    │
                         │                                        │
    Adw.NavigationSplitView ── sidebar (accounts / modules)       │
                         │   └─ content stack (Files/Mail/Cal)    │
@@ -42,11 +42,11 @@ services / host extensions) and has the sandboxed UI talk to them over **D-Bus**
 
 | Component | Where it runs | Language | Talks to |
 |---|---|---|---|
-| Clouddrive UI | Flatpak sandbox | Python / PyGObject | D-Bus, libsecret portal, Graph/Gmail HTTPS |
+| Cloudy UI | Flatpak sandbox | Python / PyGObject | D-Bus, libsecret portal, Graph/Gmail HTTPS |
 | `onedrive` (abraunegg) | host user systemd unit | D (binary) | OneDrive/SharePoint via Graph |
 | `onedriver` | host user systemd unit | Go (binary) | OneDrive via Graph (FUSE on-demand) |
 | `rclone` (optional) | host | Go (binary) | OneDrive via Graph (VFS mount) |
-| Nautilus extension | host | Python (`nautilus-python`) | Clouddrive D-Bus status service |
+| Nautilus extension | host | Python (`nautilus-python`) | Cloudy D-Bus status service |
 
 ## Layers inside the app
 
@@ -97,7 +97,7 @@ Reusable GTK4 subclasses (account rows, file rows, sync-status badges).
 ## Authentication UX
 
 Sign-in opens the user's **system browser** (auth-code + PKCE via a loopback
-redirect); no credentials touch the app, and tokens land in libsecret. Clouddrive
+redirect); no credentials touch the app, and tokens land in libsecret. Cloudy
 ships its own **multi-tenant client ID** so there is **no manual app
 registration** — one click → browser → consent → done. Device-code is the
 headless fallback. See [AUTH.md](AUTH.md).
@@ -113,7 +113,7 @@ shell code:
   mount`, or the GNOME OneDrive gvfs backend). Any GMount shows up in Nautilus's
   Network + sidebar **with no extra integration** — the same way GNOME Online
   Accounts' OneDrive appears today.
-- So the flow is: **select a Teams library in Clouddrive → we mount it → it
+- So the flow is: **select a Teams library in Cloudy → we mount it → it
   appears in the file manager.** On-demand (network-drive-like) is the default
   for Teams/SharePoint; full local sync (abraunegg) is the opt-in alternative.
 - The `nautilus-python` extension adds only the **extras** on top of that mount:

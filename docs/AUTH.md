@@ -11,10 +11,10 @@ Tokens are stored via **libsecret**, never in plaintext.
 
 ## Microsoft Graph (Entra ID app registration)
 
-> **For end users this is already done** — Clouddrive ships a multi-tenant
+> **For end users this is already done** — Cloudy ships a multi-tenant
 > client ID, so signing in is one click (browser → consent). The steps below are
 > only for the project maintainer registering that shared app, or for users who
-> set `CLOUDDRIVE_MS_CLIENT_ID` / the `microsoft-client-id` setting to their own.
+> set `CLOUDY_MS_CLIENT_ID` / the `microsoft-client-id` setting to their own.
 
 1. In the Microsoft Entra admin center, **register an application**; set
    **Supported account types** to *Accounts in any organizational directory and
@@ -40,7 +40,7 @@ through their **default web browser**:
 2. Open the system browser (via the **OpenURI portal** / `Gtk.UriLauncher`) at
    the provider's real consent page, with `redirect_uri` = that loopback URL.
 3. The user authenticates and consents in the browser (no credentials ever
-   touch Clouddrive).
+   touch Cloudy).
 4. The provider redirects to the loopback URL; the server captures the `code`,
    and MSAL exchanges it (with the PKCE verifier) for tokens.
 5. The loopback server shuts down; we show the account as signed in.
@@ -55,7 +55,7 @@ libsecret; refresh silently with `acquire_token_silent`. Always request
 
 ### One-click setup — we ship the client ID
 
-To avoid making users register an Azure/Google app, Clouddrive ships a single
+To avoid making users register an Azure/Google app, Cloudy ships a single
 **multi-tenant public client ID** owned by the project (the same pattern rclone,
 abraunegg, and GNOME Evolution use). Sign-in is then one click → browser →
 consent → done, with **no manual app registration**. The client ID is public by
@@ -77,7 +77,7 @@ users who prefer their own registration.
 Same UX as Microsoft: **system browser + loopback + PKCE**, implemented directly
 on urllib (no Google SDKs). Tokens (access + refresh) stored in libsecret;
 `access_token` refreshes transparently. Configurable via the `google-client-id`
-setting / `CLOUDDRIVE_GOOGLE_CLIENT_ID` env.
+setting / `CLOUDY_GOOGLE_CLIENT_ID` env.
 
 One-time setup for the project maintainer:
 
@@ -93,7 +93,7 @@ One-time setup for the project maintainer:
 Exchange Web Services soft-blocks for non-Microsoft apps on **2026-10-01** and is
 **fully retired 2027-04-01** ("no exceptions and no re-enablement"). Basic Auth
 was retired in 2022 and `ApplicationImpersonation` deprecated Feb 2025. Anything
-built on EWS has a hard expiry, so Clouddrive targets **Graph** for Exchange.
+built on EWS has a hard expiry, so Cloudy targets **Graph** for Exchange.
 
 ## Secret storage
 

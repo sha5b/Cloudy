@@ -11,7 +11,7 @@ from gi.repository import Adw, GLib, Gtk
 
 
 class MailView(Adw.Bin):
-    __gtype_name__ = "ClouddriveMailView"
+    __gtype_name__ = "CloudyMailView"
 
     def __init__(self, window, account):
         super().__init__()

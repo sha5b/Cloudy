@@ -15,7 +15,7 @@ from .core.account_registry import Account
 
 
 class AddAccountDialog(Adw.Dialog):
-    __gtype_name__ = "ClouddriveAddAccountDialog"
+    __gtype_name__ = "CloudyAddAccountDialog"
 
     def __init__(self, *, engine, registry, on_added=None):
         super().__init__(title=_("Add Account"), content_width=420)

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Fiber Elements
 """Self-provisioning of host backends the app needs (rootless).
 
-Clouddrive should "just work" without the user installing anything. For the
+Cloudy should "just work" without the user installing anything. For the
 shipped Flatpak the rclone binary is bundled at build time (/app/bin). For other
 installs, this module ensures rclone is available by downloading the official
 static binary into a user-writable dir — no sudo, no system package manager,
@@ -30,7 +30,7 @@ DOWNLOADS = "https://downloads.rclone.org"
 
 
 def deps_bin_dir() -> Path:
-    return Path(GLib.get_user_data_dir()) / "clouddrive" / "bin"
+    return Path(GLib.get_user_data_dir()) / "cloudy" / "bin"
 
 
 def resolve(binary: str) -> str | None:

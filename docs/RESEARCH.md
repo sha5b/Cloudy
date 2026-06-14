@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Fiber Elements
 
 # Research & rationale
 
-This file records the findings that shaped Clouddrive's design, with the
+This file records the findings that shaped Cloudy's design, with the
 **web-verified status as of June 2026**. It is the "why" behind
 [ARCHITECTURE.md](ARCHITECTURE.md).
 

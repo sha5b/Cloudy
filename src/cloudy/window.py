@@ -9,7 +9,7 @@ from gi.repository import Adw, Gio, GLib, Gtk
 
 from .core.interfaces import capabilities_of
 
-RESOURCE_PREFIX = "/com/fiberelements/Clouddrive"
+RESOURCE_PREFIX = "/com/fiberelements/Cloudy"
 
 # Capability key -> (translated label, symbolic icon).
 CAPABILITY_UI = {
@@ -20,8 +20,8 @@ CAPABILITY_UI = {
 
 
 @Gtk.Template(resource_path=f"{RESOURCE_PREFIX}/ui/window.ui")
-class ClouddriveWindow(Adw.ApplicationWindow):
-    __gtype_name__ = "ClouddriveWindow"
+class CloudyWindow(Adw.ApplicationWindow):
+    __gtype_name__ = "CloudyWindow"
 
     toast_overlay = Gtk.Template.Child()
     split_view = Gtk.Template.Child()
@@ -246,9 +246,9 @@ class ClouddriveWindow(Adw.ApplicationWindow):
         dialog = Adw.AlertDialog(
             heading=_("%s sign-in isn’t set up yet") % provider_label,
             body=_(
-                "Clouddrive needs a %s app ID before it can open the sign-in "
+                "Cloudy needs a %s app ID before it can open the sign-in "
                 "page. This is a one-time setup by whoever builds the app — set "
-                "CLOUDDRIVE_MS_CLIENT_ID / CLOUDDRIVE_GOOGLE_CLIENT_ID or the "
+                "CLOUDY_MS_CLIENT_ID / CLOUDY_GOOGLE_CLIENT_ID or the "
                 "matching setting. See docs/AUTH.md."
             )
             % provider_label,

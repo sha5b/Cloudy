@@ -31,7 +31,7 @@ def _to_text(body: str) -> str:
 
 
 class MessageDialog(Adw.Dialog):
-    __gtype_name__ = "ClouddriveMessageDialog"
+    __gtype_name__ = "CloudyMessageDialog"
 
     def __init__(self, msg: dict):
         super().__init__(

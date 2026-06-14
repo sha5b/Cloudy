@@ -4,7 +4,7 @@
 # Convenience wrapper around Meson / Flatpak for reproducible builds.
 # See docs/BUILDING.md for details.
 
-APP_ID      := com.fiberelements.Clouddrive
+APP_ID      := com.fiberelements.Cloudy
 BUILDDIR    := _build
 PREFIX      := $(CURDIR)/_install
 FLATPAK_DIR := _build/flatpak
@@ -36,13 +36,13 @@ build:
 # copies but never deletes, so renamed/removed modules would otherwise linger
 # and be discovered as phantom providers.
 install: build
-	rm -rf "$(PREFIX)/share/clouddrive/clouddrive"
+	rm -rf "$(PREFIX)/share/cloudy/cloudy"
 	find src -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
 	meson install -C $(BUILDDIR)
 
 ## Build, install, and run locally (no sandbox)
 run: install
-	GSETTINGS_SCHEMA_DIR="$(SCHEMA_DIR)" $(PREFIX)/bin/clouddrive
+	GSETTINGS_SCHEMA_DIR="$(SCHEMA_DIR)" $(PREFIX)/bin/cloudy
 
 ## Run the Meson test suite (schema/desktop/metainfo validation)
 test: build
@@ -59,13 +59,13 @@ flatpak-run:
 ## Install the host-side Nautilus extension (runs outside the sandbox)
 install-nautilus:
 	mkdir -p "$(NAUTILUS_EXT_DIR)"
-	cp nautilus-extension/clouddrive_nautilus.py "$(NAUTILUS_EXT_DIR)/"
+	cp nautilus-extension/cloudy_nautilus.py "$(NAUTILUS_EXT_DIR)/"
 	-nautilus -q
 	@echo "Installed. Nautilus will reload the extension on next start."
 
 ## Remove the host-side Nautilus extension
 uninstall-nautilus:
-	rm -f "$(NAUTILUS_EXT_DIR)/clouddrive_nautilus.py"
+	rm -f "$(NAUTILUS_EXT_DIR)/cloudy_nautilus.py"
 	rm -rf "$(NAUTILUS_EXT_DIR)/__pycache__"
 	-nautilus -q
 

@@ -3,8 +3,8 @@
 """Module discovery and lifecycle.
 
 Stage 0 implementation: a simple dynamic-import registry over
-``clouddrive.modules``. Each module package exposes a module-level ``MODULE``
-class implementing :class:`~clouddrive.core.interfaces.ServiceModule`. This is
+``cloudy.modules``. Each module package exposes a module-level ``MODULE``
+class implementing :class:`~cloudy.core.interfaces.ServiceModule`. This is
 designed to migrate to libpeas-2 later without changing the interfaces; see
 docs/MODULES.md.
 """

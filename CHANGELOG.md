@@ -26,14 +26,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Browser-based Microsoft Graph sign-in (MSAL interactive: system browser +
   loopback PKCE), run off the UI thread; token cache persisted via libsecret;
   the Sign In button flips the account to signed-in and shows the user's UPN.
-  Client ID is configurable (`microsoft-client-id` setting / `CLOUDDRIVE_MS_CLIENT_ID`).
+  Client ID is configurable (`microsoft-client-id` setting / `CLOUDY_MS_CLIENT_ID`).
 - Files surface: enumerate OneDrive/SharePoint drives via Graph; mount a library
   (rclone/onedriver) so it appears in the Nautilus sidebar (auto-added GTK
   bookmark), network-drive style; "Open in Files". Backend auto-detected with a
   clear prompt to install rclone/onedriver when absent. Sign-in now requests
   Files scopes so file access works without a second consent.
 - Nautilus integration: the app exports a D-Bus sync-status service
-  (`com.fiberelements.Clouddrive` `…/Sync`) registered on its own bus name; the
+  (`com.fiberelements.Cloudy` `…/Sync`) registered on its own bus name; the
   host `nautilus-python` (API 4.0) extension draws sync emblems (InfoProvider)
   and adds right-click Copy share link / Free up space / Sync this folder
   (MenuProvider) via D-Bus. Install with `make install-nautilus`.
@@ -45,7 +45,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   SDKs), Gmail Inbox + Google Calendar via a GoogleClient normalized to the same
   shape as Graph. Mail/Calendar views are now provider-agnostic (one factory
   picks Microsoft or Google per account). `google-client-id` /
-  `CLOUDDRIVE_GOOGLE_CLIENT_ID` config.
+  `CLOUDY_GOOGLE_CLIENT_ID` config.
 - Message reading: open a mail row to read its body (HTML stripped to text).
 - Dashboard ("Overview"): merges every account's calendar into one 7-day
   timeline and lists recent mail across accounts (unread first), each labeled

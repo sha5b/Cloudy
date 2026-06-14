@@ -3,8 +3,8 @@
 SPDX-License-Identifier: GPL-3.0-or-later
 SPDX-FileCopyrightText: 2026 Fiber Elements
 -->
-<schemalist gettext-domain="clouddrive">
-  <schema id="com.fiberelements.Clouddrive" path="/com/fiberelements/Clouddrive/">
+<schemalist gettext-domain="cloudy">
+  <schema id="com.fiberelements.Cloudy" path="/com/fiberelements/Cloudy/">
 
     <key name="window-width" type="i">
       <default>900</default>
@@ -44,12 +44,12 @@ SPDX-FileCopyrightText: 2026 Fiber Elements
     </key>
 
     <key name="microsoft-client-id" type="s">
-      <default>''</default>
+      <default>'dcd8ee18-6e62-4c5a-b01f-86f9556f8fed'</default>
       <summary>Microsoft Entra (Azure AD) public client/application ID</summary>
       <description>
         OAuth public client ID for Microsoft Graph sign-in. Ships empty; set to
         the project's multi-tenant client ID, or override with the
-        CLOUDDRIVE_MS_CLIENT_ID environment variable. See docs/AUTH.md.
+        CLOUDY_MS_CLIENT_ID environment variable. See docs/AUTH.md.
       </description>
     </key>
 
@@ -58,7 +58,7 @@ SPDX-FileCopyrightText: 2026 Fiber Elements
       <summary>Google OAuth client ID</summary>
       <description>
         OAuth client ID for Gmail/Calendar sign-in (override env:
-        CLOUDDRIVE_GOOGLE_CLIENT_ID). See docs/AUTH.md.
+        CLOUDY_GOOGLE_CLIENT_ID). See docs/AUTH.md.
       </description>
     </key>
 
@@ -68,7 +68,7 @@ SPDX-FileCopyrightText: 2026 Fiber Elements
       <description>
         Google "Desktop app" OAuth clients include a non-confidential client
         secret used in the token exchange (override env:
-        CLOUDDRIVE_GOOGLE_CLIENT_SECRET). See docs/AUTH.md.
+        CLOUDY_GOOGLE_CLIENT_SECRET). See docs/AUTH.md.
       </description>
     </key>
 

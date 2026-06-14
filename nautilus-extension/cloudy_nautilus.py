@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Fiber Elements
-"""Clouddrive Nautilus extension (host-side, nautilus-python API 4.0 / GTK4).
+"""Cloudy Nautilus extension (host-side, nautilus-python API 4.0 / GTK4).
 
 Runs in the HOST Nautilus process (not the Flatpak sandbox). It talks to the
-Clouddrive app over D-Bus (com.fiberelements.Clouddrive, see
-clouddrive.core.dbus_service) to:
+Cloudy app over D-Bus (com.fiberelements.Cloudy, see
+cloudy.core.dbus_service) to:
   * draw per-file sync-status emblems (InfoProvider), and
   * add right-click controls (MenuProvider): Sync this folder / Free up space /
     Copy share link.
@@ -24,9 +24,9 @@ import gi
 gi.require_version("Nautilus", "4.0")
 from gi.repository import Gio, GLib, GObject, Nautilus  # noqa: E402
 
-BUS_NAME = "com.fiberelements.Clouddrive"
-OBJECT_PATH = "/com/fiberelements/Clouddrive/Sync"
-INTERFACE = "com.fiberelements.Clouddrive.Sync"
+BUS_NAME = "com.fiberelements.Cloudy"
+OBJECT_PATH = "/com/fiberelements/Cloudy/Sync"
+INTERFACE = "com.fiberelements.Cloudy.Sync"
 
 # Map service status -> Nautilus emblem name.
 _EMBLEMS = {
@@ -38,7 +38,7 @@ _DBUS_TIMEOUT_MS = 400
 
 
 def _proxy():
-    """Return a cached D-Bus proxy to the Clouddrive sync service, or None."""
+    """Return a cached D-Bus proxy to the Cloudy sync service, or None."""
     if not hasattr(_proxy, "_p"):
         try:
             _proxy._p = Gio.DBusProxy.new_for_bus_sync(
@@ -68,7 +68,7 @@ def _path_of(file):
     return location.get_path() if location else None
 
 
-class ClouddriveInfoProvider(GObject.GObject, Nautilus.InfoProvider):
+class CloudyInfoProvider(GObject.GObject, Nautilus.InfoProvider):
     """Per-file sync-status emblems."""
 
     def update_file_info(self, file):
@@ -84,8 +84,8 @@ class ClouddriveInfoProvider(GObject.GObject, Nautilus.InfoProvider):
         return Nautilus.OperationResult.COMPLETE
 
 
-class ClouddriveMenuProvider(GObject.GObject, Nautilus.MenuProvider):
-    """Right-click controls for Clouddrive-managed files/folders."""
+class CloudyMenuProvider(GObject.GObject, Nautilus.MenuProvider):
+    """Right-click controls for Cloudy-managed files/folders."""
 
     def get_file_items(self, files):  # API 4.0: no window arg
         if not files:
@@ -96,14 +96,14 @@ class ClouddriveMenuProvider(GObject.GObject, Nautilus.MenuProvider):
             return []
 
         copy_link = Nautilus.MenuItem(
-            name="Clouddrive::copy_share_link",
+            name="Cloudy::copy_share_link",
             label="Copy OneDrive Share Link",
-            tip="Create and copy a sharing link via Clouddrive",
+            tip="Create and copy a sharing link via Cloudy",
         )
         copy_link.connect("activate", self._on_copy_link, managed)
 
         free_space = Nautilus.MenuItem(
-            name="Clouddrive::free_up_space",
+            name="Cloudy::free_up_space",
             label="Free Up Space",
             tip="Remove the local copy; keep the file online",
         )
@@ -115,8 +115,8 @@ class ClouddriveMenuProvider(GObject.GObject, Nautilus.MenuProvider):
         if not self._is_managed(path):
             return []
         sync = Nautilus.MenuItem(
-            name="Clouddrive::sync_folder",
-            label="Sync This Folder with Clouddrive",
+            name="Cloudy::sync_folder",
+            label="Sync This Folder with Cloudy",
             tip="Mark this folder for synchronization",
         )
         sync.connect("activate", self._on_sync_folder, folder)

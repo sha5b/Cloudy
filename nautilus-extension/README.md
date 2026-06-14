@@ -3,11 +3,11 @@ SPDX-License-Identifier: GPL-3.0-or-later
 SPDX-FileCopyrightText: 2026 Fiber Elements
 -->
 
-# Clouddrive Nautilus extension
+# Cloudy Nautilus extension
 
 This extension runs **on the host**, inside the Nautilus process — Nautilus does
 not load extensions from inside a Flatpak sandbox. It communicates with the
-sandboxed Clouddrive app over **D-Bus** (`com.fiberelements.Clouddrive`).
+sandboxed Cloudy app over **D-Bus** (`com.fiberelements.Cloudy`).
 
 ## What it provides
 
@@ -25,7 +25,7 @@ sandboxed Clouddrive app over **D-Bus** (`com.fiberelements.Clouddrive`).
 
 ```bash
 mkdir -p ~/.local/share/nautilus-python/extensions
-cp clouddrive_nautilus.py ~/.local/share/nautilus-python/extensions/
+cp cloudy_nautilus.py ~/.local/share/nautilus-python/extensions/
 nautilus -q   # restart Nautilus so it reloads extensions
 ```
 

@@ -1,18 +1,18 @@
 # List of source files containing translatable strings.
 # Paths are relative to the project root.
-data/com.fiberelements.Clouddrive.desktop.in
-data/com.fiberelements.Clouddrive.metainfo.xml.in
+data/com.fiberelements.Cloudy.desktop.in
+data/com.fiberelements.Cloudy.metainfo.xml.in
 data/ui/window.blp
 data/ui/preferences.blp
-src/clouddrive/application.py
-src/clouddrive/window.py
-src/clouddrive/preferences.py
-src/clouddrive/account_dialog.py
-src/clouddrive/modules/microsoft365/module.py
-src/clouddrive/modules/gmail/__init__.py
-src/clouddrive/core/auth/msal_graph.py
-src/clouddrive/widgets/files_view.py
-src/clouddrive/widgets/mail_view.py
-src/clouddrive/widgets/calendar_view.py
-src/clouddrive/widgets/message_dialog.py
-src/clouddrive/widgets/dashboard_view.py
+src/cloudy/application.py
+src/cloudy/window.py
+src/cloudy/preferences.py
+src/cloudy/account_dialog.py
+src/cloudy/modules/microsoft365/module.py
+src/cloudy/modules/gmail/__init__.py
+src/cloudy/core/auth/msal_graph.py
+src/cloudy/widgets/files_view.py
+src/cloudy/widgets/mail_view.py
+src/cloudy/widgets/calendar_view.py
+src/cloudy/widgets/message_dialog.py
+src/cloudy/widgets/dashboard_view.py

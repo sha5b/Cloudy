@@ -10,10 +10,10 @@ from gi.repository import Adw, Gio, Gtk
 from .core.account_registry import AccountRegistry
 from .core.plugin_engine import PluginEngine
 from .core.secrets import SecretStore
-from .window import ClouddriveWindow
+from .window import CloudyWindow
 
 
-class ClouddriveApplication(Adw.Application):
+class CloudyApplication(Adw.Application):
     """Top-level application object."""
 
     def __init__(self, application_id: str, version: str):
@@ -34,18 +34,18 @@ class ClouddriveApplication(Adw.Application):
 
     # -- OAuth client ids (env override wins over GSettings) -------------
     def microsoft_client_id(self) -> str:
-        return os.environ.get("CLOUDDRIVE_MS_CLIENT_ID") or self.settings.get_string(
+        return os.environ.get("CLOUDY_MS_CLIENT_ID") or self.settings.get_string(
             "microsoft-client-id"
         )
 
     def google_client_id(self) -> str:
-        return os.environ.get("CLOUDDRIVE_GOOGLE_CLIENT_ID") or self.settings.get_string(
+        return os.environ.get("CLOUDY_GOOGLE_CLIENT_ID") or self.settings.get_string(
             "google-client-id"
         )
 
     def google_client_secret(self) -> str:
         return os.environ.get(
-            "CLOUDDRIVE_GOOGLE_CLIENT_SECRET"
+            "CLOUDY_GOOGLE_CLIENT_SECRET"
         ) or self.settings.get_string("google-client-secret")
 
     def _setup_actions(self) -> None:
@@ -108,7 +108,7 @@ class ClouddriveApplication(Adw.Application):
     def do_activate(self):
         window = self.props.active_window
         if not window:
-            window = ClouddriveWindow(application=self)
+            window = CloudyWindow(application=self)
         window.present()
 
     # -- Action handlers --------------------------------------------------
@@ -116,9 +116,9 @@ class ClouddriveApplication(Adw.Application):
         self.quit()
 
     def _on_preferences(self, *_args):
-        from .preferences import ClouddrivePreferences
+        from .preferences import CloudyPreferences
 
-        prefs = ClouddrivePreferences(engine=self.engine)
+        prefs = CloudyPreferences(engine=self.engine)
         prefs.present(self.props.active_window)
 
     def _on_add_account(self, *_args):
@@ -135,7 +135,7 @@ class ClouddriveApplication(Adw.Application):
 
     def _on_about(self, *_args):
         about = Adw.AboutDialog(
-            application_name=_("Clouddrive"),
+            application_name=_("Cloudy"),
             application_icon=self.application_id,
             developer_name=_("Fiber Elements"),
             version=self.version,

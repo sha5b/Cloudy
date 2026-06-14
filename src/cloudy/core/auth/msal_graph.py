@@ -40,7 +40,7 @@ class GraphAuth:
         if not client_id:
             raise AuthError(
                 "No Microsoft client ID configured. See docs/AUTH.md "
-                "(set CLOUDDRIVE_MS_CLIENT_ID or the microsoft-client-id setting)."
+                "(set CLOUDY_MS_CLIENT_ID or the microsoft-client-id setting)."
             )
         self._client_id = client_id
         self._secrets = secrets

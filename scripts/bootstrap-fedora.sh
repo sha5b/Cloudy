@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Fiber Elements
 #
-# Reproducible one-shot setup for Clouddrive development on Fedora 44 (GNOME 50).
+# Reproducible one-shot setup for Cloudy development on Fedora 44 (GNOME 50).
 # Installs the build toolchain, the runtime libraries, and (optionally) the host
 # backends and the Flatpak runtimes. Safe to re-run.
 #

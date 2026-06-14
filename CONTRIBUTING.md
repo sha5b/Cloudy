@@ -3,9 +3,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
 SPDX-FileCopyrightText: 2026 Fiber Elements
 -->
 
-# Contributing to Clouddrive
+# Contributing to Cloudy
 
-Thanks for your interest! Clouddrive is a GNOME-native (GTK4 / Libadwaita)
+Thanks for your interest! Cloudy is a GNOME-native (GTK4 / Libadwaita)
 Python application.
 
 ## Ground rules

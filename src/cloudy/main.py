@@ -9,12 +9,12 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from .application import ClouddriveApplication
+from .application import CloudyApplication
 
 
-def main(version: str = "0.0.0", app_id: str = "com.fiberelements.Clouddrive") -> int:
+def main(version: str = "0.0.0", app_id: str = "com.fiberelements.Cloudy") -> int:
     """Run the application. Returns the process exit code."""
-    app = ClouddriveApplication(application_id=app_id, version=version)
+    app = CloudyApplication(application_id=app_id, version=version)
     return app.run(sys.argv)
 
 

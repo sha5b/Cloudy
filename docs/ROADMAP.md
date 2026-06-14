@@ -35,7 +35,7 @@ Staged plan. Each stage is independently useful and testable on Fedora 44.
 - Host user systemd units for the mount/sync daemons.
 
 ## Stage 4 — Nautilus integration (the extras) ✅
-- App exports a **D-Bus sync-status service** (`com.fiberelements.Clouddrive`,
+- App exports a **D-Bus sync-status service** (`com.fiberelements.Cloudy`,
   `…/Sync`): `StatusForPath`, `SyncPath`, `FreeUpSpace`, `CreateShareLink`,
   `StatusChanged`.
 - `nautilus-python` (API 4.0) `InfoProvider` draws emblems and `MenuProvider`

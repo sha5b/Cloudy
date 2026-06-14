@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Fiber Elements
 #
-# Configured launcher for Clouddrive. Meson substitutes the @...@ tokens.
+# Configured launcher for Cloudy. Meson substitutes the @...@ tokens.
 
 import os
 import sys
@@ -20,11 +20,11 @@ signal.signal(signal.SIGINT, signal.SIG_DFL)
 
 # Set up translations.
 try:
-    locale.bindtextdomain('clouddrive', localedir)
-    locale.textdomain('clouddrive')
+    locale.bindtextdomain('cloudy', localedir)
+    locale.textdomain('cloudy')
 except (locale.Error, AttributeError):
     pass
-gettext.install('clouddrive', localedir)
+gettext.install('cloudy', localedir)
 
 if __name__ == '__main__':
     import gi
@@ -34,5 +34,5 @@ if __name__ == '__main__':
         os.path.join(pkgdatadir, APP_ID + '.gresource'))
     resource._register()
 
-    from clouddrive import main
+    from cloudy import main
     sys.exit(main.main(VERSION, APP_ID))

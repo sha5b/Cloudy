@@ -16,7 +16,7 @@ from gi.repository import Adw, GLib, Gtk
 
 
 class DashboardView(Adw.Bin):
-    __gtype_name__ = "ClouddriveDashboardView"
+    __gtype_name__ = "CloudyDashboardView"
 
     def __init__(self, window):
         super().__init__()

@@ -56,7 +56,7 @@ class _CodeHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html")
         self.end_headers()
         self.wfile.write(
-            b"<html><body><h2>Clouddrive</h2>"
+            b"<html><body><h2>Cloudy</h2>"
             b"<p>Sign-in complete. You can close this tab.</p></body></html>"
         )
 
@@ -69,7 +69,7 @@ class GoogleAuth:
         if not client_id:
             raise AuthError(
                 "No Google client ID configured. See docs/AUTH.md "
-                "(set CLOUDDRIVE_GOOGLE_CLIENT_ID or the google-client-id setting)."
+                "(set CLOUDY_GOOGLE_CLIENT_ID or the google-client-id setting)."
             )
         self._client_id = client_id
         self._client_secret = client_secret

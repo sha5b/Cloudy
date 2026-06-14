@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Fiber Elements
 
 # Module system
 
-Clouddrive's functionality is delivered by **modules**. A module is a self-
+Cloudy's functionality is delivered by **modules**. A module is a self-
 contained Python package under `src/modules/` that implements the contracts in
 [`src/core/interfaces.py`](../src/core/interfaces.py).
 

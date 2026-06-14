@@ -21,7 +21,7 @@ from gi.repository import Secret  # noqa: E402
 
 #: Schema describing the attributes we key secrets on.
 _SCHEMA = Secret.Schema.new(
-    "com.fiberelements.Clouddrive.Token",
+    "com.fiberelements.Cloudy.Token",
     Secret.SchemaFlags.NONE,
     {
         "account": Secret.SchemaAttributeType.STRING,
@@ -42,7 +42,7 @@ class SecretStore:
             _SCHEMA,
             self._attrs(account_id, kind),
             Secret.COLLECTION_DEFAULT,
-            f"Clouddrive {kind} for {account_id}",
+            f"Cloudy {kind} for {account_id}",
             value,
             None,  # cancellable
         )

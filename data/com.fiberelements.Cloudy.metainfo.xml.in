@@ -4,9 +4,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
 SPDX-FileCopyrightText: 2026 Fiber Elements
 -->
 <component type="desktop-application">
-  <id>com.fiberelements.Clouddrive</id>
+  <id>com.fiberelements.Cloudy</id>
 
-  <name>Clouddrive</name>
+  <name>Cloudy</name>
   <summary>Use OneDrive, SharePoint and unified mail on your desktop</summary>
 
   <metadata_license>CC0-1.0</metadata_license>
@@ -18,7 +18,7 @@ SPDX-FileCopyrightText: 2026 Fiber Elements
 
   <description>
     <p>
-      Clouddrive is a GNOME-native app that makes Microsoft OneDrive for
+      Cloudy is a GNOME-native app that makes Microsoft OneDrive for
       Business — including Teams and SharePoint document libraries — easy to use
       on Linux, with file-manager integration, selective and on-demand sync, and
       a unified mail and calendar surface for Microsoft 365 and Google accounts.
@@ -29,7 +29,7 @@ SPDX-FileCopyrightText: 2026 Fiber Elements
     </p>
   </description>
 
-  <launchable type="desktop-id">com.fiberelements.Clouddrive.desktop</launchable>
+  <launchable type="desktop-id">com.fiberelements.Cloudy.desktop</launchable>
 
   <content_rating type="oars-1.1" />
 
@@ -37,7 +37,7 @@ SPDX-FileCopyrightText: 2026 Fiber Elements
   <url type="bugtracker">https://github.com/sha5b/Clouddrive-Fedora/issues</url>
   <url type="vcs-browser">https://github.com/sha5b/Clouddrive-Fedora</url>
 
-  <translation type="gettext">clouddrive</translation>
+  <translation type="gettext">cloudy</translation>
 
   <!--
     Screenshots are required by AppStream for catalog visibility. Add them once

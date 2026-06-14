@@ -3,7 +3,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 SPDX-FileCopyrightText: 2026 Fiber Elements
 -->
 
-# Building Clouddrive
+# Building Cloudy
 
 Target platform: **Fedora 44 (GNOME 50)**.
 
@@ -21,7 +21,7 @@ make flatpak flatpak-run
 ```
 
 Pinned for reproducibility: GNOME runtime/SDK **50**, `blueprint-compiler`
-**v0.16.0** (both in `com.fiberelements.Clouddrive.yml` and
+**v0.16.0** (both in `com.fiberelements.Cloudy.yml` and
 `subprojects/blueprint-compiler.wrap`).
 
 The manual steps follow.
@@ -38,7 +38,7 @@ python3 -m pip install --user meson ninja
 export PATH="$HOME/.local/bin:$PATH"
 meson setup _build --prefix="$PWD/_install"   # clones blueprint-compiler v0.16.0
 meson install -C _build
-GSETTINGS_SCHEMA_DIR="$PWD/_install/share/glib-2.0/schemas" ./_install/bin/clouddrive
+GSETTINGS_SCHEMA_DIR="$PWD/_install/share/glib-2.0/schemas" ./_install/bin/cloudy
 ```
 
 ## Option A — Flatpak (recommended)
@@ -55,12 +55,12 @@ flatpak install --user \
 
 # Build + install into the user installation
 flatpak-builder --user --install --force-clean \
-    _build/flatpak com.fiberelements.Clouddrive.yml
+    _build/flatpak com.fiberelements.Cloudy.yml
 
-flatpak run com.fiberelements.Clouddrive
+flatpak run com.fiberelements.Cloudy
 ```
 
-GNOME Builder: *Open Project* → it detects `com.fiberelements.Clouddrive.yml`
+GNOME Builder: *Open Project* → it detects `com.fiberelements.Cloudy.yml`
 and the Run button builds & launches the Flatpak.
 
 ## Option B — Meson into a prefix (fast iteration)
@@ -78,7 +78,7 @@ meson install -C _build
 
 # Run (GSettings schema is installed into the prefix)
 GSETTINGS_SCHEMA_DIR="$PWD/_install/share/glib-2.0/schemas" \
-    ./_install/bin/clouddrive
+    ./_install/bin/cloudy
 ```
 
 If `blueprint-compiler` is not packaged for your system, the Meson build pulls
@@ -98,7 +98,7 @@ The Nautilus extension also lives on the host:
 
 ```bash
 sudo dnf install nautilus-python     # python3-nautilus (API 4.0 / GTK4)
-# then install nautilus-extension/clouddrive_nautilus.py into
+# then install nautilus-extension/cloudy_nautilus.py into
 #   ~/.local/share/nautilus-python/extensions/
 nautilus -q   # restart Nautilus to load it
 ```

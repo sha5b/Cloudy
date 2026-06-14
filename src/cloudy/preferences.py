@@ -4,12 +4,12 @@
 
 from gi.repository import Adw, Gtk
 
-RESOURCE_PREFIX = "/com/fiberelements/Clouddrive"
+RESOURCE_PREFIX = "/com/fiberelements/Cloudy"
 
 
 @Gtk.Template(resource_path=f"{RESOURCE_PREFIX}/ui/preferences.ui")
-class ClouddrivePreferences(Adw.PreferencesDialog):
-    __gtype_name__ = "ClouddrivePreferences"
+class CloudyPreferences(Adw.PreferencesDialog):
+    __gtype_name__ = "CloudyPreferences"
 
     modules_group = Gtk.Template.Child()
 

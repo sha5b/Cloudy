@@ -27,11 +27,11 @@ from gi.repository import GLib
 
 
 def _data_dir() -> Path:
-    return Path(GLib.get_user_data_dir()) / "clouddrive"
+    return Path(GLib.get_user_data_dir()) / "cloudy"
 
 
 def mount_root() -> Path:
-    """Where libraries are mounted (``…/clouddrive/mounts/<name>``)."""
+    """Where libraries are mounted (``…/cloudy/mounts/<name>``)."""
     return _data_dir() / "mounts"
 
 

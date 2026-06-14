@@ -17,14 +17,14 @@ menu primary_menu {
     }
 
     item {
-      label: _("_About Clouddrive");
+      label: _("_About Cloudy");
       action: "app.about";
     }
   }
 }
 
-template $ClouddriveWindow: Adw.ApplicationWindow {
-  title: _("Clouddrive");
+template $CloudyWindow: Adw.ApplicationWindow {
+  title: _("Cloudy");
   width-request: 360;
   height-request: 294;
 
@@ -70,7 +70,7 @@ template $ClouddriveWindow: Adw.ApplicationWindow {
       };
 
       content: Adw.NavigationPage {
-        title: _("Clouddrive");
+        title: _("Cloudy");
 
         child: Adw.NavigationView content_nav {
           Adw.NavigationPage {
@@ -83,7 +83,7 @@ template $ClouddriveWindow: Adw.ApplicationWindow {
 
               content: Adw.StatusPage {
                 icon-name: "weather-overcast-symbolic";
-                title: _("Welcome to Clouddrive");
+                title: _("Welcome to Cloudy");
                 description: _("Add an account to start using OneDrive, SharePoint and unified mail.");
 
                 child: Button {
