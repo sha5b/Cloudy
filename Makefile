@@ -32,7 +32,12 @@ build:
 	meson compile -C $(BUILDDIR)
 
 ## Install into the local prefix
+# Prune the previously-installed Python package first: meson's install_subdir
+# copies but never deletes, so renamed/removed modules would otherwise linger
+# and be discovered as phantom providers.
 install: build
+	rm -rf "$(PREFIX)/share/clouddrive/clouddrive"
+	find src -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
 	meson install -C $(BUILDDIR)
 
 ## Build, install, and run locally (no sandbox)
