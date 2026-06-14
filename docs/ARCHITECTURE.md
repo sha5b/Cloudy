@@ -94,6 +94,35 @@ module.
 ### 4. Widgets (`src/widgets/`)
 Reusable GTK4 subclasses (account rows, file rows, sync-status badges).
 
+## Authentication UX
+
+Sign-in opens the user's **system browser** (auth-code + PKCE via a loopback
+redirect); no credentials touch the app, and tokens land in libsecret. Clouddrive
+ships its own **multi-tenant client ID** so there is **no manual app
+registration** — one click → browser → consent → done. Device-code is the
+headless fallback. See [AUTH.md](AUTH.md).
+
+## Files in Nautilus: the "network folder" model
+
+The user's mental model is a **mapped network drive**: pick a Teams/SharePoint
+library and it just **appears in Nautilus** (under *Other Locations / Network*
+and the sidebar). We get that automatically by **mounting**, not by writing
+shell code:
+
+- A library is exposed as a **GVfs / GMount** (via `onedriver` FUSE, `rclone
+  mount`, or the GNOME OneDrive gvfs backend). Any GMount shows up in Nautilus's
+  Network + sidebar **with no extra integration** — the same way GNOME Online
+  Accounts' OneDrive appears today.
+- So the flow is: **select a Teams library in Clouddrive → we mount it → it
+  appears in the file manager.** On-demand (network-drive-like) is the default
+  for Teams/SharePoint; full local sync (abraunegg) is the opt-in alternative.
+- The `nautilus-python` extension adds only the **extras** on top of that mount:
+  sync-status emblems and right-click *Free up space / Copy share link / Sync
+  this folder*, driven by the app's D-Bus status service.
+
+This keeps the heavy lifting in proven mount backends and limits our custom shell
+code to the value-add layer.
+
 ## Key external decisions (web-verified June 2026)
 
 - **Runtime**: `org.gnome.Platform` **50** (Fedora 44 ships GNOME 50; the 48

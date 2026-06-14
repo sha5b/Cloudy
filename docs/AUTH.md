@@ -22,17 +22,36 @@ Tokens are stored via **libsecret**, never in plaintext.
      `Contacts.ReadWrite`
    - Always: `User.Read`, `offline_access`, `openid`, `profile`
 
-### Auth flow
+### Auth flow — system browser + loopback (primary)
 
-Use **MSAL for Python** (`msal`):
+The user clicks **Sign In** and we run the **authorization code + PKCE** flow
+through their **default web browser**:
 
-- **Device code flow** (`initiate_device_flow` / `acquire_token_by_device_flow`)
-  — simplest, headless-friendly UX; good default for a desktop app.
-- **Authorization code + PKCE** via a loopback redirect — smoother in-app UX.
+1. Start a throwaway loopback HTTP server on `http://127.0.0.1:<random-port>`.
+2. Open the system browser (via the **OpenURI portal** / `Gtk.UriLauncher`) at
+   the provider's real consent page, with `redirect_uri` = that loopback URL.
+3. The user authenticates and consents in the browser (no credentials ever
+   touch Clouddrive).
+4. The provider redirects to the loopback URL; the server captures the `code`,
+   and MSAL exchanges it (with the PKCE verifier) for tokens.
+5. The loopback server shuts down; we show the account as signed in.
 
-Persist an MSAL `SerializableTokenCache` into libsecret; refresh silently with
-`acquire_token_silent`. Always request `offline_access` for long-lived refresh
-tokens.
+**Device code flow** (`initiate_device_flow` / `acquire_token_by_device_flow`)
+is kept as a **fallback** for headless/remote sessions where no browser is
+available ("enter this code at microsoft.com/devicelogin").
+
+Use **MSAL for Python** (`msal`). Persist its `SerializableTokenCache` into
+libsecret; refresh silently with `acquire_token_silent`. Always request
+`offline_access` for long-lived refresh tokens.
+
+### One-click setup — we ship the client ID
+
+To avoid making users register an Azure/Google app, Clouddrive ships a single
+**multi-tenant public client ID** owned by the project (the same pattern rclone,
+abraunegg, and GNOME Evolution use). Sign-in is then one click → browser →
+consent → done, with **no manual app registration**. The client ID is public by
+design (public clients hold no secret); it is configurable via GSettings/env for
+users who prefer their own registration.
 
 ### Business / tenant caveats
 

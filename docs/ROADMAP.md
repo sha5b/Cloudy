@@ -12,33 +12,37 @@ Staged plan. Each stage is independently useful and testable on Fedora 44.
 - Runnable Adwaita shell + module registry + module stubs.
 - Nautilus extension stub.
 
-## Stage 1 — Shell + module engine
-- `Adw.NavigationSplitView` shell with a real sidebar bound to the account
-  registry.
-- `Adw.PreferencesWindow` "Modules" page listing toggleable modules.
-- Solidify the `ServiceModule` / capability interfaces.
+## Stage 1 — Shell + module engine ✅
+- `Adw.NavigationSplitView` shell with a sidebar bound to the account registry.
+- Add-account dialog (provider picker); per-account capability surfaces
+  (Files/Mail/Calendar) via `Adw.ViewSwitcher`; accounts persisted in GSettings.
+- `ServiceModule` / capability interfaces + `capabilities_of()`.
 
-## Stage 2 — Auth core
-- MSAL (Graph) device-code + PKCE flow; Google OAuth2.
-- Token caches persisted via libsecret / Secret Service portal.
-- Entra app registration (public client, native redirect URI) documented in
-  [AUTH.md](AUTH.md); Google Cloud OAuth client.
+## Stage 2 — Auth core (browser-based, one click)
+- **System-browser auth-code + PKCE** via a loopback redirect, opened through
+  the OpenURI portal; device-code as the headless fallback.
+- **Ship a multi-tenant client ID** so users register nothing (configurable for
+  those who want their own). Google OAuth2 the same way.
+- MSAL token cache persisted via libsecret / Secret Service portal; flip
+  `Account.signed_in` and refresh silently. See [AUTH.md](AUTH.md).
 
-## Stage 3 — OneDrive module v1 (selective sync)
-- Wrap `abraunegg/onedrive`: generate config profiles, run `--monitor`, parse
-  status, expose selective sync of chosen SharePoint/Teams libraries (one client
-  instance per library).
-- "Copy share link" via `onedrive --create-share-link`.
-- Host user systemd unit management.
+## Stage 3 — Files: mount a library into the Network view
+- Select a Teams/SharePoint library → **mount it** so it appears automatically
+  in Nautilus (*Other Locations / Network* + sidebar). Default backend:
+  `onedriver`/`rclone mount` (network-drive, on-demand feel).
+- Enumerate drives/sites via the shared Graph client; "Copy share link" via
+  `onedrive --create-share-link`.
+- Host user systemd units for the mount/sync daemons.
 
-## Stage 4 — Nautilus integration
-- `nautilus-python` (API 4.0) `MenuProvider` + `InfoProvider`: sidebar entry,
-  sync-status emblems, "Sync this folder / Free up space / Copy share link".
+## Stage 4 — Nautilus integration (the extras)
+- `nautilus-python` (API 4.0) `MenuProvider` + `InfoProvider` layered on the
+  mount: sync-status emblems and right-click *Free up space / Copy share link /
+  Sync this folder*.
 - Extension talks to the app's D-Bus status service.
 
-## Stage 5 — OneDrive module v2 (files on-demand)
-- Add `onedriver` (FUSE on-demand) and/or `rclone mount` as selectable per-drive
-  "sync modes".
+## Stage 5 — Full sync mode (offline copies)
+- Add `abraunegg/onedrive` selective sync as the opt-in alternative to mounting
+  (one client instance per SharePoint library), for users who want local copies.
 
 ## Stage 6 — Mail + Calendar
 - `MailProvider` / `CalendarProvider` against **Microsoft Graph** first
