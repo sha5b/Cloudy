@@ -13,7 +13,6 @@ from gettext import gettext as _
 
 from gi.repository import Adw, Gio, GLib, Gtk
 
-from ..modules.microsoft365.graph import GraphClient, GraphError
 from ..modules.microsoft365.mounts import MountManager
 
 
@@ -25,10 +24,6 @@ class FilesView(Adw.Bin):
         self._window = window
         self._account = account
         self._mounts = MountManager()
-
-        app = window.get_application()
-        self._client_id = app.microsoft_client_id()
-        self._secrets = app.secrets
 
         self._page = Adw.PreferencesPage()
         self.set_child(self._page)
@@ -68,13 +63,12 @@ class FilesView(Adw.Bin):
     def _load_drives_async(self) -> None:
         def worker():
             try:
-                from ..core.auth.msal_graph import GraphAuth
+                from .graph_helper import build_graph_client
 
-                auth = GraphAuth(self._client_id, self._secrets, self._account.id)
-                graph = GraphClient(lambda scopes: auth.acquire_token_silent(scopes))
+                graph = build_graph_client(self._window.get_application(), self._account)
                 drives = graph.list_drives()
                 GLib.idle_add(self._on_drives_loaded, drives, None)
-            except (GraphError, Exception) as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 GLib.idle_add(self._on_drives_loaded, None, str(exc))
 
         threading.Thread(target=worker, daemon=True).start()

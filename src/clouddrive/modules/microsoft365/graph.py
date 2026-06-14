@@ -19,7 +19,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
-from ...core.auth.msal_graph import SCOPES_FILES
+from ...core.auth.msal_graph import SCOPES_FILES, SCOPES_MAIL
 
 BASE_URL = "https://graph.microsoft.com/v1.0"
 
@@ -127,15 +127,63 @@ class GraphClient:
             web_url=d.get("webUrl", ""),
         )
 
-    # -- Mail / Calendar (stage 6) ---------------------------------------
-    def list_mail_folders(self) -> list:
-        return []
+    # -- Mail -------------------------------------------------------------
+    def list_mail_folders(self) -> list[dict]:
+        data = self._get("/me/mailFolders?$top=50", SCOPES_MAIL)
+        return [
+            {"id": f["id"], "name": f.get("displayName", ""),
+             "unread": f.get("unreadItemCount", 0)}
+            for f in data.get("value", [])
+        ]
 
-    def list_messages(self, folder_id: str, *, limit: int = 50) -> list:
-        return []
+    def list_messages(self, folder_id: str = "inbox", *, limit: int = 25) -> list[dict]:
+        path = (
+            f"/me/mailFolders/{folder_id}/messages"
+            f"?$top={limit}&$select=subject,from,receivedDateTime,bodyPreview,isRead"
+            f"&$orderby=receivedDateTime desc"
+        )
+        data = self._get(path, SCOPES_MAIL)
+        out = []
+        for m in data.get("value", []):
+            sender = (
+                m.get("from", {}).get("emailAddress", {}) if m.get("from") else {}
+            )
+            out.append({
+                "id": m["id"],
+                "subject": m.get("subject", "(no subject)"),
+                "from": sender.get("name") or sender.get("address", ""),
+                "received": m.get("receivedDateTime", ""),
+                "preview": m.get("bodyPreview", ""),
+                "is_read": m.get("isRead", True),
+            })
+        return out
 
-    def list_calendars(self) -> list:
-        return []
+    # -- Calendar ---------------------------------------------------------
+    def list_calendars(self) -> list[dict]:
+        data = self._get("/me/calendars?$top=50", SCOPES_MAIL)
+        return [
+            {"id": c["id"], "name": c.get("name", "")}
+            for c in data.get("value", [])
+        ]
 
-    def list_events(self, calendar_id: str, start, end) -> list:
-        return []
+    def list_events(self, start_iso: str, end_iso: str, *, limit: int = 50) -> list[dict]:
+        """Calendar view between two ISO-8601 UTC timestamps."""
+        params = urllib.parse.urlencode({
+            "startDateTime": start_iso,
+            "endDateTime": end_iso,
+            "$orderby": "start/dateTime",
+            "$top": str(limit),
+            "$select": "subject,start,end,location,isAllDay",
+        })
+        data = self._get(f"/me/calendarView?{params}", SCOPES_MAIL)
+        out = []
+        for e in data.get("value", []):
+            out.append({
+                "id": e["id"],
+                "subject": e.get("subject", "(no title)"),
+                "start": e.get("start", {}).get("dateTime", ""),
+                "end": e.get("end", {}).get("dateTime", ""),
+                "location": (e.get("location") or {}).get("displayName", ""),
+                "all_day": e.get("isAllDay", False),
+            })
+        return out

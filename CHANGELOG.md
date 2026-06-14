@@ -37,5 +37,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   host `nautilus-python` (API 4.0) extension draws sync emblems (InfoProvider)
   and adds right-click Copy share link / Free up space / Sync this folder
   (MenuProvider) via D-Bus. Install with `make install-nautilus`.
+- Mail + Calendar surfaces (Microsoft Graph): Inbox message list (with unread
+  markers) and a 7-day upcoming-events view, each loaded off the UI thread.
+  Sign-in now requests Mail/Calendar scopes too, so one consent lights up
+  Files, Mail and Calendar.
 
 [Unreleased]: https://github.com/sha5b/Clouddrive-Fedora

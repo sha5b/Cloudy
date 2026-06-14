@@ -109,11 +109,20 @@ class ClouddriveWindow(Adw.ApplicationWindow):
         self.content_nav.replace([page])
 
     def _capability_placeholder(self, account, key, label) -> Gtk.Widget:
-        # Signed-in Files surface gets the real view.
-        if account.signed_in and key == "files":
-            from .widgets.files_view import FilesView
+        # Signed-in surfaces get their real views.
+        if account.signed_in and account.provider == "microsoft":
+            if key == "files":
+                from .widgets.files_view import FilesView
 
-            return FilesView(self, account)
+                return FilesView(self, account)
+            if key == "mail":
+                from .widgets.mail_view import MailView
+
+                return MailView(self, account)
+            if key == "calendar":
+                from .widgets.calendar_view import CalendarView
+
+                return CalendarView(self, account)
 
         status = Adw.StatusPage(
             icon_name=CAPABILITY_UI.get(key, (None, "application-x-addon-symbolic"))[1],
@@ -151,13 +160,20 @@ class ClouddriveWindow(Adw.ApplicationWindow):
         ).start()
 
     def _sign_in_worker(self, account, client_id, secrets) -> None:
-        from .core.auth.msal_graph import GraphAuth, SCOPES_BASE, SCOPES_FILES
+        from .core.auth.msal_graph import (
+            GraphAuth,
+            SCOPES_BASE,
+            SCOPES_FILES,
+            SCOPES_MAIL,
+        )
 
         try:
             auth = GraphAuth(client_id, secrets, account.id)
-            # Request Files scopes up front so one consent covers file access
-            # (silent token works for the Files surface afterwards).
-            result = auth.sign_in_interactive(SCOPES_BASE + SCOPES_FILES)
+            # Request all capability scopes up front so a single consent covers
+            # Files, Mail and Calendar (silent tokens work for every surface).
+            result = auth.sign_in_interactive(
+                SCOPES_BASE + SCOPES_FILES + SCOPES_MAIL
+            )
             try:
                 upn = GraphAuth.fetch_userprincipalname(result["access_token"])
             except Exception:  # noqa: BLE001 - identity lookup is best-effort

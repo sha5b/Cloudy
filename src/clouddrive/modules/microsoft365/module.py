@@ -89,4 +89,5 @@ class Microsoft365Module(
         return self._graph.list_calendars()
 
     def list_events(self, calendar_id: str, start, end) -> list:
-        return self._graph.list_events(calendar_id, start, end)
+        # calendarView spans the default calendar; start/end are ISO-8601 UTC.
+        return self._graph.list_events(start, end)

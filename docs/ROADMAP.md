@@ -49,11 +49,12 @@ Staged plan. Each stage is independently useful and testable on Fedora 44.
 - Add `abraunegg/onedrive` selective sync as the opt-in alternative to mounting
   (one client instance per SharePoint library), for users who want local copies.
 
-## Stage 6 — Mail + Calendar
-- `MailProvider` / `CalendarProvider` against **Microsoft Graph** first
-  (messages, threads, events, free/busy via `getSchedule`, contacts), then the
-  **Gmail API**.
-- Optional `eds_reader` to surface existing GNOME accounts.
+## Stage 6 — Mail + Calendar (Microsoft Graph) ✅ (first pass)
+- GraphClient: mail folders + Inbox messages, calendars + 7-day calendarView.
+- MailView (Inbox list, unread dot) and CalendarView (upcoming events) surfaces,
+  loaded off the UI thread; sign-in requests Mail/Calendar scopes up front.
+- Still to do: message reading/compose, folder switching, free/busy via
+  `getSchedule`, contacts; then the **Gmail API**; optional `eds_reader`.
 
 ## Stage 7 — Packaging & polish
 - Flatpak on Flathub; Background/autostart portal for the sync service.
