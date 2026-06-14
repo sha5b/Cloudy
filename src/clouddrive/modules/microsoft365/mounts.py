@@ -18,7 +18,6 @@ daemons run on the host (outside the Flatpak sandbox); see docs/ARCHITECTURE.md.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,9 +45,14 @@ class Backend:
     name: str
     binary: str
 
+    def path(self) -> str | None:
+        from ...core.provisioner import resolve
+
+        return resolve(self.binary)
+
     @property
     def available(self) -> bool:
-        return shutil.which(self.binary) is not None
+        return self.path() is not None
 
 
 RCLONE = Backend("rclone", "rclone")
@@ -96,7 +100,7 @@ class MountManager:
     # -- rclone command construction (testable without running it) -------
     def rclone_mount_argv(self, remote: str, mountpoint: Path) -> list[str]:
         return [
-            RCLONE.binary, "mount", f"{remote}:", str(mountpoint),
+            RCLONE.path() or RCLONE.binary, "mount", f"{remote}:", str(mountpoint),
             "--vfs-cache-mode", "full",
             "--dir-cache-time", "30s",
             "--daemon",
@@ -118,7 +122,7 @@ class MountManager:
             if backend is RCLONE:
                 subprocess.run(self.rclone_mount_argv(remote, mountpoint), check=True)
             elif backend is ONEDRIVER:
-                subprocess.run([ONEDRIVER.binary, str(mountpoint)], check=True)
+                subprocess.run([ONEDRIVER.path() or ONEDRIVER.binary, str(mountpoint)], check=True)
 
         self.add_bookmark(mountpoint, name)
         return MountInfo(

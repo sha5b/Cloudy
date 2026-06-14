@@ -82,6 +82,23 @@ class ClouddriveApplication(Adw.Application):
         Adw.Application.do_startup(self)
         # Discover modules now; activation happens per user settings.
         self.engine.discover()
+        self._provision_backends()
+
+    def _provision_backends(self) -> None:
+        # Ensure rclone is available without any user/system install (rootless
+        # download). Best-effort, off the main thread; the shipped Flatpak
+        # bundles rclone so this is usually a no-op.
+        import threading
+
+        def worker():
+            try:
+                from .core.provisioner import ensure_rclone
+
+                ensure_rclone(log=lambda m: print(f"[provision] {m}"))
+            except Exception as exc:  # noqa: BLE001 - never block startup
+                print(f"[provision] rclone not provisioned: {exc}")
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def do_activate(self):
         window = self.props.active_window
