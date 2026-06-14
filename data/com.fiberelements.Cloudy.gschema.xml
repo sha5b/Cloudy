@@ -16,6 +16,28 @@ SPDX-FileCopyrightText: 2026 Fiber Elements
       <summary>Window height</summary>
     </key>
 
+    <key name="mount-location" type="s">
+      <default>''</default>
+      <summary>Directory where libraries are mounted</summary>
+      <description>
+        Empty means the default (~/.local/share/cloudy/mounts).
+      </description>
+    </key>
+
+    <key name="cache-mode" type="s">
+      <default>'full'</default>
+      <summary>rclone VFS cache mode for mounts</summary>
+      <description>
+        'full' caches opened files on demand (recommended); 'minimal' streams
+        with the least local disk use.
+      </description>
+    </key>
+
+    <key name="autostart" type="b">
+      <default>false</default>
+      <summary>Start Cloudy automatically at login</summary>
+    </key>
+
     <key name="window-maximized" type="b">
       <default>false</default>
       <summary>Window maximized state</summary>

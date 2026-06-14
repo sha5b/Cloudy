@@ -120,7 +120,7 @@ class CloudyApplication(Adw.Application):
     def _on_preferences(self, *_args):
         from .preferences import CloudyPreferences
 
-        prefs = CloudyPreferences(engine=self.engine)
+        prefs = CloudyPreferences(engine=self.engine, settings=self.settings)
         prefs.present(self.props.active_window)
 
     def _on_add_account(self, *_args):

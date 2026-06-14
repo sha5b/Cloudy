@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Fiber Elements
-"""Files surface for a signed-in Microsoft 365 account.
+"""Files surface (provider-aware).
 
-Two sections: the user's own OneDrive drives and the document libraries of the
-Teams they belong to (mounted at the team level). Enumeration runs off the UI
-thread.
+Microsoft 365: your OneDrive drives + the Teams you belong to (team level).
+Google: your Google Drive (My Drive). Each library mounts via rclone and shows
+in the Files sidebar like a network drive.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from gettext import gettext as _
 
 from gi.repository import Adw, GLib, Gtk
 
+from ..modules.microsoft365.graph import Drive
 from ..modules.microsoft365.mounts import MountManager
 
 
@@ -25,6 +26,7 @@ class FilesView(Adw.Bin):
         self._window = window
         self._account = account
         self._mounts = MountManager()
+        self._rows: dict = {}  # name -> [row, button, base_subtitle]
 
         self._page = Adw.PreferencesPage()
         self.set_child(self._page)
@@ -33,25 +35,10 @@ class FilesView(Adw.Bin):
         self._page.add(self._backend_group)
         self._show_backend_status()
 
-        self._drives_group = Adw.PreferencesGroup(
-            title=_("Your OneDrive"),
-            description=_("Mount a library to open it in Files like a network drive."),
-        )
-        self._page.add(self._drives_group)
-        self._drives_loading = Adw.ActionRow(title=_("Loading libraries…"))
-        self._drives_group.add(self._drives_loading)
-
-        self._teams_group = Adw.PreferencesGroup(
-            title=_("Teams"),
-            description=_("Document libraries of the Teams you belong to."),
-        )
-        self._page.add(self._teams_group)
-        self._teams_loading = Adw.ActionRow(title=_("Loading Teams…"))
-        self._teams_group.add(self._teams_loading)
-
-        # name -> (row, action_button, base_subtitle) so we can flip Mount/Unmount.
-        self._rows: dict = {}
-        self._load_async()
+        if account.provider == "google":
+            self._build_google()
+        else:
+            self._build_microsoft()
 
     # -- backend status ---------------------------------------------------
     def _show_backend_status(self) -> None:
@@ -70,24 +57,51 @@ class FilesView(Adw.Bin):
             row.add_prefix(Gtk.Image.new_from_icon_name("dialog-warning-symbolic"))
         self._backend_group.add(row)
 
-    # -- loading (off the UI thread) --------------------------------------
-    def _load_async(self) -> None:
+    # -- Google -----------------------------------------------------------
+    def _build_google(self) -> None:
+        group = Adw.PreferencesGroup(
+            title=_("Google Drive"),
+            description=_("Mount to open it in Files like a network drive."),
+        )
+        self._page.add(group)
+        my_drive = Drive(id="", name="My Drive", kind="google_mydrive", web_url="")
+        group.add(self._drive_row(my_drive, "folder-symbolic", _("Google Drive")))
+
+    # -- Microsoft --------------------------------------------------------
+    def _build_microsoft(self) -> None:
+        self._drives_group = Adw.PreferencesGroup(
+            title=_("Your OneDrive"),
+            description=_("Mount a library to open it in Files like a network drive."),
+        )
+        self._page.add(self._drives_group)
+        self._drives_loading = Adw.ActionRow(title=_("Loading libraries…"))
+        self._drives_group.add(self._drives_loading)
+
+        self._teams_group = Adw.PreferencesGroup(
+            title=_("Teams"),
+            description=_("Document libraries of the Teams you belong to."),
+        )
+        self._page.add(self._teams_group)
+        self._teams_loading = Adw.ActionRow(title=_("Loading Teams…"))
+        self._teams_group.add(self._teams_loading)
+
+        self._load_microsoft_async()
+
+    def _load_microsoft_async(self) -> None:
         def worker():
             from .graph_helper import build_graph_client
 
             try:
                 graph = build_graph_client(self._window.get_application(), self._account)
-            except Exception as exc:  # noqa: BLE001 - no client/auth
+            except Exception as exc:  # noqa: BLE001
                 GLib.idle_add(self._fill, self._drives_group, self._drives_loading, None, str(exc), False)
                 GLib.idle_add(self._fill, self._teams_group, self._teams_loading, None, str(exc), True)
                 return
-
             try:
                 drives = graph.list_drives()
                 GLib.idle_add(self._fill, self._drives_group, self._drives_loading, drives, None, False)
             except Exception as exc:  # noqa: BLE001
                 GLib.idle_add(self._fill, self._drives_group, self._drives_loading, None, str(exc), False)
-
             try:
                 teams = graph.list_teams()
                 GLib.idle_add(self._fill, self._teams_group, self._teams_loading, teams, None, True)
@@ -110,23 +124,23 @@ class FilesView(Adw.Bin):
             empty = _("You don't belong to any Teams.") if is_team else _("No libraries found.")
             group.add(Adw.ActionRow(title=empty))
             return False
+        icon = "system-users-symbolic" if is_team else "folder-remote-symbolic"
+        base = _("Team library") if is_team else None
         for drive in drives:
-            group.add(self._drive_row(drive, is_team))
+            group.add(self._drive_row(drive, icon, base or drive.kind))
         return False
 
-    def _drive_row(self, drive, is_team) -> Adw.ActionRow:
+    # -- rows -------------------------------------------------------------
+    def _drive_row(self, drive, icon, base_subtitle) -> Adw.ActionRow:
         from .format import esc
 
-        base_subtitle = _("Team library") if is_team else drive.kind
         row = Adw.ActionRow(title=esc(drive.name))
-        icon = "system-users-symbolic" if is_team else "folder-remote-symbolic"
         row.add_prefix(Gtk.Image.new_from_icon_name(icon))
         self._rows[drive.name] = [row, None, base_subtitle]
         self._apply_button(drive)
         return row
 
     def _apply_button(self, drive) -> None:
-        """Set the row's button/subtitle to reflect mounted state."""
         from .format import esc
 
         entry = self._rows.get(drive.name)
@@ -150,30 +164,39 @@ class FilesView(Adw.Bin):
         row.add_suffix(button)
         entry[1] = button
 
-    # -- actions ----------------------------------------------------------
+    # -- mount / unmount --------------------------------------------------
     def _mount(self, drive) -> None:
         if self._mounts.preferred_backend() is None:
             self._window.add_toast(_("No mount backend available."))
             return
+        google = self._account.provider == "google"
+        token_kind = "rclone-gdrive" if google else "rclone-onedrive"
         secrets = self._window.get_application().secrets
-        token = secrets.lookup(self._account.id, "rclone-onedrive")
+        token = secrets.lookup(self._account.id, token_kind)
         if not token:
-            self._window.add_toast(_("Opening your browser to connect OneDrive…"))
+            self._window.add_toast(_("Opening your browser to connect…"))
         threading.Thread(
-            target=self._mount_worker, args=(drive, secrets, token), daemon=True
+            target=self._mount_worker, args=(drive, secrets, token, token_kind, google),
+            daemon=True,
         ).start()
 
-    def _mount_worker(self, drive, secrets, token) -> None:
+    def _mount_worker(self, drive, secrets, token, token_kind, google) -> None:
         try:
-            # One rclone browser auth per account; reused for every library.
+            backend = "drive" if google else "onedrive"
             if not token:
-                token = self._mounts.authorize_onedrive()
-                secrets.store(self._account.id, "rclone-onedrive", token)
+                token = self._mounts.authorize(backend)
+                secrets.store(self._account.id, token_kind, token)
 
             remote = self._mounts._safe_name(drive.name)
-            self._mounts.create_onedrive_remote(
-                remote, token, drive.id, self._mounts.drive_type_for(drive.kind)
-            )
+            if google:
+                opts = {"token": token, "scope": "drive"}
+            else:
+                opts = {
+                    "token": token,
+                    "drive_id": drive.id,
+                    "drive_type": self._mounts.drive_type_for(drive.kind),
+                }
+            self._mounts.create_remote(remote, backend, opts)
             info = self._mounts.mount(name=drive.name, remote=remote, drive_id=drive.id)
             GLib.idle_add(self._on_mounted, drive, info, None)
         except Exception as exc:  # noqa: BLE001
@@ -183,7 +206,7 @@ class FilesView(Adw.Bin):
         if error:
             self._window.add_toast(_("Mount failed: %s") % error)
             return False
-        self._apply_button(drive)  # flip the button to "Unmount"
+        self._apply_button(drive)
         self._window.add_toast(
             _("%s is now in your Files sidebar.") % drive.name
             if info and info.active
@@ -205,6 +228,6 @@ class FilesView(Adw.Bin):
         if error:
             self._window.add_toast(_("Unmount failed: %s") % error)
             return False
-        self._apply_button(drive)  # flip the button back to "Mount"
+        self._apply_button(drive)
         self._window.add_toast(_("Unmounted %s.") % drive.name)
         return False

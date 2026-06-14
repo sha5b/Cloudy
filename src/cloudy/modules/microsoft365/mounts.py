@@ -30,9 +30,31 @@ def _data_dir() -> Path:
     return Path(GLib.get_user_data_dir()) / "cloudy"
 
 
+def _setting(key: str, default: str = "") -> str:
+    """Read a Cloudy GSettings string, tolerating an unavailable schema.
+
+    Gio.Settings.new() *aborts* the process if the schema isn't installed, so we
+    must look it up first rather than rely on try/except.
+    """
+    try:
+        from gi.repository import Gio
+
+        source = Gio.SettingsSchemaSource.get_default()
+        if source is None or source.lookup("com.fiberelements.Cloudy", True) is None:
+            return default
+        return Gio.Settings.new("com.fiberelements.Cloudy").get_string(key) or default
+    except Exception:  # noqa: BLE001
+        return default
+
+
 def mount_root() -> Path:
-    """Where libraries are mounted (``…/cloudy/mounts/<name>``)."""
-    return _data_dir() / "mounts"
+    """Where libraries are mounted (configurable; default ``…/cloudy/mounts``)."""
+    loc = _setting("mount-location")
+    return Path(loc) if loc else _data_dir() / "mounts"
+
+
+def cache_mode() -> str:
+    return _setting("cache-mode", "full") or "full"
 
 
 def _bookmarks_file() -> Path:
@@ -101,7 +123,7 @@ class MountManager:
     def rclone_mount_argv(self, remote: str, mountpoint: Path) -> list[str]:
         return [
             RCLONE.path() or RCLONE.binary, "mount", f"{remote}:", str(mountpoint),
-            "--vfs-cache-mode", "full",
+            "--vfs-cache-mode", cache_mode(),
             "--dir-cache-time", "30s",
             "--daemon",
         ]
@@ -124,46 +146,46 @@ class MountManager:
         out = subprocess.run([rc, "listremotes"], capture_output=True, text=True)
         return f"{remote}:" in out.stdout.split()
 
-    def authorize_onedrive(self, timeout: int = 300) -> str:
-        """Run rclone's own browser OAuth (its built-in app = no registration).
-
-        Opens the system browser, waits for the redirect, and returns the token
-        JSON blob rclone emits. Blocking — call off the UI thread.
+    def authorize(self, backend: str, timeout: int = 300) -> str:
+        """Run rclone's own browser OAuth for a backend (its built-in app = no
+        registration). Opens the system browser, waits for the redirect, and
+        returns the token JSON blob. Blocking — call off the UI thread.
         """
         rc = RCLONE.path()
         if not rc:
             raise RuntimeError("rclone is not available")
         proc = subprocess.run(
-            [rc, "authorize", "onedrive"],
+            [rc, "authorize", backend],
             capture_output=True, text=True, timeout=timeout,
         )
         blob = (proc.stdout or "") + "\n" + (proc.stderr or "")
-        # rclone prints the token as a JSON object between paste markers.
         start = blob.find("{")
         end = blob.rfind("}")
         if start == -1 or end == -1 or end <= start:
             raise RuntimeError(
-                "rclone authorization did not return a token "
-                f"(exit {proc.returncode})"
+                f"rclone authorization did not return a token (exit {proc.returncode})"
             )
         return blob[start : end + 1].strip()
+
+    def create_remote(self, remote: str, backend: str, opts: dict) -> None:
+        rc = RCLONE.path()
+        if not rc:
+            raise RuntimeError("rclone is not available")
+        args = [rc, "config", "create", remote, backend]
+        args += [f"{k}={v}" for k, v in opts.items()]
+        args.append("--non-interactive")
+        subprocess.run(args, check=True, capture_output=True, text=True)
+
+    # OneDrive convenience wrappers (kept for the Microsoft module).
+    def authorize_onedrive(self, timeout: int = 300) -> str:
+        return self.authorize("onedrive", timeout=timeout)
 
     def create_onedrive_remote(
         self, remote: str, token_json: str, drive_id: str, drive_type: str
     ) -> None:
-        rc = RCLONE.path()
-        if not rc:
-            raise RuntimeError("rclone is not available")
-        subprocess.run(
-            [
-                rc, "config", "create", remote, "onedrive",
-                f"token={token_json}",
-                f"drive_id={drive_id}",
-                f"drive_type={drive_type}",
-                "--non-interactive",
-            ],
-            check=True, capture_output=True, text=True,
-        )
+        self.create_remote(remote, "onedrive", {
+            "token": token_json, "drive_id": drive_id, "drive_type": drive_type,
+        })
 
     def delete_remote(self, remote: str) -> None:
         rc = RCLONE.path()

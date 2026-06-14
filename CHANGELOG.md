@@ -12,6 +12,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Preferences → General: mount location (folder chooser), file-caching mode
+  (on-demand "full" vs minimal streaming), and start-at-login (writes a host
+  autostart entry). Mount location + cache mode are honored by the rclone mount.
+- Google Drive for Gmail accounts: the Files tab now appears for Google and
+  mounts "My Drive" via rclone's "drive" backend (its own browser auth, no
+  registration). rclone auth/remote config generalized to any backend.
+- In-memory cache (stale-while-revalidate) for mail/calendar + a Refresh button.
+- Files: Mount ↔ Unmount toggle with a "Mounted" indicator.
+
 - Initial project scaffold: GNOME 50 (GTK4 / Libadwaita) Python application
   structure following the Alpaca 3-subdir layout (`data/`, `src/`, `po/`).
 - GPL-3.0-or-later licensing (`COPYING`) with per-file SPDX headers.

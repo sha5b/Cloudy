@@ -196,7 +196,7 @@ class CloudyWindow(Adw.ApplicationWindow):
     def _capability_placeholder(self, account, key, label) -> Gtk.Widget:
         # Signed-in surfaces get their real views.
         if account.signed_in:
-            if key == "files" and account.provider == "microsoft":
+            if key == "files":
                 from .widgets.files_view import FilesView
 
                 return FilesView(self, account)
