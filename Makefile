@@ -99,6 +99,16 @@ srpm: dist-tarball
 	@find $(RPM_TOP)/SRPMS -name '*.rpm'
 
 ## --- Flatpak (local test build; never published) -------------------------
+# flatpak-builder invocation. Default: the sandboxed org.flatpak.Builder flatpak
+# (no host install needed; --env passes git config into the sandbox). Override
+# with the native binary for CI / root contexts where the sandboxed app can't
+# create its state dir:  make FLATPAK_BUILDER=flatpak-builder flatpak-bundle
+FLATPAK_BUILDER ?= flatpak run \
+  --env=GIT_CONFIG_COUNT=1 \
+  --env=GIT_CONFIG_KEY_0=safe.bareRepository \
+  --env=GIT_CONFIG_VALUE_0=all \
+  org.flatpak.Builder
+
 ## Build + install to the user installation, baking creds from .env into a
 ## LOCAL manifest under _build/ (the committed manifest stays credential-free).
 flatpak: flatpak-test
@@ -106,13 +116,7 @@ flatpak-test:
 	@mkdir -p $(FLATPAK_DIR)
 	@$(LOAD_ENV) python3 scripts/flatpak-local-manifest.py \
 	  $(APP_ID).yml $(CURDIR) $(FLATPAK_DIR)/$(APP_ID).local.yml
-	# GIT_CONFIG_* allows flatpak-builder's bare git mirror clones to work when
-	# the host sets `safe.bareRepository = explicit` (no global config change).
-	flatpak run \
-	  --env=GIT_CONFIG_COUNT=1 \
-	  --env=GIT_CONFIG_KEY_0=safe.bareRepository \
-	  --env=GIT_CONFIG_VALUE_0=all \
-	  org.flatpak.Builder --user --install --force-clean \
+	$(FLATPAK_BUILDER) --user --install --force-clean \
 	  --install-deps-from=flathub \
 	  $(FLATPAK_DIR)/build $(FLATPAK_DIR)/$(APP_ID).local.yml
 	@echo "Installed (user). Run it with: make flatpak-run"
@@ -127,11 +131,7 @@ flatpak-bundle:
 	@$(LOAD_ENV) python3 scripts/flatpak-local-manifest.py \
 	  $(APP_ID).yml $(CURDIR) $(FLATPAK_DIR)/$(APP_ID).local.yml
 	# Build and export into a local OSTree repo (no system install).
-	flatpak run \
-	  --env=GIT_CONFIG_COUNT=1 \
-	  --env=GIT_CONFIG_KEY_0=safe.bareRepository \
-	  --env=GIT_CONFIG_VALUE_0=all \
-	  org.flatpak.Builder --force-clean --install-deps-from=flathub \
+	$(FLATPAK_BUILDER) --force-clean --install-deps-from=flathub \
 	  --repo=$(FLATPAK_REPO) \
 	  $(FLATPAK_DIR)/build $(FLATPAK_DIR)/$(APP_ID).local.yml
 	# Bundle the repo into one file; --runtime-repo tells installers where to
