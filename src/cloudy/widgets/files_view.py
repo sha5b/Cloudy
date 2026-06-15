@@ -16,7 +16,7 @@ from gettext import gettext as _
 from gi.repository import Adw, Gtk
 
 from ..modules.microsoft365.graph import Drive
-from ..modules.microsoft365.mounts import MountManager, account_mount_base
+from ..modules.microsoft365.mounts import MountManager, mount_base_for
 from .file_browser import FileBrowserPane
 from .source_nav import clear_listbox, is_scope_error, message_row, run_async
 
@@ -69,7 +69,10 @@ class FilesView(Adw.Bin):
         self._list.append(message_row(text))
 
     def _mount_base(self):
-        return account_mount_base(self._account.mount_location)
+        # Per-account folder: keeps same-named drives from different accounts
+        # from colliding on one mountpoint, and lets _is_mounted attribute a
+        # live mount to this account (so we never re-mount what's already there).
+        return mount_base_for(self._account)
 
     def _is_mounted(self, drive) -> bool:
         return self._mounts.is_mounted(
