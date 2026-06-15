@@ -1,12 +1,1 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!--
-  SPDX-License-Identifier: GPL-3.0-or-later
-  SPDX-FileCopyrightText: 2026 Shahab Nedaei
-  Cloudy app icon: a flat white rounded triangle on a black tile.
--->
-<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
-  <rect x="8" y="8" width="112" height="112" rx="28" fill="#000000"/>
-  <path d="M64 36 L92 90 L36 90 Z"
-        fill="#ffffff" stroke="#ffffff" stroke-width="12"
-        stroke-linejoin="round" stroke-linecap="round"/>
-</svg>
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg"><defs><clipPath id="t"><rect x="16" y="16" width="480" height="480" rx="108" ry="108"/></clipPath><linearGradient id="g" gradientUnits="userSpaceOnUse" x1="256" y1="125" x2="256" y2="395"><stop offset="0" stop-color="#FFFFFF"/><stop offset="1" stop-color="#C9C9C9"/></linearGradient></defs><g clip-path="url(#t)"><rect x="16" y="16" width="480" height="480" fill="#161616"/><g transform="rotate(-6 256 185)"><polygon points="128.0,185 256,247 256,269 128.0,207" fill="#9A9A9A"/><polygon points="256,247 384.0,185 384.0,207 256,269" fill="#7C7C7C"/><polygon points="256,123 384.0,185 256,247 128.0,185" fill="url(#g)"/></g><g transform="rotate(5 256 245)"><polygon points="128.0,245 256,307 256,329 128.0,267" fill="#9A9A9A"/><polygon points="256,307 384.0,245 384.0,267 256,329" fill="#7C7C7C"/><polygon points="256,183 384.0,245 256,307 128.0,245" fill="url(#g)"/></g><g transform="rotate(-4 256 305)"><polygon points="128.0,305 256,367 256,389 128.0,327" fill="#9A9A9A"/><polygon points="256,367 384.0,305 384.0,327 256,389" fill="#7C7C7C"/><polygon points="256,243 384.0,305 256,367 128.0,305" fill="url(#g)"/></g></g></svg>
