@@ -28,7 +28,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     container:
-      image: fedora:41
+      image: fedora:44
       options: --privileged   # flatpak-builder needs bubblewrap/user namespaces
     steps:
       - name: Install build dependencies
@@ -36,7 +36,7 @@ jobs:
           dnf -y install \
             make meson ninja-build gcc pkgconf-pkg-config \
             gtk4-devel libadwaita-devel glib2-devel \
-            python3 python3-gobject python3-devel \
+            python3 python3-gobject python3-devel python3-pyyaml \
             desktop-file-utils libappstream-glib appstream \
             rpm-build git rsync gettext findutils which blueprint-compiler \
             flatpak flatpak-builder
