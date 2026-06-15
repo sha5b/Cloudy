@@ -71,8 +71,14 @@ class NotificationManager:
         if self._timer is not None:
             return
         # Prime soon (baseline, no notifications), then poll on a steady cadence.
-        GLib.timeout_add_seconds(_FIRST_POLL_SECONDS, self._tick)
+        # The priming tick is one-shot — return False so it doesn't keep firing
+        # every _FIRST_POLL_SECONDS alongside the steady timer (doubling traffic).
+        GLib.timeout_add_seconds(_FIRST_POLL_SECONDS, self._prime_once)
         self._timer = GLib.timeout_add_seconds(_POLL_SECONDS, self._tick)
+
+    def _prime_once(self) -> bool:
+        self._tick()
+        return False  # GLib removes this source
 
     def _enabled(self) -> bool:
         try:
