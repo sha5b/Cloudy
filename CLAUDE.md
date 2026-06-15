@@ -23,7 +23,7 @@ make clean
 - `window.py` **cannot be imported standalone** in a smoke test — its `Gtk.Template` needs the compiled gresource. Skip it (and `application.py`, which imports it). py_compile still validates them.
 - **Single-instance** app: quit a running instance before relaunching, or a new launch just hands off and exits 0.
 - **New GSettings keys require `make build`** (recompiles + reinstalls the schema). `Gio.Settings.new()` *aborts the process* if the schema isn't installed.
-- App icons: edit the SVG at `data/icons/hicolor/scalable/apps/io.github.sha5b.Clouddrive.svg`, then regenerate the PNG sizes with `magick` (the only raster tool available here — no rsvg/inkscape) into `data/icons/hicolor/<size>x<size>/apps/` (sizes 48/64/128/256/512, all wired into `data/icons/meson.build`).
+- App icons: edit the SVG at `data/icons/hicolor/scalable/apps/io.github.sha5b.Cloudy.svg`, then regenerate the PNG sizes with `magick` (the only raster tool available here — no rsvg/inkscape) into `data/icons/hicolor/<size>x<size>/apps/` (sizes 48/64/128/256/512, all wired into `data/icons/meson.build`).
 
 ## Credentials
 

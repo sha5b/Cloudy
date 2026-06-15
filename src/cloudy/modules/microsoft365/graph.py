@@ -571,6 +571,9 @@ class GraphClient:
             ea = a.get("emailAddress") or {}
             attendees.append({
                 "name": html.unescape(ea.get("name") or ea.get("address", "")),
+                # email is needed by the inline editor: removing an attendee
+                # re-sends the *full* desired list (PATCH keeps attendees if omitted).
+                "email": ea.get("address", ""),
                 # none|organizer|tentativelyAccepted|accepted|declined|notResponded
                 "response": (a.get("status") or {}).get("response", "none"),
             })
@@ -656,7 +659,9 @@ class GraphClient:
             event["location"] = {"displayName": location}
         if body:
             event["body"] = {"contentType": "HTML" if html else "Text", "content": body}
-        if attendees:
+        # attendees: ``None`` = leave untouched; a list (even empty) = set it, so
+        # removing every attendee in the editor actually clears them server-side.
+        if attendees is not None:
             event["attendees"] = [
                 {"emailAddress": {"address": a}, "type": "required"}
                 for a in attendees if a

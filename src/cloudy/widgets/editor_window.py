@@ -17,10 +17,12 @@ from gettext import gettext as _
 
 from gi.repository import Adw, Gtk
 
+from .metrics import WIN_FORM
+
 
 class EditorWindow(Adw.Window):
     def __init__(self, parent, *, title: str, primary_label: str,
-                 default_width: int = 640, default_height: int = 600):
+                 default_width: int = WIN_FORM[0], default_height: int = WIN_FORM[1]):
         # NOT transient_for: GNOME treats transient windows as dialogs and hides
         # minimize/maximize. As an independent toplevel the user can park or
         # expand it (the decoration layout below requests min/max/close).

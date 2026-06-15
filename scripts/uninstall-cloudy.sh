@@ -16,9 +16,9 @@
 
 set -euo pipefail
 
-APP_ID="io.github.sha5b.Clouddrive"
-SCHEMA_PATH="/io/github/sha5b/Clouddrive/"
-SECRET_SCHEMA="io.github.sha5b.Clouddrive.Token"
+APP_ID="io.github.sha5b.Cloudy"
+SCHEMA_PATH="/io/github/sha5b/Cloudy/"
+SECRET_SCHEMA="io.github.sha5b.Cloudy.Token"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/cloudy"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/cloudy"
 MOUNTS_DIR="$DATA_DIR/mounts"

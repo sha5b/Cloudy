@@ -3,9 +3,9 @@
 #
 # Flatpak manifest for Cloudy. Targets the GNOME 50 runtime (Fedora 44).
 # Build:  flatpak-builder --user --install --force-clean _build/flatpak \
-#             io.github.sha5b.Clouddrive.yml
+#             io.github.sha5b.Cloudy.yml
 
-id: io.github.sha5b.Clouddrive
+id: io.github.sha5b.Cloudy
 runtime: org.gnome.Platform
 runtime-version: '50'
 sdk: org.gnome.Sdk
@@ -20,7 +20,7 @@ finish-args:
   - --device=dri
   # The sync/mount daemons and the Nautilus extension run on the HOST; the app
   # talks to them over the session bus.
-  - --talk-name=io.github.sha5b.Clouddrive
+  - --talk-name=io.github.sha5b.Cloudy
   # rclone FUSE mounts must run on the HOST (a mount made inside the sandbox is
   # invisible to the host file manager), so the app spawns rclone via
   # flatpak-spawn --host. This is a broad permission (host command execution);

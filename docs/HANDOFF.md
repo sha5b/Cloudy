@@ -12,14 +12,98 @@ Calendar)** and **Google (Gmail, Calendar, Drive)** on Fedora 44 (GNOME 50). It
 for mail/calendar) rather than reimplementing them. Read `docs/ARCHITECTURE.md`,
 `docs/AUTH.md`, `docs/SECRETS.md`, `docs/ROADMAP.md` for depth.
 
-## ⏭ Continue here — latest session (2026-06-14)
+## ⏭ Continue here — latest session (2026-06-15)
+
+### Done this session
+- **Inline event edit** (NEXT #1, see below) — shipped + built into RPM/Flatpak.
+- **Refactor**: shared event date/time helpers extracted to
+  `widgets/event_time.py` (`iso_to_local_naive`, `parse_hhmm`,
+  `local_to_utc_iso`); `event_window.py` + `event_compose.py` both use them.
+- **Full-app bug audit** (7 parallel review passes). High-confidence fixes
+  applied; the rest triaged below as **Known issues**.
+- **Bug fixes applied**:
+  1. `update_event` (both clients) now treats `attendees=None` as "leave
+     untouched" but a list — **including `[]`** — as "set it", so removing every
+     attendee in the inline editor actually clears them server-side (was a
+     no-op: `if attendees:` skipped empty lists).
+  2. Inline editor **multi-day events no longer collapse to one day** — the
+     original start→end day span is preserved across an edit (`_edit_day_span`).
+  3. `notifications.py` priming timer was sharing `_tick` (which returns `True`)
+     so the "prime once" timer fired **forever** alongside the steady timer,
+     doubling poll traffic — now a one-shot `_prime_once` returning `False`.
+- **App-ID rename** `io.github.sha5b.Clouddrive` → **`io.github.sha5b.Cloudy`**
+  (data files, schema id, D-Bus name/paths, icons, gresource prefix, Makefile,
+  uninstall script). Repo URLs kept as `Clouddrive-Fedora` (repo renamed later).
+  Best-effort dconf migration in `application._migrate_legacy_settings` carries
+  accounts/prefs over (works on host/RPM; Flatpak runtime has no `dconf` CLI →
+  re-add accounts there once).
+- **Per-account mountpoints** (`mounts.mount_base_for`): each account's drives
+  mount under their own folder so same-named drives across accounts don't
+  collide and a mount is attributable per account (no more re-mounting). D-Bus
+  status walks ancestors for the new nesting. Pruned stale flat-mount bookmarks.
+- **Nautilus extension**: removed all unmount/mountpoint code (nautilus-python
+  can't add sidebar items — unmount is via in-app Files → Unmount or native ⏏).
+- **Design system** (all 4 audit recommendations): `data/style.css` (loaded in
+  `application._load_styles`), `widgets/metrics.py` 4px scale + window sizes,
+  `source_nav.status_page`/`loading_box`, `.cloudy-meta`/`.cloudy-day`/
+  `.cloudy-chip`/`.cloudy-pill`/`.cloudy-section`, title-hierarchy fix, dead
+  `preferences.blp` removed, POTFILES completed. **Helpers are in place; rolling
+  `.cloudy-meta`/`loading_box` into every remaining caption/loading spot is
+  incremental polish best done with the app open to eyeball.**
+
+### Known issues (from the audit — NOT yet fixed, triaged by priority)
+**Security / privacy (needs a deliberate decision — behavior change):**
+- **Google OAuth has no `state` parameter** (`core/auth/google_oauth.py`) — CSRF /
+  auth-code-injection gap; PKCE covers the token exchange but not session
+  binding. Add a random `state`, validate on the redirect.
+- **Google OAuth stores `code`/`error` on the _class_, not the instance** — two
+  concurrent Google sign-ins race and cross-contaminate. Move result state onto
+  the per-flow `HTTPServer` instance.
+- **OAuth loopback binds `127.0.0.1` but the `redirect_uri` says `localhost`** —
+  Google treats these as distinct redirect URIs and `localhost` may resolve to
+  IPv6 `::1`; can make sign-in hang/fail. Make both use the same literal.
+- **Mail reader loads remote content** (`message_view.py`) — only JS is disabled;
+  external images load → tracking-pixel/IP leak on open. Consider blocking remote
+  resources by default with a "load remote images" opt-in.
+
+**Correctness (safe to fix, just not done yet):**
+- **No `@odata.nextLink` pagination** anywhere in `graph.py` (folders, groups,
+  contacts, drives, calendarView) — accounts with >`$top` items silently
+  truncate. Loop on `@odata.nextLink`.
+- **Mount success/failure mis-detected** (`mounts.py`): `rclone mount --daemon`
+  forks and returns 0 before the FUSE mount exists, so `is_mounted()` right after
+  reports `active=False` and real mount failures are swallowed. Poll with a short
+  timeout + capture daemon stderr.
+- **`recent_changes` walk isn't bounded _within_ a single directory**
+  (`file_browser.py`) — the deadline/count check is only at the top of the
+  per-dir loop, so one huge dir on a FUSE mount blocks past the budget. Check the
+  deadline in the inner loop and prune `dirnames` when over budget.
+- **Google `reply_all` drops CC/other recipients** (`google_client.py`) — only
+  replies to the original sender even when `reply_all=True`.
+- **Google all-day `end` is exclusive** (`_event_from_json`) — off-by-one vs the
+  Graph shape in views that compute/display the end day.
+- **`respond_event` only blocks `group:` ids** (`graph.py`) — a `shared:` id would
+  be prefixed into a `/me/events/shared:…/accept` path; reject/route it.
+- **Unbounded dedup growth** (`notifications.py`) — `_seen_mail` /
+  `_notified_events` only ever grow; cap/trim them (matters in background mode).
+
+**Low / robustness:** `create_share_link` hardcodes `scope:"organization"`
+(invalid for consumer OneDrive); Google `get_event` `body_html` heuristic
+(`"<" in s and ">" in s`) false-positives plain text; cid-image strip regex in
+`message_view.py` over-matches on `>` in attribute values and misses unquoted
+`src=cid:`; `file_browser` rename/new-folder accept names with `/`/`..`
+(path traversal within the browser); EDS publish builds a bare `VEVENT` with a
+likely-wrong parent UID so it may never publish. Full per-finding detail is in
+the session transcript.
+
+## ⏭ Continue here — session (2026-06-14)
 
 A very large session. **Everything below is built + reinstalled into the Flatpak,
 but NOT committed to git** — first task next time: review the working tree and
 commit on a branch (logical commits).
 
 ### Done this session
-- **Rebrand**: `com.fiberelements.Cloudy` → **`io.github.sha5b.Clouddrive`**;
+- **Rebrand**: `com.fiberelements.Cloudy` → **`io.github.sha5b.Cloudy`**;
   author → **Shahab Nedaei <ned.tabulov@gmail.com>** (sha5b). All file names,
   schema id, D-Bus name/paths, icons renamed.
 - **Packaging**: Fedora **RPM** (`packaging/cloudy.spec`, noarch, meson),
@@ -60,16 +144,18 @@ commit on a branch (logical commits).
   event-compose timezone (local→UTC); escaped `&` in a preferences title.
 
 ### NEXT (asked for, deferred to here)
-1. **Inline event edit** — the Edit (✏️) button currently opens a *separate*
-   editor window (`event_compose.EventWindow`). The user wants to edit **inside
-   the event window**: toggle the detail into an edit form (subject, all-day,
-   day, start/end time, location, **removable attendees**, body) with Save/Cancel
-   in the header, then call `client.update_event(eid, …)`. **Blocker to wire
-   first**: `get_event` returns attendees as `{name, response}` — **add `email`**
-   (Graph `emailAddress.address`, Google `email`) so removing people can re-send
-   the full attendee email list (PATCH preserves attendees if omitted, so you
-   must send the desired list). `update_event` already exists on both clients and
-   omits empty body/location.
+1. ~~**Inline event edit**~~ — **DONE** (next session, 2026-06-15). The Edit (✏️)
+   button now toggles `EventDetailWindow`'s detail pane into an inline edit form
+   (subject, all-day, day, start/end time, location, **removable attendees**,
+   description) with Save/Cancel in the header → `client.update_event(eid, …)`,
+   then reloads the detail. `get_event` now returns attendees with `email` (Graph
+   `emailAddress.address` / Google `email`) so the editor re-sends the full
+   desired attendee list (PATCH keeps attendees if omitted). Description prefills
+   only **plain-text** bodies — HTML-bodied events start blank (empty body is
+   omitted on PATCH, so the server's is preserved unless the user types).
+   *Edge*: removing **all** attendees doesn't clear them server-side, because
+   `update_event` only sends `attendees` when the list is non-empty.
+   `event_compose.EventWindow` is still used for **New** event creation.
 2. **Contacts dropdown**: only suggests after **Sign Out → Sign In** per account
    (grants `People.Read` / `contacts.other.readonly`). If it still doesn't show
    after re-consent, `GtkEntryCompletion` is deprecated/flaky in GTK4 — replace
@@ -251,7 +337,7 @@ credentials, provisioner, dbus_service, sync, auth/), `modules/microsoft365/`
 `widgets/` (files/mail/calendar/dashboard/message/event views, **source_nav**,
 **file_browser**, clients, graph_helper, format). Data in `data/` (gschema,
 desktop, metainfo, blueprints, icons), Flatpak manifest
-`io.github.sha5b.Clouddrive.yml`.
+`io.github.sha5b.Cloudy.yml`.
 ```
 widgets/source_nav.py   shared: SourceTabs, run_async, listbox/placeholder
                         helpers, is_scope_error, add-shared dialog, pin helpers

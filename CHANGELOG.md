@@ -12,6 +12,57 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Packaging**: Fedora **RPM** (`make rpm`) and a single-file **Flatpak bundle**
+  (`make flatpak-bundle`); `make release` produces both into `release/` and
+  installs the bundle. OAuth client IDs/secrets are baked at build time from
+  `.env` into a GSettings vendor override (the committed repo ships none).
+- **Calendar redesign**: a month **grid** (in the Calendar tab and the Dashboard)
+  with past + future events, plus an agenda list.
+- **Event window**: clicking an event opens a non-modal detail window with an
+  **attendee response tracker** (pills grouped by RSVP status), Join/Open, RSVP,
+  Delete, and **inline edit** (subject, all-day, day, start/end time, location,
+  removable attendees, description) → `update_event`.
+- **Mail compose / reply / reply-all** in a non-modal editor; **contacts
+  autocomplete** (Microsoft People API; Google connections + other-contacts).
+- **Shared / group sources** for Mail & Calendar (Microsoft): **Me / Teams /
+  Shared** tabs, add-shared-mailbox dialog, and **★ pin** sources to the
+  Dashboard with live unread/event counts.
+- **Dashboard** rework: pinned sources, upcoming events, recent mail, and recent
+  file changes — cached (stale-while-revalidate) with a Refresh button.
+- **Mount layout** setting (`one-folder` vs `individual`) + per-account mount
+  location; host-visible Flatpak mounts via `flatpak-spawn --host`.
+- **Desktop integration**: registers as the system `mailto:` / `.ics` handler;
+  new-mail / upcoming-event notifications; optional Evolution Data Server
+  calendar mirror; run-in-background mode.
+
+### Changed
+- **App ID renamed** `io.github.sha5b.Clouddrive` → **`io.github.sha5b.Cloudy`**
+  (schema id, D-Bus name/paths, icons, manifest, scripts). A best-effort dconf
+  migration carries pre-rename accounts/prefs over on host/RPM installs.
+- **Per-account mountpoints**: each account's drives mount under their own
+  folder (`…/mounts/<account>/<drive>`), so identically-named drives across
+  accounts no longer collide and a live mount is attributable to its account —
+  fixing repeated/duplicate mounting.
+- **Design system**: added a shared stylesheet (`data/style.css`) + a 4px
+  spacing scale (`widgets/metrics.py`), unified empty/loading states
+  (`source_nav.status_page` / `loading_box`), one secondary-text style
+  (`.cloudy-meta`), semantic calendar classes (`.cloudy-day`/`.cloudy-chip`/
+  `.cloudy-pill`), a consistent title hierarchy, and standard editor/detail
+  window sizes. Removed the dead `preferences.blp`.
+- **Rebranded** `com.fiberelements.Cloudy` → `io.github.sha5b.Clouddrive`
+  (schema id, D-Bus name/paths, icons, desktop/metainfo all renamed).
+- **Files backend** is now `rclone` FUSE mounts (live two-way network drives);
+  the abraunegg/onedriver path is retired as the primary mechanism.
+- Preferences reorganized into **General** + **Accounts** (per-account services
+  on/off, offline-sync toggle, mount location); the Modules tab was removed.
+
+### Fixed
+- Inline event editor: removing **all** attendees now clears them server-side
+  (was a no-op — an empty list was treated as "leave unchanged"); **multi-day**
+  events no longer collapse to a single day when edited.
+- Notifications: the "prime once" poll timer no longer fires forever alongside
+  the steady timer (it was doubling poll traffic).
+
 - Preferences → General: mount location (folder chooser), file-caching mode
   (on-demand "full" vs minimal streaming), and start-at-login (writes a host
   autostart entry). Mount location + cache mode are honored by the rclone mount.

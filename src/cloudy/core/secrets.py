@@ -21,7 +21,7 @@ from gi.repository import Secret  # noqa: E402
 
 #: Schema describing the attributes we key secrets on.
 _SCHEMA = Secret.Schema.new(
-    "io.github.sha5b.Clouddrive.Token",
+    "io.github.sha5b.Cloudy.Token",
     Secret.SchemaFlags.NONE,
     {
         "account": Secret.SchemaAttributeType.STRING,

@@ -45,3 +45,4 @@ venv/
 # Generated translation artifacts
 /po/*.gmo
 /po/*.mo
+static/

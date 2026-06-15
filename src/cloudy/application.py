@@ -27,6 +27,10 @@ class CloudyApplication(Adw.Application):
         self.version = version
         self.application_id = application_id
 
+        # The app id was renamed io.github.sha5b.Clouddrive -> .Cloudy, which
+        # moves the GSettings/dconf path; carry the user's accounts + prefs over.
+        self._migrate_legacy_settings()
+
         # Core services, constructed once and shared with the window/modules.
         self.settings = Gio.Settings.new(application_id)
         self.secrets = SecretStore()
@@ -43,6 +47,38 @@ class CloudyApplication(Adw.Application):
         self.notifier = NotificationManager(self)
 
         self._setup_actions()
+
+    @staticmethod
+    def _migrate_legacy_settings() -> None:
+        """One-time, best-effort copy of pre-rename settings (accounts + prefs).
+
+        The app id changed ``io.github.sha5b.Clouddrive`` → ``.Cloudy``, moving
+        the dconf subtree; without this the user's accounts and preferences would
+        come up empty after the rename. Copies the old subtree to the new path on
+        first run only — guarded so it never raises, no-ops if ``dconf`` isn't on
+        PATH (e.g. inside the Flatpak runtime), the old data is gone, or the new
+        config already exists (don't clobber a fresh/already-migrated setup)."""
+        import shutil
+        import subprocess
+
+        dconf = shutil.which("dconf")
+        if not dconf:
+            return
+        old, new = "/io/github/sha5b/Clouddrive/", "/io/github/sha5b/Cloudy/"
+        try:
+            existing = subprocess.run(
+                [dconf, "read", new + "accounts"],
+                capture_output=True, text=True, timeout=5).stdout.strip()
+            if existing:
+                return  # already migrated or a fresh config — leave it alone
+            dump = subprocess.run(
+                [dconf, "dump", old], capture_output=True, text=True, timeout=5)
+            if dump.returncode != 0 or not dump.stdout.strip():
+                return  # nothing to migrate
+            subprocess.run([dconf, "load", new], input=dump.stdout, text=True,
+                           timeout=5, check=False)
+        except (OSError, subprocess.SubprocessError):
+            pass
 
     # -- OAuth client ids (env override wins over GSettings) -------------
     def microsoft_client_id(self) -> str:
@@ -105,9 +141,27 @@ class CloudyApplication(Adw.Application):
 
     def do_startup(self):
         Adw.Application.do_startup(self)
+        self._load_styles()
         # Discover modules now; activation happens per user settings.
         self.engine.discover()
         self._provision_backends()
+
+    def _load_styles(self) -> None:
+        """Load the app stylesheet (widgets/metrics.py holds the matching
+        spacing scale). Best-effort: a missing resource must never crash."""
+        try:
+            from gi.repository import Gdk, Gtk
+
+            provider = Gtk.CssProvider()
+            provider.load_from_resource(
+                "/io/github/sha5b/Cloudy/style.css")
+            display = Gdk.Display.get_default()
+            if display is not None:
+                Gtk.StyleContext.add_provider_for_display(
+                    display, provider,
+                    Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _provision_backends(self) -> None:
         # Ensure rclone is available without any user/system install (rootless

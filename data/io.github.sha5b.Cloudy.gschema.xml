@@ -4,7 +4,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 SPDX-FileCopyrightText: 2026 Shahab Nedaei
 -->
 <schemalist gettext-domain="cloudy">
-  <schema id="io.github.sha5b.Clouddrive" path="/io/github/sha5b/Clouddrive/">
+  <schema id="io.github.sha5b.Cloudy" path="/io/github/sha5b/Cloudy/">
 
     <key name="window-width" type="i">
       <default>900</default>

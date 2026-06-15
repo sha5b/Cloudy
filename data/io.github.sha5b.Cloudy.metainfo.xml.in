@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-License-Identifier: GPL-3.0-or-later
+SPDX-FileCopyrightText: 2026 Shahab Nedaei
+-->
+<component type="desktop-application">
+  <id>io.github.sha5b.Cloudy</id>
+
+  <name>Cloudy</name>
+  <summary>OneDrive, SharePoint and unified mail and calendar</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <developer id="io.github.sha5b">
+    <name>Shahab Nedaei</name>
+  </developer>
+
+  <description>
+    <p>
+      Cloudy brings Microsoft 365 and Google into one GNOME-native window. It
+      mounts OneDrive, SharePoint and Teams libraries as live network drives in
+      your file manager, and gives mail and calendar from both Microsoft and
+      Google one consistent, provider-agnostic surface.
+    </p>
+    <p>
+      It orchestrates proven backends — rclone for the file mounts, and the
+      Microsoft Graph and Google REST APIs for mail and calendar — rather than
+      reinventing them, behind one adaptive interface.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Microsoft 365 (OneDrive, SharePoint and Teams libraries) and Google (Gmail, Calendar, Drive) accounts side by side</li>
+      <li>Files mounted as live two-way network drives, visible in GNOME Files and an in-app browser</li>
+      <li>Mail with read, compose and reply, plus Me / Teams / Shared mailbox sources</li>
+      <li>A month calendar and agenda with event create, edit, delete and RSVP</li>
+      <li>A dashboard aggregating upcoming events, recent mail and recent file changes across every account</li>
+      <li>Desktop integration: system mail and calendar handler, new-mail notifications, and file-manager status</li>
+      <li>Tokens stored securely in the system keyring — never in plain text</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">io.github.sha5b.Cloudy.desktop</launchable>
+
+  <content_rating type="oars-1.1" />
+
+  <url type="homepage">https://github.com/sha5b/Clouddrive-Fedora</url>
+  <url type="bugtracker">https://github.com/sha5b/Clouddrive-Fedora/issues</url>
+  <url type="vcs-browser">https://github.com/sha5b/Clouddrive-Fedora</url>
+
+  <keywords>
+    <keyword>OneDrive</keyword>
+    <keyword>SharePoint</keyword>
+    <keyword>Microsoft 365</keyword>
+    <keyword>Teams</keyword>
+    <keyword>Google</keyword>
+    <keyword>Gmail</keyword>
+    <keyword>Cloud</keyword>
+    <keyword>Sync</keyword>
+    <keyword>Mail</keyword>
+    <keyword>Calendar</keyword>
+    <keyword>Files</keyword>
+  </keywords>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#d5d7da</color>
+    <color type="primary" scheme_preference="dark">#1d1d1d</color>
+  </branding>
+
+  <translation type="gettext">cloudy</translation>
+
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/sha5b/Clouddrive-Fedora/main/data/screenshots/calendar.png</image>
+      <caption>A month calendar and agenda across all your accounts</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/sha5b/Clouddrive-Fedora/main/data/screenshots/files-libraries.png</image>
+      <caption>OneDrive, SharePoint and Teams libraries mounted as live drives</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/sha5b/Clouddrive-Fedora/main/data/screenshots/mail.png</image>
+      <caption>Unified mail with Me, Teams and Shared sources</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/sha5b/Clouddrive-Fedora/main/data/screenshots/files-browser.png</image>
+      <caption>Browse mounted libraries inside the app</caption>
+    </screenshot>
+  </screenshots>
+
+  <releases>
+    <release version="0.1.0" date="2026-06-15">
+      <description>
+        <p>First preview release.</p>
+        <ul>
+          <li>Microsoft 365 and Google sign-in</li>
+          <li>OneDrive, SharePoint and Teams libraries mounted as live drives, with an in-app file browser</li>
+          <li>Unified mail (read, compose, reply) and a month calendar with event create, edit, delete and RSVP</li>
+          <li>Dashboard aggregating events, mail and file changes across accounts</li>
+          <li>Desktop and file-manager integration; tokens stored in the system keyring</li>
+        </ul>
+      </description>
+    </release>
+  </releases>
+</component>

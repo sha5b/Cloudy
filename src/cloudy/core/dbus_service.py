@@ -21,13 +21,13 @@ from typing import Callable, Optional
 
 from gi.repository import Gio, GLib
 
-BUS_NAME = "io.github.sha5b.Clouddrive"
-OBJECT_PATH = "/io/github/sha5b/Clouddrive/Sync"
-INTERFACE = "io.github.sha5b.Clouddrive.Sync"
+BUS_NAME = "io.github.sha5b.Cloudy"
+OBJECT_PATH = "/io/github/sha5b/Cloudy/Sync"
+INTERFACE = "io.github.sha5b.Cloudy.Sync"
 
 INTROSPECTION_XML = """
 <node>
-  <interface name="io.github.sha5b.Clouddrive.Sync">
+  <interface name="io.github.sha5b.Cloudy.Sync">
     <method name="StatusForPath">
       <arg type="s" name="path" direction="in"/>
       <arg type="s" name="status" direction="out"/>
@@ -91,10 +91,16 @@ class SyncStatusService:
             return "ignored"
         if root not in p.parents and p != root:
             return "ignored"
-        # The managed mount is the immediate child of mount_root.
-        rel = p.relative_to(root)
-        mountpoint = root / rel.parts[0] if rel.parts else root
-        return "synced" if os.path.ismount(mountpoint) else "offline"
+        # A managed mount sits at root/<drive> or root/<account>/<drive> (drives
+        # are namespaced per account). Walk up to root; if any ancestor is an
+        # active mountpoint, the path lives on a mounted Cloudy drive.
+        node = p
+        while True:
+            if os.path.ismount(node):
+                return "synced"
+            if node == root:
+                return "offline"
+            node = node.parent
 
     def emit_status_changed(self, path: str, status: str) -> None:
         if not self._reg_id:

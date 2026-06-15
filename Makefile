@@ -4,7 +4,7 @@
 # Convenience wrapper around Meson / Flatpak for reproducible builds.
 # See docs/BUILDING.md for details.
 
-APP_ID      := io.github.sha5b.Clouddrive
+APP_ID      := io.github.sha5b.Cloudy
 VERSION     := $(shell sed -n "s/.*version: '\([0-9.]*\)'.*/\1/p" meson.build | head -1)
 BUILDDIR    := _build
 PREFIX      := $(CURDIR)/_install

@@ -151,8 +151,7 @@ def _responses_section(attendees: list) -> Gtk.Widget:
         label_txt, accent = _RESP_META[status][1], _RESP_META[status][2]
         section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         cap = Gtk.Label(label=f"{label_txt} · {len(names)}", xalign=0)
-        cap.add_css_class("caption")
-        cap.add_css_class("dim-label")
+        cap.add_css_class("cloudy-meta")
         section.append(cap)
         # Adw.WrapBox: plain wrapping layout — unlike Gtk.FlowBox it doesn't wrap
         # each pill in a selectable/hoverable child (that was the odd padded
@@ -168,16 +167,15 @@ def _responses_section(attendees: list) -> Gtk.Widget:
 def _attendee_pill(name: str, status: str) -> Gtk.Widget:
     icon_name, _label, accent = _RESP_META[status]
     pill = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-    pill.add_css_class("card")
-    pill.set_margin_top(0)
+    pill.add_css_class("cloudy-pill")
     dot = Gtk.Image.new_from_icon_name(icon_name)
     dot.set_pixel_size(12)
     dot.add_css_class(accent)
-    dot.set_margin_start(8)
+    dot.set_margin_start(6)
     pill.append(dot)
     label = Gtk.Label(label=esc(sender_name(name)) or _("(unknown)"), use_markup=True,
                       ellipsize=Pango.EllipsizeMode.END, max_width_chars=24,
-                      margin_top=4, margin_bottom=4, margin_end=10)
+                      margin_top=4, margin_bottom=4, margin_end=8)
     pill.append(label)
     return pill
 

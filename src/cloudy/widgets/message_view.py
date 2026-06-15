@@ -177,17 +177,11 @@ def html_body_widget(content: str, is_html: bool) -> Gtk.Widget:
 
 
 def _empty_placeholder() -> Gtk.Widget:
-    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, vexpand=True,
-                  hexpand=True, valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER)
-    icon = Gtk.Image.new_from_icon_name("mail-read-symbolic")
-    icon.set_pixel_size(40)
-    icon.add_css_class("dim-label")
-    box.append(icon)
-    label = Gtk.Label(label=_("No message content"))
-    label.add_css_class("dim-label")
-    label.add_css_class("title-4")
-    box.append(label)
-    return box
+    # The one shared empty-state widget, so this matches every other "nothing
+    # here" surface in the app instead of a bespoke icon+title box.
+    from .source_nav import status_page
+
+    return status_page("mail-read-symbolic", _("No message content"))
 
 
 def _text_fallback(content: str) -> Gtk.Widget:

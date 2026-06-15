@@ -343,7 +343,7 @@ class CloudyPreferences(Adw.PreferencesDialog):
 
 def _write_autostart(enabled: bool) -> None:
     """Create/remove a host autostart .desktop entry (rootless)."""
-    path = Path(GLib.get_user_config_dir()) / "autostart" / "io.github.sha5b.Clouddrive.desktop"
+    path = Path(GLib.get_user_config_dir()) / "autostart" / "io.github.sha5b.Cloudy.desktop"
     if enabled:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(

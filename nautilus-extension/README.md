@@ -7,7 +7,7 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
 
 This extension runs **on the host**, inside the Nautilus process — Nautilus does
 not load extensions from inside a Flatpak sandbox. It communicates with the
-sandboxed Cloudy app over **D-Bus** (`io.github.sha5b.Clouddrive`).
+sandboxed Cloudy app over **D-Bus** (`io.github.sha5b.Cloudy`).
 
 ## What it provides
 

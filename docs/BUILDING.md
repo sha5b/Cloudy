@@ -21,7 +21,7 @@ make flatpak flatpak-run
 ```
 
 Pinned for reproducibility: GNOME runtime/SDK **50**, `blueprint-compiler`
-**v0.16.0** (both in `io.github.sha5b.Clouddrive.yml` and
+**v0.16.0** (both in `io.github.sha5b.Cloudy.yml` and
 `subprojects/blueprint-compiler.wrap`).
 
 The manual steps follow.
@@ -55,12 +55,12 @@ flatpak install --user \
 
 # Build + install into the user installation
 flatpak-builder --user --install --force-clean \
-    _build/flatpak io.github.sha5b.Clouddrive.yml
+    _build/flatpak io.github.sha5b.Cloudy.yml
 
-flatpak run io.github.sha5b.Clouddrive
+flatpak run io.github.sha5b.Cloudy
 ```
 
-GNOME Builder: *Open Project* → it detects `io.github.sha5b.Clouddrive.yml`
+GNOME Builder: *Open Project* → it detects `io.github.sha5b.Cloudy.yml`
 and the Run button builds & launches the Flatpak.
 
 ### Flatpak & file mounts (host-visible)
@@ -159,7 +159,7 @@ scripts/uninstall-cloudy.sh --purge   # ALSO delete tokens, settings, caches
 
 # then remove the package itself:
 sudo dnf remove cloudy                              # RPM
-flatpak uninstall --user io.github.sha5b.Clouddrive # Flatpak (--delete-data too)
+flatpak uninstall --user io.github.sha5b.Cloudy # Flatpak (--delete-data too)
 ```
 
 ## Host backends (runtime dependencies, not build deps)

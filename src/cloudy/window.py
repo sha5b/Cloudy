@@ -9,7 +9,7 @@ from gi.repository import Adw, Gio, GLib, Gtk
 
 from .core.interfaces import capabilities_of
 
-RESOURCE_PREFIX = "/io/github/sha5b/Clouddrive"
+RESOURCE_PREFIX = "/io/github/sha5b/Cloudy"
 
 # Capability key -> (translated label, symbolic icon).
 CAPABILITY_UI = {

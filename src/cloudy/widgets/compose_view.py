@@ -27,8 +27,7 @@ class ComposeWindow(EditorWindow):
                  to: str = "", subject: str = "", body: str = "",
                  title: str | None = None):
         super().__init__(window, title=title or _("New message"),
-                         primary_label=_("Send"), default_width=660,
-                         default_height=580)
+                         primary_label=_("Send"))
         self._window = window
         self._account = account
         self._send_fn = send_fn

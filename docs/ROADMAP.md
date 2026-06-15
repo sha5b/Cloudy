@@ -35,7 +35,7 @@ Staged plan. Each stage is independently useful and testable on Fedora 44.
 - Host user systemd units for the mount/sync daemons.
 
 ## Stage 4 — Nautilus integration (the extras) ✅
-- App exports a **D-Bus sync-status service** (`io.github.sha5b.Clouddrive`,
+- App exports a **D-Bus sync-status service** (`io.github.sha5b.Cloudy`,
   `…/Sync`): `StatusForPath`, `SyncPath`, `FreeUpSpace`, `CreateShareLink`,
   `StatusChanged`.
 - `nautilus-python` (API 4.0) `InfoProvider` draws emblems and `MenuProvider`
@@ -56,12 +56,18 @@ Staged plan. Each stage is independently useful and testable on Fedora 44.
 - **Gmail provider** ✅: Google browser sign-in (loopback + PKCE, urllib),
   Gmail Inbox + Google Calendar via a GoogleClient normalized to the same shape
   as Graph; Mail/Calendar views are now provider-agnostic.
-- Still to do: message reading/compose, folder switching, free/busy via
-  `getSchedule`, contacts; optional `eds_reader`.
+- Done since: message reading (HTML), compose / reply / reply-all, folder
+  switching, **Me/Teams/Shared** sources, contacts autocomplete, a month grid +
+  agenda, and event create / inline-edit / delete + RSVP.
+- Still to do: free/busy via `getSchedule`; `@odata.nextLink` pagination;
+  full RSVP state for Google calendar.
 
-## Stage 7 — Packaging & polish
-- Flatpak on Flathub; Background/autostart portal for the sync service.
-- Adaptive UI pass, translations, metainfo screenshots & release notes.
+## Stage 7 — Packaging & polish ✅ (first pass)
+- **RPM** (`make rpm`) and a single-file **Flatpak bundle** (`make
+  flatpak-bundle` / `make release`); build-time baked credentials; run-in-
+  background mode; system `mailto:` / `.ics` handler.
+- Still to do: Flathub submission, adaptive UI pass, translations, metainfo
+  screenshots & release notes.
 
 ## Known hard limits (set expectations)
 - No CFAPI-grade placeholders / kernel overlay icons / seamless dehydration on

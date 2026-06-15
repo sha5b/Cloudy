@@ -16,6 +16,8 @@ from typing import Callable
 
 from gi.repository import Adw, GLib, Gtk
 
+from .metrics import ICON_LG, SPACE_L, SPACE_M
+
 
 # -- background work ------------------------------------------------------
 def run_async(work: Callable[[], object], on_done: Callable[[object, str | None], object]
@@ -50,19 +52,47 @@ def clear_listbox(listbox: Gtk.ListBox) -> None:
 def message_row(text: str) -> Gtk.ListBoxRow:
     """A non-interactive placeholder row with a dimmed, centered label."""
     row = Gtk.ListBoxRow(activatable=False, selectable=False)
-    label = Gtk.Label(label=text, margin_top=18, margin_bottom=18,
+    label = Gtk.Label(label=text, margin_top=SPACE_L, margin_bottom=SPACE_L,
                       wrap=True, justify=Gtk.Justification.CENTER)
     label.add_css_class("dim-label")
     row.set_child(label)
     return row
 
 
+def status_page(icon: str, title: str, description: str | None = None
+                ) -> Adw.StatusPage:
+    """The one empty/error-state widget for the whole app. Use this instead of
+    hand-rolling icon+title boxes so every "nothing here" / "couldn't load"
+    surface looks the same."""
+    page = Adw.StatusPage(icon_name=icon, title=title, vexpand=True)
+    if description:
+        page.set_description(description)
+    return page
+
+
+def loading_box(text: str | None = None) -> Gtk.Widget:
+    """The one loading widget for the whole app: a centered spinner with an
+    optional dimmed caption."""
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SPACE_M,
+                  halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER,
+                  hexpand=True, vexpand=True)
+    spinner = Gtk.Spinner(width_request=ICON_LG, height_request=ICON_LG)
+    spinner.start()
+    box.append(spinner)
+    if text:
+        label = Gtk.Label(label=text)
+        label.add_css_class("dim-label")
+        box.append(label)
+    return box
+
+
 def action_row(text: str, button_label: str, on_click: Callable[[], None]
                ) -> Gtk.ListBoxRow:
     """A placeholder row with a call-to-action button (e.g. re-sign-in)."""
     row = Gtk.ListBoxRow(activatable=False, selectable=False)
-    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
-                  margin_top=18, margin_bottom=18, margin_start=12, margin_end=12)
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SPACE_M,
+                  margin_top=SPACE_L, margin_bottom=SPACE_L,
+                  margin_start=SPACE_M, margin_end=SPACE_M)
     label = Gtk.Label(label=text, wrap=True, justify=Gtk.Justification.CENTER)
     label.add_css_class("dim-label")
     box.append(label)

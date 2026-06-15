@@ -382,7 +382,9 @@ class GoogleClient:
             event["location"] = location
         if body:
             event["description"] = body
-        if attendees:
+        # attendees: ``None`` = leave untouched; a list (even empty) = set it, so
+        # removing every attendee in the editor actually clears them server-side.
+        if attendees is not None:
             event["attendees"] = [{"email": a} for a in attendees if a]
         return self._patch(
             f"{CALENDAR}/calendars/primary/events/{event_id}", event, SCOPES_CALENDAR)
@@ -397,8 +399,11 @@ class GoogleClient:
         data = self._get(f"{CALENDAR}/calendars/primary/events/{event_id}", SCOPES_CALENDAR)
         base = self._event_from_json(data)
         organizer = data.get("organizer") or {}
-        # {name, response}; Google response: needsAction|declined|tentative|accepted.
+        # {name, email, response}; Google response:
+        # needsAction|declined|tentative|accepted. email lets the inline editor
+        # re-send the full desired attendee list when one is removed.
         attendees = [{"name": a.get("displayName") or a.get("email", ""),
+                      "email": a.get("email", ""),
                       "response": a.get("responseStatus", "needsAction")}
                      for a in data.get("attendees", []) or []]
         description = data.get("description", "") or ""

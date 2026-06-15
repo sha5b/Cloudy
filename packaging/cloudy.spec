@@ -10,7 +10,7 @@
 # `make rpm` reads them from .env automatically. Without them the package builds
 # fine but ships no credentials (sign-in then needs per-user CLOUDY_* config).
 
-%global appid io.github.sha5b.Clouddrive
+%global appid io.github.sha5b.Cloudy
 
 Name:           cloudy
 Version:        0.1.0

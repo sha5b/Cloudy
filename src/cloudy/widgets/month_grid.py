@@ -19,6 +19,7 @@ from gettext import gettext as _
 from gi.repository import Gtk, Pango
 
 from .format import esc
+from .metrics import EDGE, SPACE_S, SPACE_XS
 
 _WEEKDAYS = (_("Mon"), _("Tue"), _("Wed"), _("Thu"), _("Fri"), _("Sat"), _("Sun"))
 _MAX_CHIPS = 3  # per day cell before "+N more"
@@ -40,8 +41,9 @@ class MonthGrid(Gtk.Box):
         self._year, self._month = today.year, today.month
 
         # Header: ‹ Month Year › … Today
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
-                         margin_top=10, margin_bottom=8, margin_start=16, margin_end=16)
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=SPACE_S,
+                         margin_top=SPACE_S, margin_bottom=SPACE_S,
+                         margin_start=EDGE, margin_end=EDGE)
         prev = Gtk.Button(icon_name="go-previous-symbolic", tooltip_text=_("Previous month"))
         prev.add_css_class("flat")
         prev.connect("clicked", lambda *_a: self._shift(-1))
@@ -60,17 +62,17 @@ class MonthGrid(Gtk.Box):
         self.append(header)
 
         # Weekday labels.
-        self._weekrow = Gtk.Grid(column_homogeneous=True, margin_start=12, margin_end=12)
+        self._weekrow = Gtk.Grid(column_homogeneous=True,
+                                 margin_start=EDGE, margin_end=EDGE)
         for col, name in enumerate(_WEEKDAYS):
             lbl = Gtk.Label(label=name, xalign=0)
-            lbl.add_css_class("caption")
-            lbl.add_css_class("dim-label")
+            lbl.add_css_class("cloudy-meta")
             self._weekrow.attach(lbl, col, 0, 1, 1)
         self.append(self._weekrow)
 
         self._grid = Gtk.Grid(column_homogeneous=True, row_homogeneous=True,
-                              column_spacing=4, row_spacing=4,
-                              margin_start=12, margin_end=12, margin_bottom=12)
+                              column_spacing=SPACE_XS, row_spacing=SPACE_XS,
+                              margin_start=EDGE, margin_end=EDGE, margin_bottom=EDGE)
         self._grid.set_vexpand(True)
         self._grid.set_hexpand(True)
         scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER,
@@ -136,11 +138,15 @@ class MonthGrid(Gtk.Box):
 
     def _day_cell(self, day: date, in_month: bool, is_today: bool,
                   events: list[dict]) -> Gtk.Widget:
-        cell = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        cell = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SPACE_XS)
         cell.add_css_class("card")
+        cell.add_css_class("cloudy-day")
         if not in_month:
-            cell.set_opacity(0.45)
-        num = Gtk.Label(label=str(day.day), xalign=0, margin_top=2, margin_start=6)
+            cell.add_css_class("outside")
+        if is_today:
+            cell.add_css_class("today")
+        num = Gtk.Label(label=str(day.day), xalign=0, margin_top=SPACE_XS // 2,
+                        margin_start=SPACE_S)
         num.add_css_class("caption")
         if is_today:
             num.add_css_class("accent")
@@ -151,9 +157,8 @@ class MonthGrid(Gtk.Box):
             cell.append(self._chip(ev))
         if len(events) > _MAX_CHIPS:
             more = Gtk.Label(label=_("+%d more") % (len(events) - _MAX_CHIPS),
-                             xalign=0, margin_start=6)
-            more.add_css_class("caption")
-            more.add_css_class("dim-label")
+                             xalign=0, margin_start=SPACE_S)
+            more.add_css_class("cloudy-meta")
             cell.append(more)
         return cell
 
@@ -163,12 +168,11 @@ class MonthGrid(Gtk.Box):
         text = f"{when} {ev.get('subject') or _('(no title)')}".strip()
         btn = Gtk.Button(has_frame=False)
         btn.add_css_class("flat")
+        btn.add_css_class("cloudy-chip")
         lbl = Gtk.Label(label=esc(text), xalign=0, use_markup=True,
                         ellipsize=Pango.EllipsizeMode.END)
         lbl.add_css_class("caption")
         btn.set_child(lbl)
-        btn.set_margin_start(2)
-        btn.set_margin_end(2)
         if self._on_event is not None:
             btn.connect("clicked", lambda *_a, e=ev: self._on_event(e))
         return btn

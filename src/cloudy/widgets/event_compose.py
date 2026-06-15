@@ -11,12 +11,13 @@ off-thread. Also exposes :func:`parse_ics` for opening ``.ics`` invitations.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from gettext import gettext as _
 
 from gi.repository import Adw, GLib, Gtk
 
 from .editor_window import EditorWindow
+from .event_time import local_to_utc_iso, parse_hhmm
 from .source_nav import run_async
 
 
@@ -55,24 +56,12 @@ def parse_ics(path: str) -> dict:
     return fields
 
 
-def _parse_hhmm(text: str, fallback: tuple[int, int]) -> tuple[int, int]:
-    try:
-        h, _sep, m = text.strip().partition(":")
-        hh, mm = int(h), int(m or 0)
-        if 0 <= hh < 24 and 0 <= mm < 60:
-            return hh, mm
-    except (ValueError, TypeError):
-        pass
-    return fallback
-
-
 class EventWindow(EditorWindow):
     def __init__(self, window, *, on_calendar: str, create_fn,
                  title: str | None = None, initial: dict | None = None,
                  primary_label: str | None = None):
         super().__init__(window, title=title or _("New event"),
-                         primary_label=primary_label or _("Create"),
-                         default_width=560, default_height=640)
+                         primary_label=primary_label or _("Create"))
         self._window = window
         self._create_fn = create_fn
 
@@ -148,8 +137,8 @@ class EventWindow(EditorWindow):
         if all_day:
             start, end = day, day + timedelta(days=1)
         else:
-            sh, sm = _parse_hhmm(self._start_time.get_text(), (9, 0))
-            eh, em = _parse_hhmm(self._end_time.get_text(), (10, 0))
+            sh, sm = parse_hhmm(self._start_time.get_text(), (9, 0))
+            eh, em = parse_hhmm(self._end_time.get_text(), (10, 0))
             start = day.replace(hour=sh, minute=sm)
             end = day.replace(hour=eh, minute=em)
             if end <= start:
@@ -157,17 +146,7 @@ class EventWindow(EditorWindow):
 
         # The calendar/time fields give a naive *local* wall-clock pick, but the
         # clients send the ISO slot as UTC (Graph strips the Z + timeZone=UTC;
-        # Google honours the Z). Convert local→UTC so the event lands at the time
-        # the user chose. All-day stays on its picked date — shifting midnight
-        # across the UTC boundary would move it to the wrong day.
-        local_tz = datetime.now().astimezone().tzinfo
-
-        def iso(dt: datetime) -> str:
-            if all_day:
-                return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-            return (dt.replace(tzinfo=local_tz).astimezone(timezone.utc)
-                    .strftime("%Y-%m-%dT%H:%M:%SZ"))
-
+        # Google honours the Z); local_to_utc_iso does the conversion.
         attendees = [a.strip() for a in self._attendees.get_text().split(",")
                      if a.strip()]
         buf = self._body.get_buffer()
@@ -177,7 +156,9 @@ class EventWindow(EditorWindow):
         self.toast(_("Creating event…"))
         create_fn = self._create_fn
         run_async(
-            lambda: create_fn(subject=subject, start_iso=iso(start), end_iso=iso(end),
+            lambda: create_fn(subject=subject,
+                              start_iso=local_to_utc_iso(start, all_day=all_day),
+                              end_iso=local_to_utc_iso(end, all_day=all_day),
                               location=self._location.get_text().strip(), body=body,
                               attendees=attendees, all_day=all_day),
             self._on_created)

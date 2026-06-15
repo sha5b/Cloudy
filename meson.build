@@ -12,7 +12,7 @@ gnome = import('gnome')
 
 # Reverse-DNS application id used across the .desktop, metainfo, gschema,
 # GResource and D-Bus surfaces. Change this single value to rebrand.
-application_id = 'io.github.sha5b.Clouddrive'
+application_id = 'io.github.sha5b.Cloudy'
 
 # Make the values available to configured files (launcher, desktop, etc.).
 prefix     = get_option('prefix')

@@ -4,8 +4,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 SPDX-FileCopyrightText: 2026 Shahab Nedaei
 -->
 <gresources>
-  <gresource prefix="/io/github/sha5b/Clouddrive">
+  <gresource prefix="/io/github/sha5b/Cloudy">
     <file preprocess="xml-stripblanks">ui/window.ui</file>
-    <file preprocess="xml-stripblanks">ui/preferences.ui</file>
+    <file>style.css</file>
   </gresource>
 </gresources>

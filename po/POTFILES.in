@@ -1,9 +1,8 @@
 # List of source files containing translatable strings.
 # Paths are relative to the project root.
-data/io.github.sha5b.Clouddrive.desktop.in
-data/io.github.sha5b.Clouddrive.metainfo.xml.in
+data/io.github.sha5b.Cloudy.desktop.in
+data/io.github.sha5b.Cloudy.metainfo.xml.in
 data/ui/window.blp
-data/ui/preferences.blp
 src/cloudy/application.py
 src/cloudy/window.py
 src/cloudy/preferences.py
@@ -12,7 +11,15 @@ src/cloudy/modules/microsoft365/module.py
 src/cloudy/modules/gmail/__init__.py
 src/cloudy/core/auth/msal_graph.py
 src/cloudy/widgets/files_view.py
+src/cloudy/widgets/file_browser.py
 src/cloudy/widgets/mail_view.py
-src/cloudy/widgets/calendar_view.py
 src/cloudy/widgets/message_view.py
+src/cloudy/widgets/compose_view.py
+src/cloudy/widgets/calendar_view.py
+src/cloudy/widgets/month_grid.py
+src/cloudy/widgets/event_view.py
+src/cloudy/widgets/event_window.py
+src/cloudy/widgets/event_compose.py
+src/cloudy/widgets/editor_window.py
+src/cloudy/widgets/source_nav.py
 src/cloudy/widgets/dashboard_view.py

@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: 2026 Shahab Nedaei
 """Generate a LOCAL Flatpak manifest with build-time credentials injected.
 
-The committed manifest (io.github.sha5b.Clouddrive.yml) carries NO credentials.
+The committed manifest (io.github.sha5b.Cloudy.yml) carries NO credentials.
 For a local test build we copy it and add `-D<cred>=...` config-opts to the
 `cloudy` module from CLOUDY_* env vars (loaded from .env by the Makefile), and
 pin the `dir` source to an absolute repo path so the manifest can live under

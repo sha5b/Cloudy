@@ -1,0 +1,47 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileCopyrightText: 2026 Shahab Nedaei
+ *
+ * Cloudy design system. Loaded in application.py at startup. Pairs with the
+ * spacing scale in widgets/metrics.py (4 / 8 / 12 / 16 / 24). Keep visual
+ * tokens here; keep widget geometry on the metrics constants.
+ */
+
+/* Secondary / metadata text — one token for the scattered caption+dim-label
+ * pairs (timestamps, subtitles, column headers, captions). */
+.cloudy-meta {
+  font-size: 0.85em;
+  opacity: 0.65;
+}
+
+/* Panel section: consistent content inset for Dashboard sections and panel
+ * bodies (replaces the ad-hoc 18/24 and 12/16 paddings). */
+.cloudy-section {
+  padding: 16px 24px;
+}
+
+/* Calendar month-grid day cell. Reads as a soft grid tile; today is accented,
+ * days outside the month are dimmed. */
+.cloudy-day {
+  border-radius: 8px;
+  padding: 2px 4px;
+}
+.cloudy-day.today {
+  background-color: alpha(@accent_bg_color, 0.18);
+}
+.cloudy-day.outside {
+  opacity: 0.45;
+}
+
+/* Compact rounded chip — calendar event chips. */
+.cloudy-chip {
+  border-radius: 6px;
+  padding: 0 4px;
+  min-height: 18px;
+}
+
+/* Attendee pill — rounded, subtle fill. */
+.cloudy-pill {
+  border-radius: 999px;
+  background-color: alpha(currentColor, 0.08);
+  padding: 1px 4px;
+}

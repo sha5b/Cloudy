@@ -61,9 +61,9 @@ def _setting(key: str, default: str = "") -> str:
         from gi.repository import Gio
 
         source = Gio.SettingsSchemaSource.get_default()
-        if source is None or source.lookup("io.github.sha5b.Clouddrive", True) is None:
+        if source is None or source.lookup("io.github.sha5b.Cloudy", True) is None:
             return default
-        return Gio.Settings.new("io.github.sha5b.Clouddrive").get_string(key) or default
+        return Gio.Settings.new("io.github.sha5b.Cloudy").get_string(key) or default
     except Exception:  # noqa: BLE001
         return default
 
@@ -79,12 +79,27 @@ def sync_root() -> Path:
     return _data_dir() / "synced"
 
 
-def account_mount_base(mount_location: str) -> Path | None:
-    """Resolve an account's mount base: its own folder when the layout is
-    'individual' and an override is set, otherwise None (use the default root)."""
-    if _setting("mount-layout", "one-folder") == "individual" and mount_location:
-        return Path(mount_location)
-    return None
+def _account_label(account) -> str:
+    """A stable, human-readable folder name for an account's mounts."""
+    return getattr(account, "display_name", "") or getattr(account, "id", "account")
+
+
+def mount_base_for(account) -> Path:
+    """The directory under which *this account's* drives mount.
+
+    Each account gets its own folder so drives that share a name across accounts
+    (e.g. two Google "My Drive"s) never collide on a single mountpoint — and so a
+    live mount can be attributed back to the account that owns it (the basis for
+    "is this drive already mounted for this account?" checks that stop us mounting
+    the same thing repeatedly).
+
+      * ``individual`` layout → the account's own configured ``mount_location``.
+      * ``one-folder`` layout → a per-account subfolder of the global mount root.
+    """
+    loc = getattr(account, "mount_location", "")
+    if _setting("mount-layout", "one-folder") == "individual" and loc:
+        return Path(loc)
+    return mount_root() / MountManager._safe_name(_account_label(account))
 
 
 def cache_mode() -> str:
