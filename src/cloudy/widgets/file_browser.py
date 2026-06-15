@@ -36,28 +36,39 @@ def recent_changes(roots: list[Path], *, limit: int = 8, max_scan: int = 3000,
     count guard alone isn't enough; the deadline is what actually caps it.
     """
     found: list[dict] = []
-    scanned = 0
     seen: set[str] = set()
-    deadline = time.monotonic() + time_budget
-    for root in roots:
-        root = Path(root)
-        if not root.is_dir() or str(root) in seen:
-            continue
-        seen.add(str(root))
+    roots = [Path(r) for r in roots]
+    dirs = [r for r in roots if r.is_dir() and str(r) not in seen
+            and not seen.add(str(r))]
+    if not dirs:
+        return []
+    overall_deadline = time.monotonic() + time_budget
+    # Fair share per root: one big/slow account folder must not starve the
+    # others (that's why the Dashboard previously showed only one account). Each
+    # root gets its own file cap and time slice, plus the overall deadline.
+    per_root_cap = max(50, max_scan // len(dirs))
+    per_root_budget = time_budget / len(dirs)
+    for root in dirs:
+        root_scanned = 0
+        root_deadline = min(overall_deadline, time.monotonic() + per_root_budget)
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = [d for d in dirnames if not d.startswith(".")]
             for fn in filenames:
                 if fn.startswith("."):
                     continue
-                scanned += 1
+                root_scanned += 1
                 fp = os.path.join(dirpath, fn)
                 try:
                     found.append({"name": fn, "path": fp, "mtime": os.path.getmtime(fp)})
                 except OSError:
                     continue
-            if scanned >= max_scan or time.monotonic() >= deadline:
+                # Check inside the inner loop too: a single huge directory on a
+                # FUSE mount can exceed the budget before the outer check.
+                if root_scanned >= per_root_cap or time.monotonic() >= root_deadline:
+                    break
+            if root_scanned >= per_root_cap or time.monotonic() >= root_deadline:
                 break
-        if scanned >= max_scan or time.monotonic() >= deadline:
+        if time.monotonic() >= overall_deadline:
             break
     found.sort(key=lambda e: e["mtime"], reverse=True)
     return found[:limit]

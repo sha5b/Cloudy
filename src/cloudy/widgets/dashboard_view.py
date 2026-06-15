@@ -239,7 +239,11 @@ class DashboardView(Adw.Bin):
             return "", [], []
 
     def _scan_roots(self, accounts) -> list:
-        roots = [mount_root(), sync_root()]
+        # Scan each account's own mount base (not the shared mount_root, which
+        # contains them all) so recent_changes gives every account a fair scan
+        # share — otherwise one big account folder starves the rest and the
+        # Dashboard shows only one account's files.
+        roots = [sync_root()]
         for account in accounts:
             roots.append(mount_base_for(account))
         return roots
@@ -415,10 +419,12 @@ class DashboardView(Adw.Bin):
         return scroller
 
     def _file_library(self, path: str) -> str:
-        """The library (first path component under a mount/sync root) a file is
-        in, for grouping; falls back to the parent directory name."""
+        """Label a file by the account folder it lives in, for grouping. Uses the
+        broad mount/sync roots (not the per-account scan roots) so the first path
+        component is the account name — which disambiguates same-named drives
+        across accounts. Falls back to the parent directory name."""
         p = Path(path)
-        for root in self._scan_roots(self._accounts):
+        for root in (mount_root(), sync_root()):
             try:
                 rel = p.relative_to(root)
             except ValueError:
