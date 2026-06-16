@@ -105,6 +105,7 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
           <li>The mail list now updates on its own when new mail arrives, not only on a manual refresh</li>
           <li>Fixed the Files tab for Microsoft accounts not listing OneDrive and Team libraries</li>
           <li>File-manager integration no longer stalls the app or Nautilus when a network drive is slow to respond</li>
+          <li>The Mail and Chat tabs now show a live unread-count badge, like the account list</li>
         </ul>
       </description>
     </release>

@@ -135,17 +135,29 @@ class CloudyWindow(Adw.ApplicationWindow):
         badge.set_text(str(count) if count else "")
         badge.set_visible(bool(count))
 
+    def _set_tab_badge(self, key: str, count: int) -> None:
+        """Set the numeric badge on a tab (Adw.ViewStackPage) of the currently
+        shown account's view. The ViewSwitcher draws it like Mail/Calendar do."""
+        page = getattr(self, "_tab_pages", {}).get(key)
+        if page is not None:
+            page.set_badge_number(max(0, int(count)))
+            page.set_needs_attention(count > 0)
+
     def set_account_unread(self, account_id: str, count: int) -> None:
         """Update an account row's unread-mail badge (called by the notifier)."""
         badge = self._account_badges.get(account_id)
         if badge is not None:
             self._set_badge(badge, count)
+        if account_id == getattr(self, "_account_shown", None):
+            self._set_tab_badge("mail", count)
 
     def set_account_chat_unread(self, account_id: str, count: int) -> None:
         """Update an account row's red chat badge (called by the notifier)."""
         badge = self._account_chat_badges.get(account_id)
         if badge is not None:
             self._set_badge(badge, count)
+        if account_id == getattr(self, "_account_shown", None):
+            self._set_tab_badge("chat", count)
 
     def refresh_account_mail(self, account_id: str) -> None:
         """Reload the open mail list when the notifier sees new mail, so it
@@ -208,6 +220,7 @@ class CloudyWindow(Adw.ApplicationWindow):
 
         stack = Adw.ViewStack()
         self._account_stack = stack
+        self._tab_pages = {}  # capability key -> Adw.ViewStackPage (for tab badges)
         self._account_mail_view = None
         self._account_chat_view = None
         self._account_calendar_view = None
@@ -232,6 +245,15 @@ class CloudyWindow(Adw.ApplicationWindow):
                     self._account_calendar_view = child
             page = stack.add_titled(child, key, label)
             page.set_icon_name(icon)
+            self._tab_pages[key] = page
+
+        # Seed the Mail/Chat tab badges with the same unread counts the sidebar
+        # shows (Calendar/Files have no "new since you looked" count yet).
+        app = self.get_application()
+        notifier = getattr(app, "notifier", None)
+        if notifier is not None:
+            self._set_tab_badge("mail", notifier.unread_count(account.id))
+            self._set_tab_badge("chat", notifier.chat_unread_count(account.id))
 
         # Re-open on the tab the user last left for this account.
         remembered = self._last_tab.get(account.id)
