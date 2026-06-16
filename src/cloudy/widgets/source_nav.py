@@ -134,9 +134,11 @@ def is_scope_error(error: str | None) -> bool:
 
 
 # -- pinned (starred) sources ---------------------------------------------
-# A pin marks a whole shared/group mailbox or calendar as a favorite. Each entry
-# is {"kind": "mail"|"calendar", "source": "shared"|"teams", "id": str,
-# "name": str}; pins surface on the Dashboard.
+# A pin marks a favorite source. Each entry is {"kind", "source", "id", "name"}
+# plus any extra fields a kind needs (a "channel" pin also carries "team_id" /
+# "team_name", for instance). Kinds: "mail"/"calendar" (shared|teams source),
+# "channel" (a Teams channel), "chat" (a Teams chat). Pins surface on the
+# Dashboard's Activity feed.
 def find_pin(account, kind: str, source: str, sid: str):
     for p in account.pinned_sources or []:
         if p.get("kind") == kind and p.get("source") == source and p.get("id") == sid:
@@ -148,19 +150,47 @@ def is_pinned(account, kind: str, source: str, sid: str) -> bool:
     return find_pin(account, kind, source, sid) is not None
 
 
-def toggle_pin(window, account, *, kind: str, source: str, sid: str, name: str) -> bool:
-    """Add/remove a pin for a source; persist and return the new pinned state."""
+def toggle_pin(window, account, *, kind: str, source: str, sid: str, name: str,
+               **extra) -> bool:
+    """Add/remove a pin for a source; persist and return the new pinned state.
+    ``extra`` keys (e.g. team_id/team_name for a channel pin) are stored on the
+    entry so the Dashboard can route/label it without re-fetching."""
     pins = list(account.pinned_sources or [])
     existing = find_pin(account, kind, source, sid)
     if existing:
         pins = [p for p in pins if p is not existing]
         pinned = False
     else:
-        pins.append({"kind": kind, "source": source, "id": sid, "name": name})
+        pins.append({"kind": kind, "source": source, "id": sid, "name": name,
+                     **extra})
         pinned = True
     account.pinned_sources = pins
     window.get_application().registry.update(account)
     return pinned
+
+
+# -- muted chats / channels -----------------------------------------------
+# A mute silences a chat or channel: no notification banner and no unread badge.
+# Each entry is {"kind": "chat"|"channel", "id": str}.
+def is_muted(account, kind: str, sid: str) -> bool:
+    return any(m.get("kind") == kind and m.get("id") == sid
+               for m in (account.muted_sources or []))
+
+
+def toggle_mute(window, account, *, kind: str, sid: str) -> bool:
+    """Add/remove a mute for a chat/channel; persist and return the new state."""
+    muted = list(account.muted_sources or [])
+    existing = next((m for m in muted
+                     if m.get("kind") == kind and m.get("id") == sid), None)
+    if existing:
+        muted = [m for m in muted if m is not existing]
+        now_muted = False
+    else:
+        muted.append({"kind": kind, "id": sid})
+        now_muted = True
+    account.muted_sources = muted
+    window.get_application().registry.update(account)
+    return now_muted
 
 
 # -- source tabs (Me / Teams / Shared) ------------------------------------

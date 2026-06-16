@@ -34,6 +34,9 @@ class Account:
     # {"kind": "mail"|"calendar", "source": "shared"|"teams",
     #  "id": <address-or-group-id>, "name": <label>}.
     pinned_sources: list = field(default_factory=list)
+    # Muted chats/channels — no notification banner or badge. Each entry:
+    # {"kind": "chat"|"channel", "id": <chat-or-channel-id>}.
+    muted_sources: list = field(default_factory=list)
 
     # Consumer mail domains that have no Teams/SharePoint/Chat/Workspace and no
     # shared-mailbox delegation — the business-only surfaces are hidden for them.
@@ -72,6 +75,7 @@ class Account:
             mount_location=data.get("mount_location", ""),
             shared_mailboxes=list(data.get("shared_mailboxes", [])),
             pinned_sources=list(data.get("pinned_sources", [])),
+            muted_sources=list(data.get("muted_sources", [])),
         )
 
 

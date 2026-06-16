@@ -61,8 +61,10 @@ mail, calendar & chat — behind one adaptive UI.
   then read a channel's **posts** with threaded replies (and post / reply), or
   open its **Notes** tab — the team's **OneNote** notebook, with sections and
   pages you can read (text + inline images) and **create or edit**.
-- **Dashboard**: pinned sources, upcoming events, recent mail, and recent file
-  changes aggregated across every account.
+- **Dashboard**: an at-a-glance overview across every account — upcoming events,
+  recent mail, file changes, pinned mailboxes/calendars, and an **Activity** feed
+  of recent **chats** and the latest posts in **channels you star** (★ in the
+  Chat / Teams headers).
 - **Desktop integration**: system `mailto:` / `.ics` handler, new-mail/event
   notifications, and a Nautilus extension for status emblems.
 - **Secrets** stored via **libsecret** — never plaintext. No telemetry; the

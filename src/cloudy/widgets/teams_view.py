@@ -29,10 +29,14 @@ from .source_nav import (
     SCOPE_HINT,
     action_row,
     clear_listbox,
+    is_muted,
+    is_pinned,
     is_scope_error,
     loading_box,
     run_async,
     status_page,
+    toggle_mute,
+    toggle_pin,
 )
 
 
@@ -103,6 +107,20 @@ class TeamsView(Adw.Bin):
         content_header = Adw.HeaderBar(
             show_start_title_buttons=False, show_end_title_buttons=False,
             title_widget=switcher)
+        # Star the open channel → it surfaces on the Dashboard Activity feed.
+        self._star_btn = Gtk.Button(
+            icon_name="non-starred-symbolic", visible=False,
+            tooltip_text=_("Star this channel for the Dashboard"))
+        self._star_btn.add_css_class("flat")
+        self._star_btn.connect("clicked", self._on_star_clicked)
+        content_header.pack_end(self._star_btn)
+        # Mute the open channel → no notification banner or badge for it.
+        self._mute_btn = Gtk.Button(
+            icon_name="preferences-system-notifications-symbolic", visible=False,
+            tooltip_text=_("Mute notifications for this channel"))
+        self._mute_btn.add_css_class("flat")
+        self._mute_btn.connect("clicked", self._on_mute_clicked)
+        content_header.pack_end(self._mute_btn)
         content_tb = Adw.ToolbarView()
         content_tb.add_top_bar(content_header)
         content_tb.set_content(self._inner_stack)
@@ -325,6 +343,7 @@ class TeamsView(Adw.Bin):
         self._channel_name = channel["name"]
         self._split.set_show_content(True)
         self._composer.set_visible(True)
+        self._update_star()
         self._load_conversation()
         # Notes are team-scoped; reload the notebook when the team changes.
         if self._notes_loaded_for != team["id"]:
@@ -334,6 +353,44 @@ class TeamsView(Adw.Bin):
             self._page_id = ""
         if self._inner_stack.get_visible_child_name() == "notes":
             self._ensure_notes_loaded()
+
+    def _update_star(self) -> None:
+        active = bool(self._channel_id)
+        self._star_btn.set_visible(active)
+        self._mute_btn.set_visible(active)
+        if not active:
+            return
+        pinned = is_pinned(self._account, "channel", "teams", self._channel_id)
+        self._star_btn.set_icon_name(
+            "starred-symbolic" if pinned else "non-starred-symbolic")
+        muted = is_muted(self._account, "channel", self._channel_id)
+        self._mute_btn.set_icon_name(
+            "notifications-disabled-symbolic" if muted
+            else "preferences-system-notifications-symbolic")
+        self._mute_btn.set_tooltip_text(
+            _("Unmute this channel") if muted
+            else _("Mute notifications for this channel"))
+
+    def _on_mute_clicked(self, _btn) -> None:
+        if not self._channel_id:
+            return
+        muted = toggle_mute(self._window, self._account, kind="channel",
+                            sid=self._channel_id)
+        self._update_star()
+        self._window.add_toast(
+            _("Channel muted") if muted else _("Channel unmuted"))
+
+    def _on_star_clicked(self, _btn) -> None:
+        if not self._channel_id:
+            return
+        pinned = toggle_pin(
+            self._window, self._account, kind="channel", source="teams",
+            sid=self._channel_id, name=self._channel_name,
+            team_id=self._team_id, team_name=self._team_name)
+        self._star_btn.set_icon_name(
+            "starred-symbolic" if pinned else "non-starred-symbolic")
+        self._window.add_toast(
+            _("Channel starred") if pinned else _("Channel unstarred"))
 
     def _on_inner_tab_changed(self, *_a) -> None:
         if (self._inner_stack.get_visible_child_name() == "notes"
@@ -783,15 +840,22 @@ class TeamsView(Adw.Bin):
         box.append(self._render_note_body(content_html))
         self._page_content.set_child(box)
 
+    # The longest side of an offscreen widget GTK can upload as a single GL
+    # texture is ~16k px on the Mesa/Intel path; a OneNote paragraph long enough
+    # to render past that aborts in gsk_gpu_upload_cairo_op (the same crash we
+    # dodged by dropping WebKit). One wrapped label of this many characters stays
+    # comfortably under that ceiling, so any longer block is split across labels.
+    _MAX_LABEL_CHARS = 12000
+
     def _render_note_body(self, content_html: str) -> Gtk.Widget:
         """Render a OneNote page natively: text blocks as wrapping labels and
-        images as inline thumbnails, in a scrolled, clamped reading column.
+        images as inline thumbnails, in a scrolled reading column.
 
         We deliberately avoid a WebView here — OneNote pages can be long, and a
         full-page WebKit snapshot overruns the GPU texture limit and crashes the
-        renderer. Native widgets are clipped/culled, so size is never an issue,
-        and images use the same auth-gated thumbnail path as Chat."""
-        team_id = self._team_id
+        renderer. Native widgets are clipped/culled, but a *single* very long
+        paragraph can still grow one label past the GL texture limit and crash
+        the same way, so over-long blocks are split across several labels."""
         column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         body = content_html or ""
         m = re.search(r"(?is)<body[^>]*>(.*)</body>", body)
@@ -817,27 +881,58 @@ class TeamsView(Adw.Bin):
             text = _strip_html(seg)
             if not text:
                 continue
-            label = Gtk.Label(xalign=0, wrap=True, selectable=True)
-            label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-            if markup:
-                try:
-                    label.set_markup(markup)
-                    label.connect("activate-link", self._on_link_activated)
-                except Exception:  # noqa: BLE001 - bad markup → plain text
-                    label.set_text(text)
+            # A short block keeps its inline formatting (bold/links/…); a block
+            # long enough to risk the texture ceiling is rendered as plain text
+            # split into bounded chunks (markup can't be split mid-tag safely).
+            if markup and len(text) <= self._MAX_LABEL_CHARS:
+                column.append(self._note_label(markup=markup, text=text))
             else:
-                label.set_text(text)
-            label.add_css_class("body")
-            column.append(label)
+                for chunk in self._split_text(text, self._MAX_LABEL_CHARS):
+                    column.append(self._note_label(text=chunk))
             rendered_any = True
         if not rendered_any:
             return status_page("accessories-text-editor-symbolic",
                                _("Empty page"), _("This page has no content."))
-        clamp = Adw.Clamp(maximum_size=820, margin_top=16, margin_bottom=24,
-                         margin_start=20, margin_end=20, child=column)
+        column.set_margin_top(16)
+        column.set_margin_bottom(24)
+        column.set_margin_start(20)
+        column.set_margin_end(20)
         return Gtk.ScrolledWindow(
             vexpand=True, hexpand=True,
-            hscrollbar_policy=Gtk.PolicyType.NEVER, child=clamp)
+            hscrollbar_policy=Gtk.PolicyType.NEVER, child=column)
+
+    def _note_label(self, *, markup: str = "", text: str = "") -> Gtk.Label:
+        label = Gtk.Label(xalign=0, wrap=True, selectable=True, hexpand=True)
+        label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        if markup:
+            try:
+                label.set_markup(markup)
+                label.connect("activate-link", self._on_link_activated)
+            except Exception:  # noqa: BLE001 - bad markup → plain text
+                label.set_text(text)
+        else:
+            label.set_text(text)
+        label.add_css_class("body")
+        return label
+
+    @staticmethod
+    def _split_text(text: str, limit: int) -> list[str]:
+        """Split ``text`` into chunks of at most ``limit`` characters, breaking
+        on a newline/space near the boundary so words stay intact."""
+        if len(text) <= limit:
+            return [text]
+        chunks, start = [], 0
+        while start < len(text):
+            end = start + limit
+            if end >= len(text):
+                chunks.append(text[start:])
+                break
+            cut = max(text.rfind("\n", start, end), text.rfind(" ", start, end))
+            if cut <= start:
+                cut = end  # no break point — hard-split
+            chunks.append(text[start:cut])
+            start = cut + 1 if text[cut:cut + 1] in (" ", "\n") else cut
+        return chunks
 
     # -- create / edit ----------------------------------------------------
     def _new_page(self) -> None:

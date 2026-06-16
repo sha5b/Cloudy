@@ -11,6 +11,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Dashboard "Activity" feed** (work/school Microsoft accounts): a new section
+  with the latest post from each **starred channel** and your **recent chats**
+  (starred chats first), plus a Today preview column and a "New chats" stat card.
+- **Star channels and chats**: a ★ button in the Teams (channel) and Chat
+  headers pins a conversation; pinned channels/chats surface in the Dashboard
+  Activity feed. Mail/calendar pins continue to appear under **Pinned**.
+- **Notification attention controls**: honour the system Do Not Disturb state;
+  optional **quiet hours**; a relevance level (*Everything* vs *Direct messages &
+  important only*) that batches group-chat/ordinary-mail to badges; and
+  **per-chat / per-channel mute** (bell toggle in the Chat and Teams headers).
+  Badges always update — only the interruptive banner is gated.
+- **Message delivery status**: your most-recent chat message shows a single
+  Teams-style indicator (clock while sending → check once sent).
+
+### Changed
+- **Preferences reorganised**: notification settings (relevance, Do Not Disturb,
+  quiet hours) moved to their own **Notifications** tab instead of sharing the
+  General page, with Quiet hours in a dedicated group; clarified several setting
+  subtitles (file caching, sync type, start-at-login, background).
+
+### Fixed
+- **Chat images no longer re-download on every send/receive**: decoded inline
+  thumbnails are cached per conversation, so reconciling a sent message (a full
+  thread rebuild) reuses them instead of re-fetching every picture.
+- **OneNote pages render full-width** and split very long text across multiple
+  labels, so a single huge paragraph can no longer exceed the GL texture limit
+  and re-trigger the `gsk_gpu_upload_cairo_op` renderer crash.
+- **Gmail folder dropdown** now spans the full column width (it was constrained
+  as the header's centred title widget).
+
 ## [0.2.1] - 2026-06-15
 
 ### Added

@@ -33,10 +33,14 @@ from .source_nav import (
     SCOPE_HINT,
     action_row,
     clear_listbox,
+    is_muted,
+    is_pinned,
     is_scope_error,
     local_initial_folder,
     message_row,
     run_async,
+    toggle_mute,
+    toggle_pin,
 )
 
 
@@ -66,6 +70,10 @@ class ChatView(Adw.Bin):
         self._search_mode = False      # showing server message-search results
         self._search_timer = None      # debounce for search-as-you-type
         self._bubble_widgets: dict = {}  # message id -> its bubble widget (in-place updates)
+        # url -> (texture, original bytes) for already-fetched inline images, so a
+        # full thread rebuild (e.g. reconciling an optimistic send) reuses decoded
+        # images instantly instead of re-downloading them all.
+        self._image_cache: dict = {}
         self._presence: dict = {}      # user_id -> {availability, activity}
         self._presence_source = None   # periodic presence-refresh timer
         self._poll_source = None       # adaptive open-thread poll timer
@@ -126,7 +134,11 @@ class ChatView(Adw.Bin):
         self._adjusting = False     # guard: ignore our own programmatic scrolls
         self._scroll_anim = None    # active "jump to latest" animation, if any
         self._rendered_sigs = []    # per-message fingerprints of the live thread
-        self._has_optimistic = False  # an un-acked optimistic bubble is showing
+        # The un-acked optimistic echo, if one is showing: {"widget", "text"}.
+        # When the server confirms it, that exact widget is adopted in place
+        # (status flips Sending→Sent) instead of rebuilding the whole thread —
+        # so its decoded image never reloads and the view never jumps.
+        self._optimistic = None
         self._hold_tick = None      # frame-clock callback holding scroll position
         self._hold_until = 0        # frame time (µs) the hold expires
         vadj = self._thread_scroll.get_vadjustment()
@@ -234,6 +246,20 @@ class ChatView(Adw.Bin):
                                        visible=False)
         self._members_btn.connect("clicked", self._on_show_members)
         self._content_header.pack_end(self._members_btn)
+        # Star the open chat → it's pinned to the top of the Dashboard's chats.
+        self._star_btn = Gtk.Button(icon_name="non-starred-symbolic",
+                                    tooltip_text=_("Star this chat for the Dashboard"),
+                                    visible=False)
+        self._star_btn.add_css_class("flat")
+        self._star_btn.connect("clicked", self._on_star_clicked)
+        self._content_header.pack_end(self._star_btn)
+        # Mute the open chat → no notification banner or badge for it.
+        self._mute_btn = Gtk.Button(icon_name="preferences-system-notifications-symbolic",
+                                    tooltip_text=_("Mute notifications for this chat"),
+                                    visible=False)
+        self._mute_btn.add_css_class("flat")
+        self._mute_btn.connect("clicked", self._on_mute_clicked)
+        self._content_header.pack_end(self._mute_btn)
         content_tb.add_top_bar(self._content_header)
         content_tb.set_content(self._reader)
         content_tb.add_bottom_bar(composer)
@@ -602,6 +628,7 @@ class ChatView(Adw.Bin):
         chat = next((c for c in self._all_chats if c["id"] == chat_id), None)
         title = name or (chat or {}).get("name", "") or _("Conversation")
         self._header_title.set_title(title)
+        self._update_star(chat_id, title)
         is_group = bool(chat) and chat.get("kind") == "group"
         self._members_btn.set_visible(
             is_group and self._account.provider == "microsoft")
@@ -616,6 +643,44 @@ class ChatView(Adw.Bin):
                     avail = (self._presence.get(ids[0]) or {}).get("availability", "")
                     subtitle = self._PRESENCE.get(avail, ("", ""))[1]
         self._header_title.set_subtitle(subtitle)
+
+    def _update_star(self, chat_id, title: str) -> None:
+        self._star_chat_name = title
+        active = bool(chat_id)
+        self._star_btn.set_visible(active)
+        self._mute_btn.set_visible(active)
+        if active:
+            pinned = is_pinned(self._account, "chat", "teams", chat_id)
+            self._star_btn.set_icon_name(
+                "starred-symbolic" if pinned else "non-starred-symbolic")
+            self._refresh_mute_icon(chat_id)
+
+    def _refresh_mute_icon(self, chat_id) -> None:
+        muted = is_muted(self._account, "chat", chat_id)
+        self._mute_btn.set_icon_name(
+            "notifications-disabled-symbolic" if muted
+            else "preferences-system-notifications-symbolic")
+        self._mute_btn.set_tooltip_text(
+            _("Unmute this chat") if muted else _("Mute notifications for this chat"))
+
+    def _on_mute_clicked(self, _btn) -> None:
+        if not self._chat_id:
+            return
+        muted = toggle_mute(self._window, self._account, kind="chat", sid=self._chat_id)
+        self._refresh_mute_icon(self._chat_id)
+        self._window.add_toast(_("Chat muted") if muted else _("Chat unmuted"))
+
+    def _on_star_clicked(self, _btn) -> None:
+        if not self._chat_id:
+            return
+        pinned = toggle_pin(
+            self._window, self._account, kind="chat", source="teams",
+            sid=self._chat_id,
+            name=getattr(self, "_star_chat_name", "") or self._chat_name or _("Chat"))
+        self._star_btn.set_icon_name(
+            "starred-symbolic" if pinned else "non-starred-symbolic")
+        self._window.add_toast(
+            _("Chat starred") if pinned else _("Chat unstarred"))
 
     # -- adaptive open-thread poll ---------------------------------------
     # While a chat is open we re-fetch its newest page on a short interval so
@@ -875,6 +940,8 @@ class ChatView(Adw.Bin):
             self.open_chat(chat_id)
 
     def open_chat(self, chat_id, name: str = "") -> None:
+        if chat_id != self._chat_id:
+            self._image_cache = {}  # drop the previous chat's decoded thumbnails
         self._chat_id = chat_id
         self._chat_name = name
         self._msg_next_token = None
@@ -974,7 +1041,7 @@ class ChatView(Adw.Bin):
     def _clear_thread(self) -> None:
         self._bubble_widgets = {}
         self._rendered_sigs = []
-        self._has_optimistic = False
+        self._optimistic = None
         child = self._thread.get_first_child()
         while child is not None:
             nxt = child.get_next_sibling()
@@ -1013,15 +1080,29 @@ class ChatView(Adw.Bin):
         appended = self._appended_only(messages)
         if appended is not None:
             for msg in appended:
-                widget = self._bubble(msg)
+                # Adopt the optimistic echo as its now-confirmed message: keep
+                # the exact widget (and its decoded image), just flip the status
+                # icon Sending→Sent and register it under the real id. No new
+                # bubble, no teardown — the thread stays perfectly still.
+                opt = self._optimistic
+                if (opt is not None and msg.get("is_mine")
+                        and (msg.get("text", "") or "").strip()
+                        == (opt["text"] or "").strip()):
+                    widget = opt["widget"]
+                    self._set_status(widget, "sent")
+                    self._optimistic = None
+                else:
+                    widget = self._bubble(msg)
+                    self._thread.append(widget)
+                    self._animate_in(widget)
                 if msg.get("id"):
                     self._bubble_widgets[msg["id"]] = widget
-                self._thread.append(widget)
-                self._animate_in(widget)
         else:
             self._full_render(messages)
         self._rendered_sigs = [self._msg_sig(m) for m in messages]
         self._thread_sig = new_sig
+        # Show the single delivery indicator on my most-recent message only.
+        self._apply_status(messages)
         if self._autoscroll:
             self._scroll_to_bottom()
 
@@ -1041,16 +1122,28 @@ class ChatView(Adw.Bin):
 
     def _appended_only(self, messages):
         """If the currently-rendered thread is an unchanged prefix of
-        ``messages``, return just the trailing messages that need appending;
-        otherwise return ``None`` to force a full rebuild. An un-acked optimistic
-        bubble always forces a rebuild (so it's replaced, never duplicated)."""
+        ``messages``, return just the trailing messages that need appending
+        (which the caller fades in); otherwise return ``None`` to force a full
+        rebuild.
+
+        ``self._rendered_sigs`` tracks only the *confirmed* messages, so an
+        un-acked optimistic echo isn't counted in the prefix. When one is
+        showing we only take the fast path if the tail is exactly that one
+        message now confirmed — then it's adopted in place. Any busier change
+        (a second message raced in, an edit) falls back to a clean rebuild."""
         old = self._rendered_sigs
-        if self._has_optimistic or not old or len(messages) < len(old):
+        if not old or len(messages) < len(old):
             return None
         for i, sig in enumerate(old):
             if self._msg_sig(messages[i]) != sig:
                 return None
-        return messages[len(old):]
+        tail = messages[len(old):]
+        if self._optimistic is not None:
+            opt_text = (self._optimistic["text"] or "").strip()
+            if not (len(tail) == 1 and tail[0].get("is_mine")
+                    and (tail[0].get("text", "") or "").strip() == opt_text):
+                return None
+        return tail
 
     @staticmethod
     def _msg_sig(m):
@@ -1247,18 +1340,70 @@ class ChatView(Adw.Bin):
         GLib.timeout_add(260, lambda: (widget.remove_css_class("cloudy-bubble-new"),
                                        False)[1])
 
+    @staticmethod
+    def _status_glyph(state):
+        """(icon, tooltip) for a message delivery status: a clock while sending,
+        a check once sent. We don't show a 'Seen' state — the Graph chat API
+        exposes no read receipt for the other party, so it can't be known
+        (only Teams' private service has it); claiming it would be misleading.
+        Icon names are present in both the GTK built-in resource and Adwaita."""
+        return {
+            "sending": ("content-loading-symbolic", _("Sending…")),
+            "sent": ("object-select-symbolic", _("Sent")),
+        }.get(state, ("object-select-symbolic", _("Sent")))
+
+    def _set_status(self, outer, state: str) -> None:
+        """Flip an existing bubble's status glyph in place (no rebuild)."""
+        icon = getattr(outer, "_status_icon", None)
+        if icon is None:
+            return
+        icon_name, tip = self._status_glyph(state)
+        icon.set_from_icon_name(icon_name)
+        icon.set_tooltip_text(tip)
+
+    def _apply_status(self, messages) -> None:
+        """Show a single delivery indicator on ONLY my most-recent message
+        (Teams-style — not a check on every line): a clock while the optimistic
+        echo is un-acked, a check once sent. All other status icons are hidden.
+        Pure icon visibility — no rebuild."""
+        # Hide every status icon first (one will be re-shown below).
+        widgets = list(self._bubble_widgets.values())
+        if self._optimistic is not None:
+            widgets.append(self._optimistic["widget"])
+        for w in widgets:
+            icon = getattr(w, "_status_icon", None)
+            if icon is not None:
+                icon.set_visible(False)
+
+        mine_idx = [i for i, m in enumerate(messages) if m.get("is_mine")]
+        if not mine_idx:
+            return
+        m = messages[mine_idx[-1]]
+        if not m.get("id"):  # the un-acked optimistic echo
+            widget = self._optimistic["widget"] if self._optimistic else None
+        else:
+            widget = self._bubble_widgets.get(m["id"])
+        icon = getattr(widget, "_status_icon", None)
+        if icon is None:
+            return
+        self._set_status(widget, "sending" if not m.get("id") else "sent")
+        icon.set_visible(True)
+
     def _bubble(self, msg) -> Gtk.Widget:
         mine = bool(msg.get("is_mine"))
         outer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        outer.set_halign(Gtk.Align.END if mine else Gtk.Align.START)
+        # A vertical column holds the bubble and, below it, the reaction pills —
+        # so reactions hang off the bottom of the message (Teams-style) instead
+        # of sitting inside the bubble body.
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         bubble = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         bubble.add_css_class("cloudy-bubble")
         if msg.get("id") in self._selected_msgs:
             bubble.add_css_class("cloudy-selected")
         if mine:
             bubble.add_css_class("mine")
-            outer.set_halign(Gtk.Align.END)
         else:
-            outer.set_halign(Gtk.Align.START)
             sender = (msg.get("from", "") or "").strip()
             if sender:
                 lbl = Gtk.Label(label=sender, xalign=0, wrap=True)
@@ -1284,23 +1429,46 @@ class ChatView(Adw.Bin):
             else:
                 bubble.append(self._attachment_chip(att))
 
+        # Footer: timestamp and, on my own messages, a delivery status glyph.
+        # The icon is built once but kept hidden here — _apply_status reveals it
+        # on ONLY my most-recent message (Teams shows a single indicator at the
+        # bottom, not a check on every line) and picks clock/check/eye.
+        outer._status_icon = None  # type: ignore[attr-defined]
+        if msg.get("sent") or mine:
+            foot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
+                           halign=Gtk.Align.END if mine else Gtk.Align.START,
+                           margin_top=2, margin_start=4, margin_end=4)
+            if msg.get("sent"):
+                when = Gtk.Label(label=relative_time(msg["sent"]),
+                                 xalign=1 if mine else 0)
+                when.add_css_class("dim-label")
+                when.add_css_class("caption")
+                foot.append(when)
+            if mine:
+                sic = Gtk.Image.new_from_icon_name("object-select-symbolic")
+                sic.set_pixel_size(12)
+                sic.add_css_class("dim-label")
+                sic.set_visible(False)
+                foot.append(sic)
+                outer._status_icon = sic  # type: ignore[attr-defined]
+            bubble.append(foot)
+        col.append(bubble)
+
+        # Reactions as pills hanging below the bubble (not inside it), aligned to
+        # the bubble's side, with a little inset so they don't touch the edge.
         reactions = msg.get("reactions") or []
         if reactions:
-            rbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+            rbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4,
+                           halign=Gtk.Align.END if mine else Gtk.Align.START,
+                           margin_start=8, margin_end=8)
+            rbox.add_css_class("cloudy-reactions")
             for r in reactions:
                 label = f"{r['emoji']} {r['count']}" if r.get("count", 0) > 1 else r["emoji"]
                 chip = Gtk.Label(label=label)
                 chip.add_css_class("cloudy-reaction")
                 rbox.append(chip)
-            bubble.append(rbox)
-
-        if msg.get("sent"):
-            when = Gtk.Label(label=relative_time(msg["sent"]),
-                             xalign=1 if mine else 0)
-            when.add_css_class("dim-label")
-            when.add_css_class("caption")
-            bubble.append(when)
-        outer.append(bubble)
+            col.append(rbox)
+        outer.append(col)
 
         # Right-click a message → its actions popover (reactions + Reply/Forward/
         # Copy/Download/Edit/Delete). As a popover it positions itself above or
@@ -1480,13 +1648,24 @@ class ChatView(Adw.Bin):
         return Gdk.Texture.new_for_pixbuf(pix)
 
     def _image_widget(self, att) -> Gtk.Widget:
-        """A small thumbnail that lazily downloads the (auth-gated) image."""
+        """A small thumbnail that lazily downloads the (auth-gated) image.
+
+        Decoded thumbnails are cached per-view by URL, so a full thread rebuild
+        (reconciling an optimistic send, an edit, etc.) reuses the already-decoded
+        image instantly instead of re-downloading every picture in the thread."""
         url = att["url"]
         name = self._attachment_filename(att)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+
+        cached = self._image_cache.get(url)
+        if cached is not None:
+            texture, data = cached
+            box.append(self._picture_for(texture, data, name))
+            return box
+
         placeholder = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         placeholder.append(Gtk.Image.new_from_icon_name("image-x-generic-symbolic"))
         placeholder.append(Gtk.Label(label=_("Loading image…")))
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         box.append(placeholder)
 
         def work():
@@ -1507,23 +1686,9 @@ class ChatView(Adw.Bin):
                 placeholder.get_last_child().set_text(_("Image"))
                 placeholder.set_tooltip_text(str(exc))
                 return False
-            # Pin the picture to the (downscaled) texture's size and DON'T let it
-            # shrink — otherwise GtkPicture collapses to 0×0 inside the bubble and
-            # the image is fetched but invisible ("loads then disappears").
-            pic = Gtk.Picture.new_for_paintable(texture)
-            pic.set_can_shrink(False)
-            pic.set_halign(Gtk.Align.START)
-            pic.add_css_class("cloudy-bubble-image")
-            pic.set_size_request(texture.get_width(), texture.get_height())
-            # Click → open the full-resolution image in a viewer (we kept the
-            # original bytes, so no second download).
-            pic.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
-            tap = Gtk.GestureClick()
-            tap.connect("released",
-                        lambda *_a: self._open_image_viewer(data, name))
-            pic.add_controller(tap)
+            self._image_cache[url] = (texture, data)
             box.remove(placeholder)
-            box.append(pic)
+            box.append(self._picture_for(texture, data, name))
             # The image just grew the thread's height. Re-assert the scroll
             # position for a few frames: pinned-to-bottom snaps to the newest
             # message (the usual reason the view lands just short of the bottom
@@ -1537,6 +1702,24 @@ class ChatView(Adw.Bin):
 
         run_async(work, done)
         return box
+
+    def _picture_for(self, texture, data: bytes, name: str) -> Gtk.Picture:
+        """Build a click-to-open Picture pinned to a decoded thumbnail texture."""
+        # Pin the picture to the (downscaled) texture's size and DON'T let it
+        # shrink — otherwise GtkPicture collapses to 0×0 inside the bubble and
+        # the image is fetched but invisible ("loads then disappears").
+        pic = Gtk.Picture.new_for_paintable(texture)
+        pic.set_can_shrink(False)
+        pic.set_halign(Gtk.Align.START)
+        pic.add_css_class("cloudy-bubble-image")
+        pic.set_size_request(texture.get_width(), texture.get_height())
+        # Click → open the full-resolution image in a viewer (we kept the
+        # original bytes, so no second download).
+        pic.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
+        tap = Gtk.GestureClick()
+        tap.connect("released", lambda *_a: self._open_image_viewer(data, name))
+        pic.add_controller(tap)
+        return pic
 
     # -- image viewer + downloads -----------------------------------------
     def _open_image_viewer(self, data: bytes, name: str = "image") -> None:
@@ -1994,9 +2177,9 @@ class ChatView(Adw.Bin):
             {"text": text, "is_mine": True, "sent": now_iso, "from": ""})
         self._thread.append(bubble)
         self._animate_in(bubble)
-        # An un-acked echo with no server id is showing — force the next render
-        # to rebuild (replacing it) rather than appending the real copy after it.
-        self._has_optimistic = True
+        # Remember this echo so the authoritative reload adopts THIS widget in
+        # place (status flips Sending→Sent) rather than rebuilding the thread.
+        self._optimistic = {"widget": bubble, "text": text}
         self._scroll_to_bottom()
 
     def _on_sent(self, chat_id, error) -> bool:

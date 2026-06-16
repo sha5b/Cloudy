@@ -25,9 +25,10 @@ from ..modules.microsoft365.mounts import (
 )
 from .event_window import EventDetailWindow
 from .file_browser import recent_changes
+from .format import relative_time
 from .metrics import SPACE_L, SPACE_M
 from .month_grid import MonthGrid
-from .source_nav import run_async
+from .source_nav import is_pinned, run_async
 
 
 class DashboardView(Adw.Bin):
@@ -81,6 +82,12 @@ class DashboardView(Adw.Bin):
             if a.signed_in and a.provider in ("microsoft", "google")
             and engine.is_enabled(a.module_id)
         ]
+        # Work/school Microsoft accounts are the ones with Teams chats + channels;
+        # only they contribute to the Activity feed.
+        self._ms_accounts = [
+            a for a in self._accounts
+            if a.provider == "microsoft" and not a.is_personal
+        ]
         self._build_sections()
         if not self._accounts:
             self._content.set_child(Adw.StatusPage(
@@ -99,9 +106,18 @@ class DashboardView(Adw.Bin):
             ("mail", _("Mail"), "mail-unread-symbolic"),
             ("files", _("Files"), "folder-symbolic"),
         ]
-        if any(a.pinned_sources for a in self._accounts):
+        if self._ms_accounts:
+            secs.append(("activity", _("Activity"), "user-available-symbolic"))
+        # The Pinned section only collects mail/calendar pins; starred channels
+        # and chats live in the Activity feed instead.
+        if any(self._is_mailcal_pin(p)
+               for a in self._accounts for p in (a.pinned_sources or [])):
             secs.append(("pinned", _("Pinned"), "starred-symbolic"))
         return secs
+
+    @staticmethod
+    def _is_mailcal_pin(pin) -> bool:
+        return pin.get("kind") in ("mail", "calendar")
 
     def _build_sections(self) -> None:
         child = self._list.get_first_child()
@@ -169,6 +185,7 @@ class DashboardView(Adw.Bin):
             from .clients import build_account_client
 
             events, messages, pinned = [], [], []
+            chats, activity = [], []
             for account in accounts:
                 try:
                     client = build_account_client(app, account)
@@ -181,18 +198,41 @@ class DashboardView(Adw.Bin):
                         messages.append((account, msg))
                 except Exception:  # noqa: BLE001 - one bad account shouldn't blank the view
                     pass
-                # Pinned shared/team sources: fold their upcoming events and
-                # unread mail into the overview too (not just a link).
+                # Pinned sources. Mail/calendar pins fold their events + unread
+                # mail into the overview (and list under Pinned). Starred channels
+                # contribute their latest post to the Activity feed.
                 for p in account.pinned_sources or []:
-                    detail, p_events, p_msgs = self._pin_items(client, p, start_iso, end_iso)
-                    events.extend((account, e) for e in p_events)
-                    messages.extend((account, m) for m in p_msgs)
-                    pinned.append((account, p, detail))
+                    if self._is_mailcal_pin(p):
+                        detail, p_events, p_msgs = self._pin_items(
+                            client, p, start_iso, end_iso)
+                        events.extend((account, e) for e in p_events)
+                        messages.extend((account, m) for m in p_msgs)
+                        pinned.append((account, p, detail))
+                    elif p.get("kind") == "channel":
+                        item = self._channel_activity(client, p)
+                        if item is not None:
+                            activity.append((account, item))
+                # Recent chats (work/school Microsoft only): one cheap call with
+                # last-message previews. Starred chats float to the top.
+                if account in self._ms_accounts:
+                    try:
+                        page, _next = client.list_chats_page(limit=15)
+                        for c in page:
+                            chats.append((account, c))
+                    except Exception:  # noqa: BLE001 - Teams may be unavailable
+                        pass
             events.sort(key=lambda pair: pair[1].get("start", ""))
             # Unread first; stable sort keeps the API's newest-first order within.
             messages.sort(key=lambda pair: pair[1].get("is_read", True))
+            activity.sort(key=lambda pair: pair[1].get("when", ""), reverse=True)
+            # Newest-first, then a stable pass floating starred chats to the top
+            # (a stable sort keeps the newest-first order within each group).
+            chats.sort(key=lambda pair: pair[1].get("last_at", ""), reverse=True)
+            chats.sort(key=lambda pair: not is_pinned(
+                pair[0], "chat", "teams", pair[1].get("id", "")))
             files = recent_changes(self._scan_roots(accounts))
             return {"events": events, "messages": messages, "pinned": pinned,
+                    "chats": chats, "activity": activity,
                     "files": files, "mounted": self._count_mounted(accounts)}
 
         def done(res, _error):
@@ -238,6 +278,30 @@ class DashboardView(Adw.Bin):
         except Exception:  # noqa: BLE001
             return "", [], []
 
+    @staticmethod
+    def _channel_activity(client, pin):
+        """Fetch a starred channel's latest post as an Activity item, or None.
+        ``when`` is the post (or newest reply) timestamp so the feed sorts right."""
+        try:
+            posts, _next = client.list_channel_messages_page(
+                pin.get("team_id", ""), pin["id"], limit=5)
+        except Exception:  # noqa: BLE001 - channel may be inaccessible
+            return None
+        if not posts:
+            return None
+        latest = posts[-1]  # page is oldest-last, so the last entry is newest
+        replies = latest.get("replies") or []
+        tip = replies[-1] if replies else latest
+        snippet = (latest.get("subject") or latest.get("text") or "").strip()
+        return {
+            "channel": pin.get("name", ""),
+            "team": pin.get("team_name", ""),
+            "from": tip.get("from", ""),
+            "snippet": snippet,
+            "replies": len(replies),
+            "when": tip.get("sent", "") or latest.get("sent", ""),
+        }
+
     def _scan_roots(self, accounts) -> list:
         # Scan each account's own mount base (not the shared mount_root, which
         # contains them all) so recent_changes gives every account a fair scan
@@ -255,6 +319,9 @@ class DashboardView(Adw.Bin):
             1 for _a, m in data.get("messages", []) if not m.get("is_read", True)))
         self._set_badge("files", len(data.get("files", [])))
         self._set_badge("pinned", len(data.get("pinned", [])))
+        # Activity badge = unread chats + starred channels with a new post.
+        unread_chats = sum(1 for _a, c in data.get("chats", []) if c.get("unread"))
+        self._set_badge("activity", unread_chats + len(data.get("activity", [])))
         self._render_section()
         return False
 
@@ -262,13 +329,13 @@ class DashboardView(Adw.Bin):
     def _render_section(self) -> None:
         titles = {"today": _("Today"), "calendar": _("Upcoming"),
                   "mail": _("Recent mail"), "files": _("File changes"),
-                  "pinned": _("Pinned")}
+                  "activity": _("Activity"), "pinned": _("Pinned")}
         self._content_title.set_title(titles.get(self._section, _("Overview")))
         self._content_title.set_subtitle(datetime.now().strftime("%A, %d %B"))
         builder = {
             "today": self._build_today, "calendar": self._build_calendar,
             "mail": self._build_mail, "files": self._build_files,
-            "pinned": self._build_pinned,
+            "activity": self._build_activity, "pinned": self._build_pinned,
         }.get(self._section, self._build_today)
         self._content.set_child(builder())
 
@@ -318,6 +385,11 @@ class DashboardView(Adw.Bin):
         stats.append(self._stat(unread, _("Unread"), "mail-unread-symbolic", "mail"))
         stats.append(self._stat(events_today, _("Events today"),
                                 "x-office-calendar-symbolic", "calendar"))
+        if self._ms_accounts:
+            unread_chats = sum(1 for _a, c in self._data.get("chats", [])
+                               if c.get("unread"))
+            stats.append(self._stat(unread_chats, _("New chats"),
+                                    "user-available-symbolic", "activity"))
         stats.append(self._stat(len(self._data.get("files", [])), _("File changes"),
                                 "document-open-recent-symbolic", "files"))
         stats.append(self._stat(mounted, _("Mounted"), "folder-remote-symbolic",
@@ -338,9 +410,26 @@ class DashboardView(Adw.Bin):
         previews.append(self._preview_group(
             _("Unread"), [self._mail_row(a, m) for a, m in unread_msgs],
             _("Inbox zero. 🎉")))
+        if self._ms_accounts:
+            previews.append(self._preview_group(
+                _("Activity"), self._recent_activity_rows(5),
+                _("No recent chats or channel posts.")))
         box.append(previews)
         return Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER,
                                   vexpand=True, child=box)
+
+    def _recent_activity_rows(self, limit: int) -> list:
+        """The newest few items across starred channels and chats, interleaved
+        by time, as ready-to-add rows for the Today preview."""
+        merged = []
+        for account, item in self._data.get("activity", []):
+            merged.append((item.get("when", ""),
+                           lambda a=account, it=item: self._channel_row(a, it)))
+        for account, chat in self._data.get("chats", [])[:limit]:
+            merged.append((chat.get("last_at", ""),
+                           lambda a=account, c=chat: self._chat_row(a, c)))
+        merged.sort(key=lambda t: t[0], reverse=True)
+        return [build() for _when, build in merged[:limit]]
 
     def _pinned_group(self, add, *, kind: str) -> None:
         """Prepend a Pinned group (filtered to ``kind``: mail|calendar) so the
@@ -449,6 +538,83 @@ class DashboardView(Adw.Bin):
                 group.add(self._pinned_row(account, pin, detail))
             add(group)
         return scroller
+
+    def _build_activity(self) -> Gtk.Widget:
+        scroller, add = self._section_page()
+        activity = self._data.get("activity", [])
+        chats = self._data.get("chats", [])
+        if not activity and not chats:
+            empty = Adw.PreferencesGroup(
+                title=_("Activity"),
+                description=_("Recent posts in starred channels and your chats."))
+            empty.add(Adw.ActionRow(
+                title=_("Nothing recent"),
+                subtitle=_("Star a channel (★ in Teams) to track its posts here.")))
+            add(empty)
+            return scroller
+        if activity:
+            group = Adw.PreferencesGroup(
+                title=_("Team channels"),
+                description=_("Latest posts in channels you starred."))
+            for account, item in activity:
+                group.add(self._channel_row(account, item))
+            add(group)
+        if chats:
+            group = Adw.PreferencesGroup(
+                title=_("Chats"), description=_("Your most recent conversations."))
+            for account, chat in chats[:20]:
+                group.add(self._chat_row(account, chat))
+            add(group)
+        return scroller
+
+    def _channel_row(self, account, item) -> Adw.ActionRow:
+        from .format import esc
+
+        title = item.get("channel") or _("Channel")
+        bits = [b for b in (item.get("team"), relative_time(item.get("when", "")),
+                            account.display_name) if b]
+        sender = item.get("from")
+        snippet = item.get("snippet") or ""
+        if item.get("replies"):
+            snippet = _("%(n)d replies · %(text)s") % {
+                "n": item["replies"], "text": snippet}
+        if sender:
+            snippet = f"{sender}: {snippet}" if snippet else sender
+        subtitle = snippet or " · ".join(bits)
+        row = Adw.ActionRow(title=esc(title), subtitle=esc(subtitle))
+        row.set_title_lines(1)
+        row.set_subtitle_lines(2)
+        row.add_prefix(Gtk.Image.new_from_icon_name("user-available-symbolic"))
+        row.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
+        row.set_activatable(True)
+        row.connect("activated",
+                    lambda _r, a=account: self._window.open_account_tab(a, "teams"))
+        return row
+
+    def _chat_row(self, account, chat) -> Adw.ActionRow:
+        from .format import esc
+
+        when = relative_time(chat.get("last_at", ""))
+        subtitle = chat.get("preview") or " · ".join(
+            x for x in (when, account.display_name) if x)
+        row = Adw.ActionRow(title=esc(chat.get("name") or _("Chat")),
+                            subtitle=esc(subtitle))
+        row.set_title_lines(1)
+        row.set_subtitle_lines(1)
+        if chat.get("unread"):
+            dot = Gtk.Image.new_from_icon_name("media-record-symbolic")
+            dot.add_css_class("accent")
+            row.add_prefix(dot)
+        else:
+            row.add_prefix(Gtk.Image.new_from_icon_name("user-available-symbolic"))
+        if is_pinned(account, "chat", "teams", chat.get("id", "")):
+            row.add_suffix(Gtk.Image.new_from_icon_name("starred-symbolic"))
+        row.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
+        row.set_activatable(True)
+        row.connect(
+            "activated",
+            lambda _r, a=account, cid=chat.get("id"): self._window.open_chat(a, cid))
+        return row
 
     # -- widgets ----------------------------------------------------------
     def _stat(self, number, caption, icon, section: str | None = None) -> Gtk.Widget:

@@ -88,6 +88,40 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
       <summary>Show desktop notifications for new mail and upcoming events</summary>
     </key>
 
+    <key name="notify-level" type="s">
+      <default>'all'</default>
+      <summary>Which notifications interrupt with a banner</summary>
+      <description>
+        'all' notifies for everything; 'priority' only for direct (1:1) chats,
+        important mail, and calendar reminders — group-chat chatter and ordinary
+        mail update the badges silently.
+      </description>
+    </key>
+
+    <key name="notify-respect-system-dnd" type="b">
+      <default>true</default>
+      <summary>Honour the system Do Not Disturb state</summary>
+      <description>
+        When on, no banners are raised while GNOME's Do Not Disturb is active
+        (badges still update). Reads org.gnome.desktop.notifications show-banners.
+      </description>
+    </key>
+
+    <key name="quiet-hours-enabled" type="b">
+      <default>false</default>
+      <summary>Silence notification banners during a nightly window</summary>
+    </key>
+
+    <key name="quiet-hours-start" type="s">
+      <default>'22:00'</default>
+      <summary>Quiet hours start time (HH:MM, local)</summary>
+    </key>
+
+    <key name="quiet-hours-end" type="s">
+      <default>'08:00'</default>
+      <summary>Quiet hours end time (HH:MM, local)</summary>
+    </key>
+
     <key name="run-in-background" type="b">
       <default>false</default>
       <summary>Keep running in the background when the window is closed</summary>

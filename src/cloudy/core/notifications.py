@@ -114,6 +114,80 @@ class NotificationManager:
         except Exception:  # noqa: BLE001 - never let a settings hiccup crash polling
             return True
 
+    def _bool(self, key: str, default: bool) -> bool:
+        try:
+            return self._app.settings.get_boolean(key)
+        except Exception:  # noqa: BLE001
+            return default
+
+    def _str(self, key: str, default: str) -> str:
+        try:
+            return self._app.settings.get_string(key)
+        except Exception:  # noqa: BLE001
+            return default
+
+    # -- attention gating (DND / quiet hours / relevance tier) -----------
+    # Research (Mark et al. 2008; Iqbal & Bailey 2008) is unambiguous that
+    # ill-timed, low-relevance interruptions are the costly ones — so banners are
+    # gated by the system DND state, a nightly quiet-hours window, and a
+    # relevance tier. Badges/unread counts always update; only the *banner* is
+    # suppressed, so nothing is lost — it's just not interruptive.
+    def _gnome_notif_settings(self):
+        """GNOME's notification settings (for the DND/show-banners flag), or None
+        when that schema isn't installed (e.g. inside a minimal Flatpak runtime).
+        Looked up once and cached; a None result degrades to 'not in DND'."""
+        if not hasattr(self, "_gnome_notif"):
+            self._gnome_notif = None
+            try:
+                src = Gio.SettingsSchemaSource.get_default()
+                if src is not None and src.lookup(
+                        "org.gnome.desktop.notifications", True) is not None:
+                    self._gnome_notif = Gio.Settings.new(
+                        "org.gnome.desktop.notifications")
+            except Exception:  # noqa: BLE001
+                self._gnome_notif = None
+        return self._gnome_notif
+
+    def _system_dnd_active(self) -> bool:
+        if not self._bool("notify-respect-system-dnd", True):
+            return False
+        try:
+            settings = self._gnome_notif_settings()
+            # show-banners flips to False while GNOME Do Not Disturb is on.
+            return settings is not None and not settings.get_boolean("show-banners")
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _quiet_hours_active(self) -> bool:
+        if not self._bool("quiet-hours-enabled", False):
+            return False
+        start = self._str("quiet-hours-start", "22:00")
+        end = self._str("quiet-hours-end", "08:00")
+        if start == end:
+            return False
+        now = datetime.now().strftime("%H:%M")  # zero-padded → lexical compare ok
+        if start < end:
+            return start <= now < end
+        return now >= start or now < end  # window wraps past midnight
+
+    def _focus_active(self) -> bool:
+        """True when banners should be withheld (badges still update)."""
+        return self._system_dnd_active() or self._quiet_hours_active()
+
+    def _allowed(self, tier: int) -> bool:
+        """Whether a banner of the given relevance tier (1 = direct/important,
+        2 = ambient) should interrupt right now."""
+        if not self._enabled() or self._focus_active():
+            return False
+        if tier > 1 and self._str("notify-level", "all") == "priority":
+            return False
+        return True
+
+    @staticmethod
+    def _muted_ids(account, kind: str) -> set:
+        return {m.get("id") for m in (getattr(account, "muted_sources", None) or [])
+                if m.get("kind") == kind}
+
     # -- polling ----------------------------------------------------------
     def _tick(self) -> bool:
         if not self._enabled():
@@ -170,7 +244,10 @@ class NotificationManager:
                  if m.get("id") not in seen and not m.get("is_read", True)]
         seen.update(ids)
         for msg in fresh[:_MAX_MAIL_PER_TICK]:
-            self._notify_mail(account, msg)
+            # Important mail interrupts (tier 1); ordinary mail is ambient (tier 2).
+            tier = 1 if msg.get("important") else 2
+            if self._allowed(tier):
+                self._notify_mail(account, msg, tier)
         return False
 
     def _type_icon(self, symbolic_name: str) -> Gio.Icon:
@@ -180,13 +257,14 @@ class NotificationManager:
         return Gio.ThemedIcon.new_from_names(
             [symbolic_name, self._app.application_id])
 
-    def _notify_mail(self, account, msg) -> None:
+    def _notify_mail(self, account, msg, tier: int = 2) -> None:
         sender = _short_sender(msg.get("from", "")) or _("Someone")
         subject = msg.get("subject", "") or _("(no subject)")
         note = Gio.Notification.new(_("New mail · %s") % account.display_name)
         note.set_body(f"{sender}: {subject}")
         note.set_icon(self._type_icon("mail-unread-symbolic"))
-        note.set_priority(Gio.NotificationPriority.NORMAL)
+        note.set_priority(Gio.NotificationPriority.HIGH if tier == 1
+                          else Gio.NotificationPriority.NORMAL)
         payload = GLib.Variant("s", f"{account.id}\x1f{msg.get('id', '')}")
         note.set_default_action(
             Gio.Action.print_detailed_name("app.notify-open-mail", payload))
@@ -222,7 +300,11 @@ class NotificationManager:
                 continue
             delta = start - now
             if timedelta(0) <= delta <= _REMINDER_WINDOW:
-                self._notify_event(account, ev, start)
+                # Meeting reminders are time-critical (tier 1). Mark notified even
+                # when suppressed (DND/quiet) — firing a stale reminder late is
+                # worse than skipping it.
+                if self._allowed(1):
+                    self._notify_event(account, ev, start)
                 self._notified_events.add(key)
         return False
 
@@ -263,29 +345,39 @@ class NotificationManager:
             self._primed.add(f"chat:{account.id}")
             return False
         unread = self._chat_unread.setdefault(account.id, set())
-        fresh = []
+        muted = self._muted_ids(account, "chat")
+        badge_changed = False
+        to_notify = []
         for c in chats:
             last = c.get("last_at", "")
             changed = bool(last) and last != seen.get(c["id"])
             seen[c["id"]] = last
             # Only notify/badge for messages from SOMEONE ELSE — your own just-sent
             # message also moves the chat's timestamp, but shouldn't ping you.
-            if changed and not c.get("from_me"):
-                fresh.append(c)
-                unread.add(c["id"])  # light up the red badge
-        if fresh:
+            if not (changed and not c.get("from_me")):
+                continue
+            if c["id"] in muted:
+                continue  # silenced: no badge, no banner
+            unread.add(c["id"])  # light up the red badge (always, even in DND)
+            badge_changed = True
+            # 1:1 chats are direct (tier 1); group/meeting chatter is ambient (2).
+            tier = 1 if c.get("kind") == "oneOnOne" else 2
+            if self._allowed(tier):
+                to_notify.append((c, tier))
+        if badge_changed:
             self._push_chat_badge(account.id)
-        for chat in fresh[:_MAX_MAIL_PER_TICK]:
-            self._notify_chat(account, chat)
+        for chat, tier in to_notify[:_MAX_MAIL_PER_TICK]:
+            self._notify_chat(account, chat, tier)
         return False
 
-    def _notify_chat(self, account, chat) -> None:
+    def _notify_chat(self, account, chat, tier: int = 2) -> None:
         name = chat.get("name", "") or _("Chat")
         preview = (chat.get("preview", "") or "").strip() or _("New message")
         note = Gio.Notification.new(_("New message · %s") % account.display_name)
         note.set_body(f"{name}: {preview}")
         note.set_icon(self._type_icon("user-available-symbolic"))
-        note.set_priority(Gio.NotificationPriority.HIGH)
+        note.set_priority(Gio.NotificationPriority.HIGH if tier == 1
+                          else Gio.NotificationPriority.NORMAL)
         payload = GLib.Variant("s", f"{account.id}\x1f{chat['id']}")
         note.set_default_action(
             Gio.Action.print_detailed_name("app.notify-open-chat", payload))

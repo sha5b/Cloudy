@@ -148,11 +148,18 @@ class MailView(Adw.Bin):
             bar.append(self._add_shared_btn)
             sidebar_tb.add_top_bar(bar)
         else:
+            # An Adw.HeaderBar centres its title widget and caps it at the
+            # natural width, so a dropdown placed there never spans the column.
+            # Mirror the Microsoft layout: compose in the header, and the folder
+            # dropdown in its own full-width bar below.
             header = Adw.HeaderBar(
-                show_start_title_buttons=False, show_end_title_buttons=False,
-                title_widget=self._folder_dd)
+                show_start_title_buttons=False, show_end_title_buttons=False)
             header.pack_start(compose_btn)
             sidebar_tb.add_top_bar(header)
+            bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
+                          margin_top=6, margin_bottom=6, margin_start=10, margin_end=10)
+            bar.append(self._folder_dd)
+            sidebar_tb.add_top_bar(bar)
         self._search = Gtk.SearchEntry(placeholder_text=_("Search mail…"), hexpand=True)
         self._search.connect("search-changed", self._on_search_changed)
         search_bar = Gtk.Box(margin_top=6, margin_bottom=6,

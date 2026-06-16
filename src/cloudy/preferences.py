@@ -10,10 +10,13 @@
   offline and where it mounts.
 """
 
+import re
 from gettext import gettext as _
 from pathlib import Path
 
 from gi.repository import Adw, Gio, GLib, Gtk
+
+_TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
 
 class CloudyPreferences(Adw.PreferencesDialog):
@@ -30,6 +33,7 @@ class CloudyPreferences(Adw.PreferencesDialog):
         self._reg_handler = None
 
         self.add(self._general_page())
+        self.add(self._notifications_page())
         self.add(self._accounts_page())
 
     # -- General ----------------------------------------------------------
@@ -38,7 +42,7 @@ class CloudyPreferences(Adw.PreferencesDialog):
 
         files = Adw.PreferencesGroup(
             title=_("Files"),
-            description=_("Where mounted libraries live and how they are cached."),
+            description=_("Where your cloud drives appear on this computer."),
         )
         page.add(files)
 
@@ -64,6 +68,7 @@ class CloudyPreferences(Adw.PreferencesDialog):
 
         # Cache mode.
         cache = Adw.ComboRow(title=_("File caching"))
+        cache.set_subtitle(_("How much is kept on disk versus fetched on demand."))
         self._cache_values = ["full", "minimal"]
         cm = Gtk.StringList()
         cm.append(_("On-demand (cache opened files)"))
@@ -77,12 +82,13 @@ class CloudyPreferences(Adw.PreferencesDialog):
         sync = Adw.PreferencesGroup(
             title=_("Sync"),
             description=_(
-                "How files sync when you enable it for an account (below, on the "
-                "Accounts page)."
+                "The default for accounts where you turn on offline sync "
+                "(on the Accounts page)."
             ),
         )
         page.add(sync)
         sync_type = Adw.ComboRow(title=_("Sync type"))
+        sync_type.set_subtitle(_("Stream files on demand, or keep a full offline copy."))
         self._sync_values = ["stream", "full"]
         sm = Gtk.StringList()
         sm.append(_("Streaming (mount on demand, no local copy)"))
@@ -96,25 +102,18 @@ class CloudyPreferences(Adw.PreferencesDialog):
         page.add(startup)
         autostart = Adw.SwitchRow(
             title=_("Start at login"),
-            subtitle=_("Keep mounts and sync available in the background."),
+            subtitle=_("Launch Cloudy automatically when you sign in."),
         )
         autostart.set_active(self._settings.get_boolean("autostart"))
         autostart.connect("notify::active", self._on_autostart_changed)
         startup.add(autostart)
 
-        # Notifications & background behaviour.
+        # Background / desktop integration (notifications live on their own tab).
         integ = Adw.PreferencesGroup(
-            title=_("Notifications &amp; background"),
-            description=_("How Cloudy talks to the rest of your desktop."),
+            title=_("Background"),
+            description=_("Keep Cloudy working when its window is closed."),
         )
         page.add(integ)
-
-        notify = Adw.SwitchRow(
-            title=_("Desktop notifications"),
-            subtitle=_("Alert me about new mail and upcoming events."))
-        self._settings.bind("notifications-enabled", notify, "active",
-                            Gio.SettingsBindFlags.DEFAULT)
-        integ.add(notify)
 
         background = Adw.SwitchRow(
             title=_("Keep running in the background"),
@@ -129,6 +128,62 @@ class CloudyPreferences(Adw.PreferencesDialog):
         self._settings.bind("eds-publish-enabled", eds, "active",
                             Gio.SettingsBindFlags.DEFAULT)
         integ.add(eds)
+
+        return page
+
+    # -- Notifications ----------------------------------------------------
+    def _notifications_page(self) -> Adw.PreferencesPage:
+        page = Adw.PreferencesPage(title=_("Notifications"),
+                                   icon_name="preferences-system-notifications-symbolic")
+
+        alerts = Adw.PreferencesGroup(
+            title=_("Alerts"),
+            description=_("When and how Cloudy interrupts you."),
+        )
+        page.add(alerts)
+
+        notify = Adw.SwitchRow(
+            title=_("Desktop notifications"),
+            subtitle=_("Alert me about new mail and upcoming events."))
+        self._settings.bind("notifications-enabled", notify, "active",
+                            Gio.SettingsBindFlags.DEFAULT)
+        alerts.add(notify)
+
+        # Relevance level: everything, or only direct/important (group-chat
+        # chatter and ordinary mail then update badges silently).
+        level = Adw.ComboRow(title=_("Notify me about"))
+        level.set_subtitle(_("Limit interruptions to what matters."))
+        self._notify_level_values = ["all", "priority"]
+        lvl_model = Gtk.StringList()
+        lvl_model.append(_("Everything"))
+        lvl_model.append(_("Direct messages & important only"))
+        level.set_model(lvl_model)
+        level.set_selected(self._index_of("notify-level", self._notify_level_values))
+        level.connect("notify::selected", self._on_notify_level_changed)
+        alerts.add(level)
+
+        dnd = Adw.SwitchRow(
+            title=_("Respect system Do Not Disturb"),
+            subtitle=_("Stay silent while GNOME Do Not Disturb is on."))
+        self._settings.bind("notify-respect-system-dnd", dnd, "active",
+                            Gio.SettingsBindFlags.DEFAULT)
+        alerts.add(dnd)
+
+        # Quiet hours in their own group.
+        quiet_group = Adw.PreferencesGroup(
+            title=_("Quiet hours"),
+            description=_("Silence banners overnight — badges still update."),
+        )
+        page.add(quiet_group)
+
+        quiet = Adw.SwitchRow(
+            title=_("Enable quiet hours"),
+            subtitle=_("Hold back banners during the window below."))
+        self._settings.bind("quiet-hours-enabled", quiet, "active",
+                            Gio.SettingsBindFlags.DEFAULT)
+        quiet_group.add(quiet)
+        quiet_group.add(self._time_row(_("Start"), "quiet-hours-start"))
+        quiet_group.add(self._time_row(_("End"), "quiet-hours-end"))
 
         return page
 
@@ -322,6 +377,24 @@ class CloudyPreferences(Adw.PreferencesDialog):
 
     def _on_cache_changed(self, combo, _param) -> None:
         self._settings.set_string("cache-mode", self._cache_values[combo.get_selected()])
+
+    def _on_notify_level_changed(self, combo, _param) -> None:
+        self._settings.set_string(
+            "notify-level", self._notify_level_values[combo.get_selected()])
+
+    def _time_row(self, title: str, key: str) -> Adw.EntryRow:
+        """An HH:MM time entry that persists ``key`` only on a valid value (so a
+        half-typed time never clobbers the setting), reformatted to zero-padded
+        HH:MM for the lexical comparison the notifier does."""
+        row = Adw.EntryRow(title=title)
+        row.set_text(self._settings.get_string(key))
+        row.connect("changed", self._on_time_changed, key)
+        return row
+
+    def _on_time_changed(self, row, key: str) -> None:
+        m = _TIME_RE.match(row.get_text().strip())
+        if m:
+            self._settings.set_string(key, f"{int(m.group(1)):02d}:{m.group(2)}")
 
     def _on_sync_type_changed(self, combo, _param) -> None:
         self._settings.set_string("default-sync-type", self._sync_values[combo.get_selected()])

@@ -12,7 +12,109 @@ Calendar)** and **Google (Gmail, Calendar, Drive)** on Fedora 44 (GNOME 50). It
 for mail/calendar) rather than reimplementing them. Read `docs/ARCHITECTURE.md`,
 `docs/AUTH.md`, `docs/SECRETS.md`, `docs/ROADMAP.md` for depth.
 
-## ⏭ Continue here — Teams tab: channels + OneNote (2026-06-15, latest, v0.2.1)
+## ⏭ Continue here — Attention/notifications (P1) + chat status polish (2026-06-15, latest)
+
+**Where we stopped.** Finished a research-driven notifications pass ("P1") and a
+round of chat-bubble polish. Everything below is built into `_install`, all
+green (`make build` + `make install` + 4 meson tests + `make lint`), and
+verified headlessly (notifier gating logic, mute persistence + `from_dict`
+round-trip, view construction, Preferences against the installed schema). **Not
+yet eyeballed in the GUI — ask the user to `make run`** and try DND / quiet
+hours / mute / sending a message.
+
+**Backstory:** a `deep-research` run on CSCW/HCI collaboration (Dourish &
+Bellotti 1992; Fogarty 2004; Dabbish & Kraut 2003; Mark 2008; Iqbal & Bailey
+2007/08) produced a refinement backlog. The through-line: *abstract beats full
+beats none*, *presence ≠ availability* (only changing **delivery** reduces
+interruptions), and interruptions cost wellbeing fast — so gate banners, don't
+add more signals. P1 below implements the delivery-gating half.
+
+### P1 notifications (`core/notifications.py`, `preferences.py`, schema)
+- **System DND + quiet hours.** `NotificationManager._focus_active()` = system
+  DND **or** quiet hours. System DND reads GNOME's
+  `org.gnome.desktop.notifications` `show-banners` (False = DND on) via a
+  schema-guarded, cached `_gnome_notif_settings()` that degrades to "not in DND"
+  if the schema is absent (e.g. minimal Flatpak runtime). Quiet hours = a nightly
+  HH:MM window that wraps midnight (lexical string compare on zero-padded times).
+- **Relevance tiers.** Each item is tier-1 (1:1 chat / important mail / calendar
+  reminder → `HIGH`) or tier-2 (group chat / ordinary mail → `NORMAL`).
+  `_allowed(tier)` gates the **banner only** (badges/unread always update, so
+  nothing is lost). `notify-level` = `all` | `priority`; priority suppresses
+  tier-2 banners.
+- **Per-chat/-channel mute.** `Account.muted_sources` (added to the `from_dict`
+  allowlist — required or new fields silently drop) + `is_muted`/`toggle_mute`
+  in `source_nav.py`. Bell toggle in the Chat header (`chat_view._mute_btn`) and
+  Teams channel header (`teams_view._mute_btn`); muted ⇒ no banner **and** no
+  badge. Notifier reads `account.muted_sources` directly (no widgets import).
+- **New GSettings keys** (require `make build` to reinstall the schema):
+  `notify-level`, `notify-respect-system-dnd`, `quiet-hours-enabled`,
+  `quiet-hours-start`, `quiet-hours-end`. Preferences → *Notifications &
+  background* exposes all of them (time entries validate to zero-padded HH:MM
+  and never persist a half-typed value).
+
+### Chat bubble polish (`widgets/chat_view.py`)
+- **Fluid send (no rebuild, no image reload).** The optimistic echo is remembered
+  (`self._optimistic = {widget, text}`); when the server confirms, that exact
+  widget is **adopted** (kept, registered under the real id) instead of
+  rebuilding the thread — so images never reload and the view never jumps.
+  Full rebuild now only for genuine structural changes / rare races. (The earlier
+  per-URL `_image_cache` is still there as a second line of defence.)
+- **Single delivery indicator.** `_apply_status()` shows ONE glyph on my
+  most-recent message only (Teams-style — not a check per line): clock while
+  sending → check once sent. **No "Seen"/eye** — the Graph chat API exposes no
+  read receipt for the other party (only Teams' private service has it), so we
+  deliberately don't fake it. User chose "check only" over an inferred eye.
+- **Reactions are pills below the bubble** (a vertical `col` wraps bubble +
+  reactions), with horizontal insets so indicators aren't jammed to the edge.
+
+### What's next (P2 from the same backlog — not started)
+1. **Notification batching/digest**: defer tier-2 to a periodic "N new in M
+   chats" digest (Iqbal & Bailey breakpoint deferral) instead of immediate.
+2. **Meeting auto-focus**: derive an in-meeting state from the user's own
+   calendar and auto-enable focus (suppress tier-2) — coarse only, never expose
+   meeting titles (Fogarty calendar-busy). Detection misfires silently swallow
+   notifications, so gate behind a setting and keep items recoverable via badges.
+3. **Dashboard catch-up** ("since you were away"): unread markers + per-channel
+   unread counts. NOTE: cheap per-channel unread isn't available from Graph — the
+   chats half is feasible, channels need a workaround. (Deliberately dropped #6
+   "appear offline / invisible" per the user.)
+   Caveat the research itself flagged: no direct evidence was found on
+   threading-vs-linear or grounding/search — treat those as a separate pass.
+
+## ⏭ Earlier — Dashboard Activity + chat/notes fixes (2026-06-15)
+
+- **Dashboard "Activity" feed** (`widgets/dashboard_view.py`): a new section
+  (shown when there's a work/school MS account) with two groups — **Team
+  channels** (latest post from each *starred channel*) and **Chats** (recent
+  conversations from one cheap `list_chats_page` call, starred chats floated to
+  the top). A Today preview column + a "New chats" stat card interleave the
+  newest items. Channel rows route to the Teams tab; chat rows to `open_chat`.
+  Aggregation runs inside the existing off-thread `work()`; `_channel_activity`
+  fetches the latest channel post. The **Pinned** section now only collects
+  mail/calendar pins (`_is_mailcal_pin`) — channel/chat pins go to Activity.
+- **Star channels & chats**: `TeamsView` (content header ★, pins the open
+  channel) and `ChatView` (header ★, pins the open chat) call `toggle_pin`,
+  which now takes `**extra` so a channel pin carries `team_id`/`team_name`. Pin
+  kinds are `"channel"` / `"chat"` (`source="teams"`); see `source_nav.py`.
+- **Chat images no longer reload on every send/receive**: `ChatView` now caches
+  decoded thumbnails by URL (`_image_cache`, reset on chat switch). A full
+  rebuild (reconciling an optimistic send) reuses them instantly via
+  `_picture_for` instead of re-fetching every picture. Fast-path append was
+  already in place; the cache covers the rebuild case.
+- **OneNote crash hardening + full width**: `_render_note_body` dropped the
+  `Adw.Clamp` (content is now full-width with margins) and splits any text block
+  over `_MAX_LABEL_CHARS` (12k) across multiple labels, so a single very long
+  paragraph can't grow one label past the GL texture ceiling and re-trigger the
+  `gsk_gpu_upload_cairo_op` segfault that killed the WebView path.
+- **Gmail folder dropdown** spanned only its natural width because it was the
+  `Adw.HeaderBar` title widget (centred/capped). It's now in its own full-width
+  bar below the header, mirroring the Microsoft layout (`mail_view.py`).
+
+Verified: `make build` + 4 meson tests + `make lint`; headless instantiate of
+Dashboard/Teams/Chat/Mail (MS + Gmail) and render of the Activity section with
+fake data. GUI not yet eyeballed — ask the user to `make run`.
+
+## ⏭ Earlier — Teams tab: channels + OneNote (2026-06-15, v0.2.1)
 
 A new top-level **Teams** capability/tab, distinct from the flat **Chat** tab.
 Microsoft work/school only (`gmail` does **not** declare `TeamsCapability`, so
