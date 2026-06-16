@@ -147,6 +147,15 @@ class CloudyWindow(Adw.ApplicationWindow):
         if badge is not None:
             self._set_badge(badge, count)
 
+    def refresh_account_mail(self, account_id: str) -> None:
+        """Reload the open mail list when the notifier sees new mail, so it
+        updates live (not only on a manual refresh or tab switch)."""
+        if self._account_shown != account_id:
+            return
+        view = self._account_mail_view
+        if view is not None:
+            view.refresh_live()
+
     # -- per-account mail folder memory (survives account switches) -------
     def remember_mail_folder(self, account_id: str, folder_id: str) -> None:
         self._mail_folder_by_account[account_id] = folder_id

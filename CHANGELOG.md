@@ -11,6 +11,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **New mail now appears on its own**: the open mail list reloads when the
+  background poller spots new mail (every ~2 min), instead of only on a manual
+  refresh or a tab switch. Updates even while a banner is suppressed by Do Not
+  Disturb / quiet hours.
+
 ## [0.2.2] - 2026-06-16
 
 ### Added

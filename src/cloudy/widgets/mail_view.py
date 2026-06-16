@@ -760,6 +760,15 @@ class MailView(Adw.Bin):
         self._list.select_row(target)
         target.grab_focus()  # scrolls the row into view
 
+    def refresh_live(self) -> None:
+        """Re-fetch the current folder from the server. Called by the notifier
+        when its poll spots new mail, so the open list updates on its own instead
+        of only on a manual refresh or page switch. No-op while paginating (a
+        full reload would drop the "Load older" cursor mid-fetch)."""
+        if self._loading_more:
+            return
+        self._load_async()
+
     def open_message(self, mid) -> None:
         """Open a message in the reading pane (also used to deep-link from the
         dashboard). Selects its list row when that row is present."""

@@ -315,6 +315,10 @@ class NotificationManager:
         fresh = [m for m in messages
                  if m.get("id") not in seen and not m.get("is_read", True)]
         seen.update(ids)
+        # Live-update the open mail list (like the badge, this happens even when
+        # the banner is suppressed by DND/quiet hours — nothing is interruptive).
+        if fresh and win is not None and hasattr(win, "refresh_account_mail"):
+            win.refresh_account_mail(account.id)
         immediate = []
         for msg in fresh:
             # Important mail interrupts (tier 1); ordinary mail is ambient (tier 2).
