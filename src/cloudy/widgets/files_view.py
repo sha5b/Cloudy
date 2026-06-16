@@ -87,6 +87,31 @@ class FilesView(Adw.Bin):
             self._load_google_libraries()
             return
 
+        # Stale-while-revalidate: show cached libraries instantly (drive/team
+        # enumeration is an N+1 round-trip, so without this it's slow every
+        # time the Files tab is rebuilt), then refresh in the background.
+        cached = self._window.get_application().cache.get(self._libraries_key())
+        if cached is not None:
+            self._libraries = cached[0]
+            self._render_list()
+            if cached[1]:
+                return
+
+        def work():
+            from .graph_helper import build_graph_client
+
+            graph = build_graph_client(self._window.get_application(), self._account)
+
+            def safe(fn):
+                try:
+                    return (fn(), None)
+                except Exception as exc:  # noqa: BLE001
+                    return (None, str(exc))
+
+            return safe(graph.list_drives), safe(graph.list_teams)
+
+        run_async(work, self._on_ms_libraries)
+
     def _load_google_libraries(self) -> None:
         """Google Drive sources, mirroring Microsoft's OneDrive + Team libraries:
         **My Drive** and **Shared with me** are always shown; **Shared Drives**
@@ -125,31 +150,6 @@ class FilesView(Adw.Bin):
                 "subtitle": _("Shared drive")})
         self._render_list()
         return False
-
-        # Stale-while-revalidate: show cached libraries instantly (drive/team
-        # enumeration is an N+1 round-trip, so without this it's slow every
-        # time the Files tab is rebuilt), then refresh in the background.
-        cached = self._window.get_application().cache.get(self._libraries_key())
-        if cached is not None:
-            self._libraries = cached[0]
-            self._render_list()
-            if cached[1]:
-                return
-
-        def work():
-            from .graph_helper import build_graph_client
-
-            graph = build_graph_client(self._window.get_application(), self._account)
-
-            def safe(fn):
-                try:
-                    return (fn(), None)
-                except Exception as exc:  # noqa: BLE001
-                    return (None, str(exc))
-
-            return safe(graph.list_drives), safe(graph.list_teams)
-
-        run_async(work, self._on_ms_libraries)
 
     def _on_ms_libraries(self, res, error) -> bool:
         if error or not res:
