@@ -102,6 +102,7 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
           <li>Offline cache: mail and agenda show last-known data instantly on launch, even offline</li>
           <li>Dashboard Activity feed of starred channels and recent chats; star channels and chats</li>
           <li>Notification settings moved to their own tab; OneNote and Gmail layout fixes</li>
+          <li>The mail list now updates on its own when new mail arrives, not only on a manual refresh</li>
         </ul>
       </description>
     </release>
