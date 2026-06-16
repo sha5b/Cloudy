@@ -17,6 +17,7 @@ daemons run on the host (outside the Flatpak sandbox); see docs/ARCHITECTURE.md.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -335,6 +336,31 @@ class MountManager:
         args += [f"{k}={v}" for k, v in opts.items()]
         args.append("--non-interactive")
         subprocess.run(args, check=True, capture_output=True, text=True)
+
+    def list_google_shared_drives(self, token_json: str) -> list[dict]:
+        """Shared (Team) Drives the Google account can access, as ``[{id, name}]``.
+
+        The app holds no Google Drive OAuth scope (Drive is mounted entirely
+        through rclone's own auth), so we enumerate via rclone: spin up a
+        throwaway ``drive`` remote from the stored token, ask its backend for the
+        shared-drive list, then drop the remote. Best-effort — returns ``[]`` if
+        rclone is missing, the token is empty, or anything goes wrong."""
+        if not self._rclone_binary() or not token_json:
+            return []
+        probe = "cloudy-gdrive-probe"
+        try:
+            self.create_remote(probe, "drive", {"token": token_json, "scope": "drive"})
+            out = subprocess.run(
+                self._rclone_argv("backend", "drives", f"{probe}:"),
+                capture_output=True, text=True, timeout=60,
+            )
+            data = json.loads(out.stdout or "[]")
+            return [{"id": d.get("id", ""), "name": d.get("name", "")}
+                    for d in data if d.get("id")]
+        except Exception:  # noqa: BLE001 - enumeration is best-effort
+            return []
+        finally:
+            self.delete_remote(probe)
 
     # OneDrive convenience wrappers (kept for the Microsoft module).
     def authorize_onedrive(self, timeout: int = 300) -> str:

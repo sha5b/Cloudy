@@ -36,7 +36,11 @@ class CloudyApplication(Adw.Application):
         self.secrets = SecretStore()
         self.registry = AccountRegistry(self.settings)
         self.engine = PluginEngine(self.settings)
-        self.cache = MemoryCache()
+        # Persist the cache so mail/agenda show last-known data offline on launch.
+        from pathlib import Path
+
+        cache_path = Path(GLib.get_user_cache_dir()) / "cloudy" / "cache.json"
+        self.cache = MemoryCache(path=cache_path)
 
         from .core.sync import SyncManager
 
@@ -101,6 +105,8 @@ class CloudyApplication(Adw.Application):
         self._add_action("about", self._on_about)
         self._add_action("preferences", self._on_preferences, ["<primary>comma"])
         self._add_action("add-account", self._on_add_account)
+        self._add_action("command-palette", self._on_command_palette,
+                         ["<primary>k"])
         # Notification deep-links carry a string target.
         self._add_target_action("notify-open-mail", self._on_notify_open_mail)
         self._add_target_action("notify-open-calendar", self._on_notify_open_calendar)
@@ -146,6 +152,14 @@ class CloudyApplication(Adw.Application):
         # Discover modules now; activation happens per user settings.
         self.engine.discover()
         self._provision_backends()
+
+    def do_shutdown(self):
+        # Persist any pending cache so the next launch shows mail/agenda offline.
+        try:
+            self.cache.flush()
+        except Exception:  # noqa: BLE001 - never block shutdown on the cache
+            pass
+        Adw.Application.do_shutdown(self)
 
     def _load_styles(self) -> None:
         """Load the app stylesheet (widgets/metrics.py holds the matching
@@ -264,8 +278,11 @@ class CloudyApplication(Adw.Application):
             return
         account_id, _sep, mid = param.get_string().partition("\x1f")
         account = self.registry.get(account_id)
-        if account is not None and mid:
-            window.open_mail(account, mid)
+        if account is not None:
+            if mid:
+                window.open_mail(account, mid)
+            else:  # digest summary: no single message — just open the mailbox
+                window.open_account_tab(account, "mail")
         window.present()
 
     def _on_notify_open_calendar(self, _action, param):
@@ -289,9 +306,20 @@ class CloudyApplication(Adw.Application):
             return
         account_id, _sep, chat_id = param.get_string().partition("\x1f")
         account = self.registry.get(account_id)
-        if account is not None and chat_id:
-            window.open_chat(account, chat_id)
+        if account is not None:
+            if chat_id:
+                window.open_chat(account, chat_id)
+            else:  # digest summary: no single chat — just open the chat tab
+                window.open_account_tab(account, "chat")
         window.present()
+
+    def _on_command_palette(self, *_args):
+        window = self.props.active_window
+        if window is None:
+            return
+        from .widgets.command_palette import CommandPalette
+
+        CommandPalette(window).present(window)
 
     def _on_quit(self, *_args):
         self.quit()

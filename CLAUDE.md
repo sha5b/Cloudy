@@ -14,7 +14,8 @@ Toolchain here is **user-space**: `meson`/`ninja` via `pip --user` — ensure `e
 make run      # build + install into ./_install, then launch ./_install/bin/cloudy
 make build    # meson compile (auto-configures _build/ first)
 make install  # install into local prefix (prunes the old package tree first)
-make test     # meson test: 4 validation tests (desktop/schema/metainfo/blueprint)
+make test     # meson test: 4 validators (desktop/schema/metainfo/blueprint) + the logic unit suite
+make test-unit # just the headless logic unit tests (tests/unit/, fast, no build/schema needed)
 make lint     # just py_compile over src + nautilus-extension (no ruff/pyflakes here)
 make clean
 ```

@@ -91,6 +91,20 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
   </screenshots>
 
   <releases>
+    <release version="0.2.2" date="2026-06-16">
+      <description>
+        <p>Smarter notifications, Google parity, and a command palette.</p>
+        <ul>
+          <li>Notification attention controls: honour system Do Not Disturb, optional quiet hours, a relevance level, and per-chat/per-channel mute — with low-priority alerts batched into a periodic digest</li>
+          <li>Google multi-calendar: the agenda now merges every calendar you show (birthdays, holidays, subscribed and secondary), not just your primary</li>
+          <li>Google Drive: the Files tab lists My Drive, Shared with me and your Shared Drives</li>
+          <li>Command palette (Ctrl+K) to jump to any account, mailbox, calendar or chat</li>
+          <li>Offline cache: mail and agenda show last-known data instantly on launch, even offline</li>
+          <li>Dashboard Activity feed of starred channels and recent chats; star channels and chats</li>
+          <li>Notification settings moved to their own tab; OneNote and Gmail layout fixes</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.1" date="2026-06-15">
       <description>
         <p>Teams channels and OneNote.</p>

@@ -20,6 +20,7 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Callable, Sequence
 
@@ -401,7 +402,65 @@ class GoogleClient:
         return out
 
     # -- Calendar ---------------------------------------------------------
+    # Google accounts (unlike a personal Microsoft mailbox) routinely have many
+    # calendars — a primary, plus birthdays, holidays, subscribed and secondary
+    # ones. We aggregate events from every *shown* calendar (mirroring what the
+    # user sees in Google Calendar) into one agenda, the way Microsoft merges its
+    # Me/Teams/Shared sources. Each non-primary event id is wrapped
+    # ``gcal\x1f<calendarId>\x1f<eventId>`` so detail/edit/delete route back to the
+    # owning calendar (the same id-prefix trick Graph uses for group:/shared:).
+    _CAL_SEP = "\x1f"
+
+    @classmethod
+    def _wrap_event_id(cls, calendar_id: str, raw_id: str) -> str:
+        if calendar_id and calendar_id != "primary":
+            return f"gcal{cls._CAL_SEP}{calendar_id}{cls._CAL_SEP}{raw_id}"
+        return raw_id
+
+    @classmethod
+    def _unwrap_event_id(cls, event_id: str) -> tuple[str, str]:
+        """``(calendar_id, raw_event_id)`` — 'primary' for an unwrapped id."""
+        prefix = f"gcal{cls._CAL_SEP}"
+        if event_id.startswith(prefix):
+            _, calendar_id, raw_id = event_id.split(cls._CAL_SEP, 2)
+            return calendar_id, raw_id
+        return "primary", event_id
+
+    @staticmethod
+    def _cal_path(calendar_id: str) -> str:
+        return urllib.parse.quote(calendar_id or "primary", safe="")
+
+    def list_calendars(self) -> list[dict]:
+        """The user's calendar list: ``[{id, name, primary, selected, color,
+        writable}]`` (needs calendar.events / calendarlist read)."""
+        url = (f"{CALENDAR}/users/me/calendarList?maxResults=250&fields="
+               "items(id,summary,summaryOverride,primary,selected,"
+               "backgroundColor,accessRole)")
+        data = self._get(url, SCOPES_CALENDAR)
+        out = []
+        for c in data.get("items", []):
+            out.append({
+                "id": c.get("id", ""),
+                "name": c.get("summaryOverride") or c.get("summary", ""),
+                "primary": bool(c.get("primary")),
+                "selected": bool(c.get("selected")),
+                "color": c.get("backgroundColor", ""),
+                "writable": c.get("accessRole") in ("owner", "writer"),
+            })
+        return out
+
     def list_events(self, start_iso: str, end_iso: str, *, limit: int = 50) -> list[dict]:
+        # Resolve which calendars to show; fall back to just 'primary' if the
+        # calendar list can't be fetched (older token / transient error).
+        try:
+            calendars = [c for c in self.list_calendars()
+                         if c["selected"] or c["primary"]]
+        except GoogleError:
+            calendars = []
+        if not calendars:
+            calendars = [{"id": "primary", "name": "", "primary": True,
+                          "color": "", "writable": True}]
+
         params = urllib.parse.urlencode({
             "timeMin": start_iso,
             "timeMax": end_iso,
@@ -409,8 +468,29 @@ class GoogleClient:
             "orderBy": "startTime",
             "maxResults": str(limit),
         })
-        data = self._get(f"{CALENDAR}/calendars/primary/events?{params}", SCOPES_CALENDAR)
-        return [self._event_from_json(e) for e in data.get("items", [])]
+
+        def fetch(cal: dict) -> list[dict]:
+            try:
+                data = self._get(
+                    f"{CALENDAR}/calendars/{self._cal_path(cal['id'])}/events?{params}",
+                    SCOPES_CALENDAR)
+            except GoogleError:
+                return []  # one unreachable calendar must not sink the whole agenda
+            evs = []
+            for e in data.get("items", []):
+                ev = self._event_from_json(e)
+                ev["id"] = self._wrap_event_id(cal["id"], ev["id"])
+                ev["calendar"] = cal["name"]
+                ev["color"] = cal["color"]
+                evs.append(ev)
+            return evs
+
+        out: list[dict] = []
+        with ThreadPoolExecutor(max_workers=min(8, len(calendars))) as pool:
+            for evs in pool.map(fetch, calendars):
+                out.extend(evs)
+        out.sort(key=lambda e: e.get("start", ""))
+        return out
 
     @staticmethod
     def _event_from_json(e: dict) -> dict:
@@ -450,10 +530,12 @@ class GoogleClient:
                      end_iso: str, location: str = "", body: str = "",
                      attendees=None, all_day: bool = False, source: str = "me",
                      address: str | None = None, html: bool = False) -> dict:
-        """Edit an existing event on the primary calendar (PATCH)."""
+        """Edit an existing event in its calendar (PATCH). Read-only calendars
+        (holidays/birthdays) return a Google 403, surfaced as a toast."""
         def slot(iso: str) -> dict:
             return {"date": iso[:10]} if all_day else {"dateTime": iso}
 
+        cal, raw = self._unwrap_event_id(event_id)
         event: dict = {"summary": subject, "start": slot(start_iso),
                        "end": slot(end_iso)}
         # PATCH: omit empty body/location so they're left unchanged on the server.
@@ -466,17 +548,22 @@ class GoogleClient:
         if attendees is not None:
             event["attendees"] = [{"email": a} for a in attendees if a]
         return self._patch(
-            f"{CALENDAR}/calendars/primary/events/{event_id}", event, SCOPES_CALENDAR)
+            f"{CALENDAR}/calendars/{self._cal_path(cal)}/events/{raw}",
+            event, SCOPES_CALENDAR)
 
     def delete_event(self, event_id: str) -> None:
-        """Delete an event from the primary calendar (needs calendar.events)."""
+        """Delete an event from its calendar (needs calendar.events)."""
+        cal, raw = self._unwrap_event_id(event_id)
         self._delete(
-            f"{CALENDAR}/calendars/primary/events/{event_id}", SCOPES_CALENDAR)
+            f"{CALENDAR}/calendars/{self._cal_path(cal)}/events/{raw}", SCOPES_CALENDAR)
 
     def get_event(self, event_id: str) -> dict:
         """Full event detail for the reading pane (read-only for Google)."""
-        data = self._get(f"{CALENDAR}/calendars/primary/events/{event_id}", SCOPES_CALENDAR)
+        cal, raw = self._unwrap_event_id(event_id)
+        data = self._get(
+            f"{CALENDAR}/calendars/{self._cal_path(cal)}/events/{raw}", SCOPES_CALENDAR)
         base = self._event_from_json(data)
+        base["id"] = event_id  # keep the wrapped id so edit/delete route correctly
         organizer = data.get("organizer") or {}
         # {name, email, response}; Google response:
         # needsAction|declined|tentative|accepted. email lets the inline editor

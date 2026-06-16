@@ -13,7 +13,7 @@
 %global appid io.github.sha5b.Cloudy
 
 Name:           cloudy
-Version:        0.2.1
+Version:        0.2.2
 Release:        1%{?dist}
 Summary:        Use OneDrive, SharePoint and unified mail on your desktop
 
@@ -115,6 +115,12 @@ meson test -C %{_vpath_builddir} --print-errorlogs
 %{_datadir}/%{name}/
 
 %changelog
+* Mon Jun 16 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.2.2-1
+- Notification attention controls (DND, quiet hours, relevance level, per-chat/
+  channel mute) with batched digest alerts; Google multi-calendar and Drive
+  sources (My Drive / Shared with me / Shared Drives); command palette (Ctrl+K);
+  persistent offline cache; Dashboard Activity feed; headless logic test suite.
+
 * Sun Jun 15 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.2.1-1
 - Teams tab: Teams → channels with a channel Conversation (posts + threaded
   replies) and a Notes tab backed by the team's OneNote notebook (read +

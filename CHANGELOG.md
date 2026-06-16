@@ -11,6 +11,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-06-16
+
 ### Added
 - **Dashboard "Activity" feed** (work/school Microsoft accounts): a new section
   with the latest post from each **starred channel** and your **recent chats**
@@ -19,12 +21,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   headers pins a conversation; pinned channels/chats surface in the Dashboard
   Activity feed. Mail/calendar pins continue to appear under **Pinned**.
 - **Notification attention controls**: honour the system Do Not Disturb state;
-  optional **quiet hours**; a relevance level (*Everything* vs *Direct messages &
-  important only*) that batches group-chat/ordinary-mail to badges; and
-  **per-chat / per-channel mute** (bell toggle in the Chat and Teams headers).
-  Badges always update — only the interruptive banner is gated.
+  optional **quiet hours**; a relevance level (*Everything* / *Direct now,
+  routine in a summary* / *Direct messages & important only*); and **per-chat /
+  per-channel mute** (bell toggle in the Chat and Teams headers). Badges always
+  update — only the interruptive banner is gated.
+- **Batched (digest) notifications**: at the *Direct now, routine in a summary*
+  level, direct messages, important mail and calendar reminders still alert
+  immediately, while group-chat chatter and ordinary mail are collected into one
+  periodic summary banner ("3 new messages in 2 chats · 2 new emails") instead
+  of pinging per message. The digest is held while Do Not Disturb / quiet hours
+  are active and released once focus clears, so nothing is lost.
 - **Message delivery status**: your most-recent chat message shows a single
   Teams-style indicator (clock while sending → check once sent).
+- **Google multi-calendar**: the Calendar agenda + month grid now merge events
+  from **every calendar you show** in Google Calendar (primary, birthdays,
+  holidays, subscribed and secondary), not just your primary one — each event
+  labelled with its calendar. Edits and deletes route back to the owning
+  calendar; read-only ones (holidays/birthdays) decline gracefully.
+- **Google Drive sources**: the Files tab now lists **My Drive**, **Shared with
+  me**, and your **Shared Drives** (Workspace Team Drives, enumerated through
+  rclone) — mirroring the OneDrive + Team-library layout on the Microsoft side.
+- **Command palette (Ctrl+K)**: a keyboard-first jump-to — search every signed-in
+  account's Files/Mail/Calendar/Chat/Teams surface and app actions, ↑/↓ to move,
+  Enter to go, Esc to dismiss.
+- **Offline cache**: mail, agenda and chat lists are persisted to disk, so a
+  fresh launch shows your last-known data immediately (even offline) and then
+  revalidates when the network returns.
 
 ### Changed
 - **Preferences reorganised**: notification settings (relevance, Do Not Disturb,

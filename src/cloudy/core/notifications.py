@@ -16,6 +16,7 @@ from __future__ import annotations
 import threading
 from datetime import datetime, timedelta, timezone
 from gettext import gettext as _
+from gettext import ngettext
 
 from gi.repository import Gio, GLib
 
@@ -26,6 +27,10 @@ _POLL_SECONDS = 120
 _FIRST_POLL_SECONDS = 12
 _REMINDER_WINDOW = timedelta(minutes=15)
 _MAX_MAIL_PER_TICK = 4  # don't flood on a busy inbox
+# Batch routine (tier-2) banners into one summary on this cadence, instead of
+# pinging per message (Iqbal & Bailey 2008 breakpoint deferral). Only active at
+# notify-level 'digest'; the queue is held while DND/quiet hours are on.
+_DIGEST_SECONDS = 600
 
 
 def _short_sender(value: str) -> str:
@@ -67,7 +72,9 @@ class NotificationManager:
         self._unread: dict[str, int] = {}         # account id -> inbox unread count
         self._seen_chat: dict[str, dict] = {}     # account id -> {chat id: last_at}
         self._chat_unread: dict[str, set] = {}    # account id -> {chat id with new msgs}
+        self._digest: dict[str, dict] = {}        # account id -> pending tier-2 summary
         self._timer = None
+        self._digest_timer = None
 
     def unread_count(self, account_id: str) -> int:
         """Last-polled inbox unread count for an account (0 until first poll)."""
@@ -103,6 +110,8 @@ class NotificationManager:
         # every _FIRST_POLL_SECONDS alongside the steady timer (doubling traffic).
         GLib.timeout_add_seconds(_FIRST_POLL_SECONDS, self._prime_once)
         self._timer = GLib.timeout_add_seconds(_POLL_SECONDS, self._tick)
+        self._digest_timer = GLib.timeout_add_seconds(
+            _DIGEST_SECONDS, self._flush_digest)
 
     def _prime_once(self) -> bool:
         self._tick()
@@ -176,12 +185,75 @@ class NotificationManager:
 
     def _allowed(self, tier: int) -> bool:
         """Whether a banner of the given relevance tier (1 = direct/important,
-        2 = ambient) should interrupt right now."""
+        2 = ambient) should interrupt *immediately* right now. At any level other
+        than 'all', tier-2 is held back — to a digest ('digest') or to the badge
+        only ('priority'); see ``_digest_active`` and ``_on_chat``/``_on_mail``."""
         if not self._enabled() or self._focus_active():
             return False
-        if tier > 1 and self._str("notify-level", "all") == "priority":
+        if tier > 1 and self._str("notify-level", "all") != "all":
             return False
         return True
+
+    def _digest_active(self) -> bool:
+        """Whether routine (tier-2) alerts are batched into a periodic summary."""
+        return self._enabled() and self._str("notify-level", "all") == "digest"
+
+    # -- digest (batched tier-2 banners) ----------------------------------
+    def _digest_bucket(self, account) -> dict:
+        bucket = self._digest.get(account.id)
+        if bucket is None:
+            bucket = {"name": account.display_name, "chats": {}, "msgs": 0, "mail": 0}
+            self._digest[account.id] = bucket
+        return bucket
+
+    def _enqueue_chat(self, account, chat) -> None:
+        bucket = self._digest_bucket(account)
+        bucket["chats"][chat["id"]] = chat.get("name", "") or _("Chat")
+        bucket["msgs"] += 1
+
+    def _enqueue_mail(self, account) -> None:
+        self._digest_bucket(account)["mail"] += 1
+
+    def _flush_digest(self) -> bool:
+        if not self._digest:
+            return True
+        if not self._enabled():
+            self._digest.clear()
+            return True
+        # Hold the queue while DND / quiet hours are on; release once focus clears
+        # so a batched summary still surfaces (nothing is silently dropped).
+        if self._focus_active():
+            return True
+        for account_id, bucket in list(self._digest.items()):
+            note = self._build_digest(account_id, bucket)
+            if note is not None:
+                self._app.send_notification(f"digest-{account_id}", note)
+            self._digest.pop(account_id, None)
+        return True
+
+    def _build_digest(self, account_id: str, bucket: dict):
+        parts = []
+        if bucket["msgs"]:
+            chats = len(bucket["chats"])
+            msgs = bucket["msgs"]
+            parts.append(_("%(msgs)s in %(chats)s") % {
+                "msgs": ngettext("%d new message", "%d new messages", msgs) % msgs,
+                "chats": ngettext("%d chat", "%d chats", chats) % chats,
+            })
+        if bucket["mail"]:
+            mail = bucket["mail"]
+            parts.append(ngettext("%d new email", "%d new emails", mail) % mail)
+        if not parts:
+            return None
+        note = Gio.Notification.new(_("New activity · %s") % bucket["name"])
+        note.set_body(" · ".join(parts))
+        note.set_icon(self._type_icon("preferences-system-notifications-symbolic"))
+        note.set_priority(Gio.NotificationPriority.LOW)
+        # An empty id routes to the relevant tab (no single message to deep-link).
+        payload = GLib.Variant("s", f"{account_id}\x1f")
+        action = "app.notify-open-chat" if bucket["chats"] else "app.notify-open-mail"
+        note.set_default_action(Gio.Action.print_detailed_name(action, payload))
+        return note
 
     @staticmethod
     def _muted_ids(account, kind: str) -> set:
@@ -243,11 +315,16 @@ class NotificationManager:
         fresh = [m for m in messages
                  if m.get("id") not in seen and not m.get("is_read", True)]
         seen.update(ids)
-        for msg in fresh[:_MAX_MAIL_PER_TICK]:
+        immediate = []
+        for msg in fresh:
             # Important mail interrupts (tier 1); ordinary mail is ambient (tier 2).
             tier = 1 if msg.get("important") else 2
             if self._allowed(tier):
-                self._notify_mail(account, msg, tier)
+                immediate.append((msg, tier))
+            elif tier > 1 and self._digest_active():
+                self._enqueue_mail(account)  # count all routine mail for the digest
+        for msg, tier in immediate[:_MAX_MAIL_PER_TICK]:  # but cap live banners
+            self._notify_mail(account, msg, tier)
         return False
 
     def _type_icon(self, symbolic_name: str) -> Gio.Icon:
@@ -364,6 +441,8 @@ class NotificationManager:
             tier = 1 if c.get("kind") == "oneOnOne" else 2
             if self._allowed(tier):
                 to_notify.append((c, tier))
+            elif tier > 1 and self._digest_active():
+                self._enqueue_chat(account, c)
         if badge_changed:
             self._push_chat_badge(account.id)
         for chat, tier in to_notify[:_MAX_MAIL_PER_TICK]:

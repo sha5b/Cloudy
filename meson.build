@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Shahab Nedaei
 
 project('cloudy', 'c',
-          version: '0.2.1',
+          version: '0.2.2',
     meson_version: '>= 1.0.0',
   default_options: [ 'warning_level=2', 'werror=false', ],
 )
@@ -26,6 +26,7 @@ python = import('python').find_installation('python3')
 subdir('data')
 subdir('src')
 subdir('po')
+subdir('tests')
 
 gnome.post_install(
      glib_compile_schemas: true,

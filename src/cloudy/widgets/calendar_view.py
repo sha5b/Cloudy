@@ -217,8 +217,11 @@ class CalendarView(Adw.Bin):
                           ellipsize=Pango.EllipsizeMode.END)
         title.add_css_class("body")
         text.append(title)
-        if ev.get("location"):
-            sub = Gtk.Label(label=ev["location"], xalign=0,
+        # Location, else the owning calendar's name (Google merges several
+        # calendars into one agenda — show which one each event came from).
+        subtitle = ev.get("location") or ev.get("calendar")
+        if subtitle:
+            sub = Gtk.Label(label=subtitle, xalign=0,
                             ellipsize=Pango.EllipsizeMode.END)
             sub.add_css_class("caption")
             sub.add_css_class("dim-label")

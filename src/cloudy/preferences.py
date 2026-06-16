@@ -153,9 +153,10 @@ class CloudyPreferences(Adw.PreferencesDialog):
         # chatter and ordinary mail then update badges silently).
         level = Adw.ComboRow(title=_("Notify me about"))
         level.set_subtitle(_("Limit interruptions to what matters."))
-        self._notify_level_values = ["all", "priority"]
+        self._notify_level_values = ["all", "digest", "priority"]
         lvl_model = Gtk.StringList()
         lvl_model.append(_("Everything"))
+        lvl_model.append(_("Direct now, routine in a summary"))
         lvl_model.append(_("Direct messages & important only"))
         level.set_model(lvl_model)
         level.set_selected(self._index_of("notify-level", self._notify_level_values))

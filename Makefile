@@ -31,7 +31,7 @@ FLATPAK_BUNDLE := $(RELEASE_DIR)/$(APP_ID).flatpak
 LOAD_ENV    := set -a; [ -f .env ] && . ./.env; set +a;
 
 .PHONY: all bootstrap setup build install run clean distclean \
-        flatpak flatpak-run flatpak-test lint test install-nautilus \
+        flatpak flatpak-run flatpak-test lint test test-unit install-nautilus \
         uninstall-nautilus rpm srpm dist-tarball release flatpak-bundle
 
 all: build
@@ -62,9 +62,13 @@ install: build
 run: install
 	GSETTINGS_SCHEMA_DIR="$(SCHEMA_DIR)" $(PREFIX)/bin/cloudy
 
-## Run the Meson test suite (schema/desktop/metainfo validation)
+## Run the Meson test suite (schema/desktop/metainfo validation + logic units)
 test: build
 	meson test -C $(BUILDDIR) --print-errorlogs
+
+## Run only the headless logic unit tests (fast; no build needed)
+test-unit:
+	PYTHONPATH=src:tests/unit python3 -m unittest discover -s tests/unit -p 'test_*.py'
 
 ## --- RPM ----------------------------------------------------------------
 ## Reproducible source tarball (excludes secrets, build cruft, VCS).

@@ -84,11 +84,47 @@ class FilesView(Adw.Bin):
 
     def _load_libraries(self) -> None:
         if self._account.provider == "google":
-            my = Drive(id="", name="My Drive", kind="google_mydrive", web_url="")
-            self._libraries = [{"drive": my, "icon": "folder-symbolic",
-                                "subtitle": _("Google Drive")}]
-            self._render_list()
+            self._load_google_libraries()
             return
+
+    def _load_google_libraries(self) -> None:
+        """Google Drive sources, mirroring Microsoft's OneDrive + Team libraries:
+        **My Drive** and **Shared with me** are always shown; **Shared Drives**
+        (Workspace Team Drives) are enumerated through rclone in the background
+        and appended once available (needs a stored rclone token first)."""
+        my = Drive(id="", name="My Drive", kind="google_mydrive", web_url="")
+        shared = Drive(id="", name=_("Shared with me"),
+                       kind="google_shared_with_me", web_url="")
+        self._libraries = [
+            {"drive": my, "icon": "folder-symbolic", "subtitle": _("Google Drive")},
+            {"drive": shared, "icon": "folder-publicshare-symbolic",
+             "subtitle": _("Files others have shared with you")},
+        ]
+        self._render_list()
+
+        # Shared (Team) Drives need a Workspace account and an existing rclone
+        # token; enumerate off-thread and append, degrading silently otherwise.
+        token = self._window.get_application().secrets.lookup(
+            self._account.id, "rclone-gdrive")
+        if not token:
+            return
+
+        def work():
+            return self._mounts.list_google_shared_drives(token)
+
+        run_async(work, self._on_google_shared_drives)
+
+    def _on_google_shared_drives(self, drives, error) -> bool:
+        if error or not drives:
+            return False
+        for d in drives:
+            drive = Drive(id=d["id"], name=d["name"],
+                          kind="google_shared_drive", web_url="")
+            self._libraries.append({
+                "drive": drive, "icon": "system-users-symbolic",
+                "subtitle": _("Shared drive")})
+        self._render_list()
+        return False
 
         # Stale-while-revalidate: show cached libraries instantly (drive/team
         # enumeration is an N+1 round-trip, so without this it's slow every
@@ -228,6 +264,12 @@ class FilesView(Adw.Bin):
             remote = self._mounts._safe_name(drive.name)
             if google:
                 opts = {"token": tok, "scope": "drive"}
+                # "Shared with me" and Shared Drives are the same backend with a
+                # different view selector (rclone drive config keys).
+                if drive.kind == "google_shared_with_me":
+                    opts["shared_with_me"] = "true"
+                elif drive.kind == "google_shared_drive" and drive.id:
+                    opts["team_drive"] = drive.id
             else:
                 opts = {
                     "token": tok,

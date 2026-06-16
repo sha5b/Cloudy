@@ -92,9 +92,11 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
       <default>'all'</default>
       <summary>Which notifications interrupt with a banner</summary>
       <description>
-        'all' notifies for everything; 'priority' only for direct (1:1) chats,
-        important mail, and calendar reminders — group-chat chatter and ordinary
-        mail update the badges silently.
+        'all' notifies for everything immediately; 'digest' notifies for direct
+        (1:1) chats, important mail and calendar reminders immediately but batches
+        group-chat chatter and ordinary mail into a periodic summary; 'priority'
+        notifies only for the direct/important ones — group-chat chatter and
+        ordinary mail update the badges silently.
       </description>
     </key>
 

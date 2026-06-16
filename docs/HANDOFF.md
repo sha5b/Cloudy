@@ -12,7 +12,149 @@ Calendar)** and **Google (Gmail, Calendar, Drive)** on Fedora 44 (GNOME 50). It
 for mail/calendar) rather than reimplementing them. Read `docs/ARCHITECTURE.md`,
 `docs/AUTH.md`, `docs/SECRETS.md`, `docs/ROADMAP.md` for depth.
 
-## ⏭ Continue here — Attention/notifications (P1) + chat status polish (2026-06-15, latest)
+## ⏭ Continue here — Command palette + offline cache (2026-06-16, latest)
+
+**Where we stopped.** Added a keyboard-first command palette and a persistent
+offline cache, then wrapped up the session. All green (`make build` + 4 meson
+tests + `make lint`) and verified headlessly (cache persist/stale-reload/skip
+round-trip; palette + cache imports). **Not yet eyeballed — `make flatpak-run`**
+and press **Ctrl+K**; relaunch offline to confirm mail/agenda still render.
+
+### Command palette (`widgets/command_palette.py`, `application.py`)
+- `Adw.Dialog` opened by the `command-palette` app action (accel **Ctrl+K**).
+  Lists every signed-in + enabled account's visible capability surfaces
+  (Files/Mail/Calendar/Chat/Teams, with the `is_personal` Chat/Teams filter) plus
+  app actions (Preferences, Add account). Type to filter (all-words match), ↑/↓
+  (and Tab) move, Enter activates the selection, Esc dismisses. Routes through the
+  existing `window.open_account_tab` / `app.activate_action`.
+- Imports `CAPABILITY_UI` from `window` *inside* `_build_entries` (not at module
+  top) so the module stays importable in headless smoke tests (window needs the
+  compiled gresource).
+
+### Persistent offline cache (`core/cache.py`, `application.py`)
+- `MemoryCache(ttl, path=…)` now persists JSON-serializable entries to
+  `~/.cache/cloudy/cache.json` (atomic write, throttled to ~5s, plus a
+  `flush()` in `do_shutdown`). Non-serializable values (e.g. Files libraries
+  holding `Drive` objects) are skipped — kept in memory only.
+- Entries loaded from disk are **backdated past the TTL** so they read as *stale*:
+  views show last-known mail/agenda/chat instantly (offline), then revalidate via
+  the normal stale-while-revalidate path. No view changes needed.
+
+### Headless logic test suite (`tests/unit/`, wired into `make test`)
+- 69 `unittest` tests over the pure/logic layer — **no GUI, no network**: cache
+  (TTL/invalidate/persist/stale-reload/skip-non-serializable), Account
+  dict-roundtrip + personal/business, pin/mute/scope helpers, GoogleClient
+  normalization + multi-calendar aggregation/id-routing, Graph `_split_id`/
+  `_message_scope`/event-normalization, notifier gating + quiet-hours wrap +
+  digest enqueue/flush/build, mount `_safe_name`/`drive_type_for`/shared-drive
+  degradation, `capabilities_of`, `esc`.
+- Run via `make test` (meson test 4/5, ~0.3s) or `make test-unit` (fast, no build).
+  GUI widgets aren't covered — they need the gresource/display; this is the
+  business logic. `tests/unit/gi_setup.py` pins GI versions, `fakes.py` provides
+  FakeApp/FakeSettings/FakeRegistry/FakeWindow.
+
+### Deferred by judgment (too big for a wrap-up — clearly scoped follow-ups)
+- **Conversation threading** in Mail: the list is a flat `ListBox` entangled with
+  pagination, optimistic send-reconcile, unread filter, multi-select and search;
+  grouping by Graph `conversationId` / Gmail `threadId` is a few-hundred-line
+  rewrite + client shape changes. Do as its own focused pass.
+- **Send outbox** (queue/retry sends offline): pairs with the offline cache but is
+  a separate, non-trivial surface.
+- **Google Calendar RSVP** (`can_respond` still False), free/busy `getSchedule`,
+  week/day calendar views, unified cross-account inbox/agenda, Tasks. See the
+  ROADMAP "still to do" + the earlier P2 notes below.
+
+## ⏭ Earlier — Google feature parity: multi-calendar + Drive sources (2026-06-16)
+
+**Where we stopped.** Closed the implementable Google-vs-Microsoft gaps. All green
+(`make build` + 4 meson tests + `make lint`) and verified headlessly (calendar
+aggregation/id-routing with a faked HTTP layer, view/module imports, shared-drive
+enumeration degrades to `[]` without a token). **Not yet eyeballed — ask the user
+to `make flatpak-run`** with a personal Google account: the agenda should now show
+birthdays/holidays/secondary calendars, and Files should list *My Drive* +
+*Shared with me*.
+
+### What was investigated first (don't redo)
+A `deep-research`-style check confirmed two gaps are **not implementable** and were
+deliberately skipped:
+- **Google Chat for personal accounts** — the Chat *product* exists for consumer
+  Gmail, but the Chat *REST API* requires a Business/Enterprise Workspace account
+  (docs: "A Business or Enterprise Google Workspace account with access to Google
+  Chat"). So hiding the Chat tab for personal Google accounts
+  (`window.py` `is_personal` filter) is correct. Nothing to build.
+- **Delegated/shared Gmail mailboxes** — Gmail has no end-user delegated-mailbox
+  REST access (needs domain-wide delegation via a service account + admin),
+  impossible for a desktop OAuth app. Skipped.
+- **Google Tasks** — deferred: it's net-*new* (Microsoft To Do isn't in the app
+  either), not parity. A candidate for a future shared Tasks capability.
+
+### Google multi-calendar (`modules/gmail/google_client.py`, `widgets/calendar_view.py`)
+- `list_events` now **aggregates every shown calendar** (calendarList where
+  `selected` or `primary`) in parallel (`ThreadPoolExecutor`, ≤8), not just
+  `primary` — matching what the user sees in Google Calendar. One bad calendar
+  returns `[]` and never sinks the agenda.
+- **Id routing** mirrors Graph's `group:`/`shared:` trick: non-primary event ids
+  are wrapped `gcal\x1f<calendarId>\x1f<eventId>` (`_wrap_event_id` /
+  `_unwrap_event_id`); `get_event`/`update_event`/`delete_event` parse it and hit
+  `/calendars/<calId>/events/<id>` (calId URL-encoded via `_cal_path`). Read-only
+  calendars (holidays/birthdays) return a Google 403 → surfaced as a toast.
+- Each event carries `calendar` (name) + `color`; the agenda row shows the
+  calendar name as its subtitle when there's no location. Create still targets
+  `primary` (the New-event "me" context). RSVP still off for Google
+  (`can_respond=False`) — a separate follow-up.
+
+### Google Drive sources (`widgets/files_view.py`, `modules/microsoft365/mounts.py`)
+- Files now lists **My Drive** + **Shared with me** (always) and **Shared Drives**
+  (Workspace Team Drives) for Google, like OneDrive + Team libraries on the MS
+  side. `_load_google_libraries` renders the first two instantly, then enumerates
+  Shared Drives off-thread.
+- The app holds **no Google Drive OAuth scope** (Drive is mounted entirely via
+  rclone's own auth), so Shared Drives are enumerated through rclone:
+  `MountManager.list_google_shared_drives(token)` spins up a throwaway `drive`
+  remote, runs `rclone backend drives`, parses JSON, drops the remote — best-effort,
+  `[]` on any failure or missing token. So Shared Drives only appear **after** the
+  user has mounted something once (an rclone token then exists).
+- Mount opts branch on `drive.kind`: `google_shared_with_me` adds
+  `shared_with_me=true`; `google_shared_drive` adds `team_drive=<id>`.
+- **UNTESTED on a real Workspace account** (the user only has personal Google).
+  Shared-with-me is testable on personal; Shared Drives + the rclone `backend
+  drives` JSON shape need a Workspace account to confirm.
+
+## ⏭ Earlier — P2 #1 notification batching/digest (2026-06-16)
+
+**Where we stopped.** Implemented the first P2 item: batched (digest) notifications.
+Also (earlier this session) split notification settings onto their own
+**Notifications** Preferences tab and refined several setting subtitles. All green
+(`make build` + `make install` + 4 meson tests + `make lint`) and verified
+headlessly (digest enqueue/flush/focus-hold + plural wording, 3-tab Preferences
+against the installed schema). **Not yet eyeballed in the GUI — ask the user to
+`make flatpak-run`** and try the *Direct now, routine in a summary* level.
+
+### Digest batching (`core/notifications.py`, `preferences.py`, schema, `application.py`)
+- **New `notify-level` value `digest`** (now `all` | `digest` | `priority`).
+  `all` = everything immediate; `digest` = tier-1 immediate + tier-2 batched;
+  `priority` = tier-1 only, tier-2 silent-to-badge. `_allowed(tier)` now holds
+  tier-2 at *any* level other than `all`; `_digest_active()` is true only at
+  `digest`.
+- **Per-account pending buffer** `self._digest` (account id → `{name, chats:{id:name},
+  msgs, mail}`). `_on_chat`/`_on_mail` enqueue tier-2 items (`_enqueue_chat`/
+  `_enqueue_mail`) instead of firing. Mail counts **all** routine mail for the
+  digest but still caps live tier-1 banners at `_MAX_MAIL_PER_TICK`.
+- **`_flush_digest` on a `_DIGEST_SECONDS` (600s) timer.** Builds one LOW-priority
+  summary per account ("3 new messages in 2 chats · 2 new emails", `ngettext`
+  plurals) and clears the buffer. **Holds the queue while `_focus_active()`** (DND
+  / quiet hours) and releases once focus clears — nothing dropped.
+- **Digest routing.** Summary banners carry an empty id (`"{account_id}\x1f"`);
+  `application.py` `_on_notify_open_chat`/`_on_notify_open_mail` now fall back to
+  `open_account_tab(account, "chat"|"mail")` when the id is empty.
+
+### Preferences split (`preferences.py`)
+- Notification settings moved from the General page to a new **Notifications** tab
+  (`_notifications_page`): an **Alerts** group (enable / relevance / respect-DND)
+  and a dedicated **Quiet hours** group. General keeps a slimmed **Background**
+  group (run-in-background + EDS calendar). Several subtitles clarified.
+
+## ⏭ Earlier — Attention/notifications (P1) + chat status polish (2026-06-15)
 
 **Where we stopped.** Finished a research-driven notifications pass ("P1") and a
 round of chat-bubble polish. Everything below is built into `_install`, all
@@ -67,9 +209,8 @@ add more signals. P1 below implements the delivery-gating half.
 - **Reactions are pills below the bubble** (a vertical `col` wraps bubble +
   reactions), with horizontal insets so indicators aren't jammed to the edge.
 
-### What's next (P2 from the same backlog — not started)
-1. **Notification batching/digest**: defer tier-2 to a periodic "N new in M
-   chats" digest (Iqbal & Bailey breakpoint deferral) instead of immediate.
+### What's next (P2 from the same backlog)
+1. ✅ **Notification batching/digest** — done 2026-06-16 (see the top section).
 2. **Meeting auto-focus**: derive an in-meeting state from the user's own
    calendar and auto-enable focus (suppress tier-2) — coarse only, never expose
    meeting titles (Fogarty calendar-busy). Detection misfires silently swallow
