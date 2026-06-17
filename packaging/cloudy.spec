@@ -121,6 +121,10 @@ meson test -C %{_vpath_builddir} --print-errorlogs
 - Large chat/OneNote images are downscaled while decoding so they can't crash the
   renderer. Replies no longer show as a bare "attachment".
 - New General setting to toggle the Nautilus file-manager integration.
+- Chat composer: attach multiple images at once; sending more than one image no
+  longer fails with a Graph "invalid payload" error (images are downscaled and
+  normalised before upload). A failed send stays put with a Retry button, and the
+  open conversation bumps to the top of the list on send/receive.
 - Bug-fix sweep across Mail/Calendar/Files/Dashboard (escaping, KeyErrors, a
   popover leak) and dead-code/cleanup pass.
 

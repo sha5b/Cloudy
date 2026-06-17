@@ -98,6 +98,9 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
           <li>The chat list updates live: a new message moves its conversation to the top and marks it unread, no manual refresh</li>
           <li>Replies show a clickable quote of the message they answer (and jump to it) instead of a bare "attachment"</li>
           <li>Flat chat avatars; sent messages appear and scroll to the bottom instantly, including images</li>
+          <li>Attach several images to a chat message at once, and send multiple images without the "invalid payload" error</li>
+          <li>A chat message that fails to send now stays in place with a Retry button to resend it</li>
+          <li>The conversation you're in jumps to the top of the list the moment you send or receive a message</li>
           <li>Large chat and OneNote images are downscaled while decoding, so a huge picture can't crash the renderer</li>
           <li>New General setting to turn the Nautilus file-manager integration on or off</li>
           <li>Fixes across Mail, Calendar, Files and the Dashboard (text escaping, a couple of crashes, a popover leak)</li>

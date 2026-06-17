@@ -1149,8 +1149,37 @@ class ChatView(Adw.Bin):
         self._thread_sig = new_sig
         # Show the single delivery indicator on my most-recent message only.
         self._apply_status(messages)
+        # Float this chat to the top of the list (and refresh its preview/time)
+        # whenever its newest message advances — sent or received — so the nav
+        # order tracks real activity instead of going stale until a full reload.
+        last = messages[-1] if messages else None
+        if last is not None:
+            prev = (last.get("text", "") or "").strip()
+            if not prev and last.get("attachments"):
+                prev = _("(image)")
+            self._bump_chat(last.get("sent", ""), prev, last.get("is_mine"),
+                            chat_id=chat_id)
         if self._autoscroll:
             self._scroll_to_bottom()
+
+    def _bump_chat(self, last_at, preview, from_me, *, chat_id) -> None:
+        """Move ``chat_id`` to the top of the conversation list and refresh its
+        preview/timestamp — but only when ``last_at`` actually advances, so a
+        plain chat-open (whose newest message we already have) doesn't needlessly
+        rebuild the list."""
+        if not last_at:
+            return
+        chat = next((c for c in self._all_chats if c["id"] == chat_id), None)
+        if chat is None or last_at <= (chat.get("last_at") or ""):
+            return
+        chat["last_at"] = last_at
+        if preview is not None:
+            chat["preview"] = preview.replace("\n", " ").strip()
+        chat["from_me"] = bool(from_me)
+        self._all_chats.sort(key=lambda c: c.get("last_at", ""), reverse=True)
+        self._cache().set(f"{self._account.id}:chats", self._all_chats)
+        if not self._search_mode:
+            self._render_filtered()  # re-selects the open chat, now at the top
 
     def _full_render(self, messages) -> None:
         """Tear down and rebuild every bubble from scratch (used on first open
@@ -1772,6 +1801,40 @@ class ChatView(Adw.Bin):
             raise ValueError("undecodable image")
         return Gdk.Texture.new_for_pixbuf(pix)
 
+    @staticmethod
+    def _image_for_send(data: bytes, max_edge: int = 1280) -> tuple:
+        """Re-encode an outgoing image to a bounded-size PNG for Graph
+        hostedContents. Graph rejects oversized or exotic-format inline images
+        with a 'Provided payload is invalid' 400 (hit when sending more than one
+        full-resolution screenshot at once), so normalise every image to a
+        downscaled PNG — a format Graph always accepts, small enough to keep the
+        whole message under the per-message size limit. Falls back to the
+        original bytes if re-encoding fails for any reason."""
+        from gi.repository import GdkPixbuf
+
+        try:
+            loader = GdkPixbuf.PixbufLoader()
+
+            def _on_size(ldr, w, h):
+                if w <= 0 or h <= 0:
+                    return
+                scale = min(1.0, max_edge / w, max_edge / h)
+                if scale < 1.0:
+                    ldr.set_size(max(1, int(w * scale)), max(1, int(h * scale)))
+
+            loader.connect("size-prepared", _on_size)
+            loader.write(data)
+            loader.close()
+            pix = loader.get_pixbuf()
+            if pix is None:
+                return data, "image/png"
+            ok, buf = pix.save_to_bufferv("png", [], [])
+            if not ok:
+                return data, "image/png"
+            return bytes(buf), "image/png"
+        except Exception:  # noqa: BLE001 - never let a re-encode block a send
+            return data, "image/png"
+
     def _image_widget(self, att) -> Gtk.Widget:
         """A small thumbnail that lazily downloads the (auth-gated) image.
 
@@ -1969,27 +2032,31 @@ class ChatView(Adw.Bin):
         folder = local_initial_folder()
         if folder is not None:
             dialog.set_initial_folder(folder)
-        dialog.open(self._window, None, self._on_attach_chosen)
+        dialog.open_multiple(self._window, None, self._on_attach_chosen)
 
     def _on_attach_chosen(self, dialog, result) -> None:
         try:
-            gfile = dialog.open_finish(result)
+            files = dialog.open_multiple_finish(result)
         except GLib.Error:
             return  # cancelled
-        if gfile is None:
+        if files is None:
             return
-        try:
-            ok, data, _etag = gfile.load_contents(None)
-            if not ok:
-                return
-            ctype = "image/png"
-            info = gfile.query_info("standard::content-type", 0, None)
-            if info and info.get_content_type():
-                ctype = info.get_content_type()
-        except GLib.Error as exc:
-            self._window.add_toast(_("Couldn't read file: %s") % exc.message)
-            return
-        self._stage_bytes(bytes(data), ctype)
+        for i in range(files.get_n_items()):
+            gfile = files.get_item(i)
+            if gfile is None:
+                continue
+            try:
+                ok, data, _etag = gfile.load_contents(None)
+                if not ok:
+                    continue
+                ctype = "image/png"
+                info = gfile.query_info("standard::content-type", 0, None)
+                if info and info.get_content_type():
+                    ctype = info.get_content_type()
+            except GLib.Error as exc:
+                self._window.add_toast(_("Couldn't read file: %s") % exc.message)
+                continue
+            self._stage_bytes(bytes(data), ctype)
 
     def _stage_image(self, texture) -> None:
         self._stage_bytes(texture.save_to_png_bytes().get_data(), "image/png")
@@ -2248,6 +2315,22 @@ class ChatView(Adw.Bin):
         self._clear_pending()
         self._mentions = []
         self._set_reply(None)
+        # Optimistic echo for every send (plain or rich): the message bubble —
+        # with any attached images rendered straight from memory — appears and
+        # the thread scrolls to the bottom immediately, instead of waiting for
+        # the server round-trip + reconcile poll.
+        self._render_pending(chat_id, text, images)
+        bubble = self._optimistic["widget"] if self._optimistic else None
+        self._send_message(chat_id, text, images, mentions, bubble)
+
+    def _send_message(self, chat_id, text, images, mentions, bubble=None) -> None:
+        """Fire a chat send and reconcile its optimistic ``bubble``. Reused by
+        the composer and by the Retry button on a failed bubble — on error the
+        bubble is flagged un-sent (with Retry) instead of the thread reloading,
+        so the typed message + images are never lost."""
+        if bubble is not None:
+            self._mark_sending(bubble)
+            self._optimistic = {"widget": bubble, "text": text}
         # Rich (HTML) send when there are images, @mentions, or markdown
         # formatting (**bold** / _italic_); otherwise a cheap plain-text send.
         rich = bool(images or mentions or self._has_markdown(text))
@@ -2257,17 +2340,16 @@ class ChatView(Adw.Bin):
 
             client = build_account_client(self._window.get_application(), self._account)
             if rich:
+                # Normalise each image (downscaled PNG) so Graph accepts the
+                # payload — multiple full-res images otherwise 400.
+                send_images = [self._image_for_send(d) for d, _c in images]
                 content, mention_array = self._compose_html(text, mentions)
                 return client.send_chat_html(
-                    chat_id, f"<div>{content}</div>", mention_array, images)
+                    chat_id, f"<div>{content}</div>", mention_array, send_images)
             return client.send_chat_message(chat_id, text)
 
-        # Optimistic echo for every send (plain or rich): the message bubble —
-        # with any attached images rendered straight from memory — appears and
-        # the thread scrolls to the bottom immediately, instead of waiting for
-        # the server round-trip + reconcile poll.
-        self._render_pending(chat_id, text, images)
-        run_async(work, lambda _r, error: self._on_message_sent(chat_id, error))
+        run_async(work, lambda _r, error: self._on_message_sent(
+            chat_id, error, text, images, mentions, bubble))
 
     _MD_BOLD = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
     _MD_ITALIC = re.compile(r"_(.+?)_", re.DOTALL)
@@ -2307,9 +2389,15 @@ class ChatView(Adw.Bin):
         # Stamp "now" so the optimistic bubble shows its time straight away — the
         # authoritative reload then replaces it with the same time, so nothing
         # visibly "pops in" later.
-        from datetime import datetime
+        from datetime import datetime, timezone
 
         now_iso = datetime.now().astimezone().isoformat()
+        # Float this chat to the top of the list immediately (don't wait for the
+        # reconcile poll). Use a UTC stamp so it sorts correctly against Graph's
+        # Z-suffixed createdDateTime values.
+        prev = (text or "").strip() or (_("(image)") if images else "")
+        self._bump_chat(datetime.now(timezone.utc).isoformat(), prev, True,
+                        chat_id=chat_id)
         # Echo any attached images straight from memory (no fetch round-trip).
         attachments = [{"content_type": ctype or "image/png", "data": data,
                         "name": "image"} for data, ctype in (images or [])]
@@ -2338,7 +2426,8 @@ class ChatView(Adw.Bin):
             self._load_messages(chat_id)  # pull the authoritative thread
         return False
 
-    def _on_message_sent(self, chat_id, error) -> bool:
+    def _on_message_sent(self, chat_id, error, text=None, images=None,
+                         mentions=None, bubble=None) -> bool:
         """After sending a NEW message: don't reload immediately — the server
         often hasn't indexed it yet, so a reload would drop the optimistic bubble
         and jump the view up. The optimistic echo already shows it; reconcile a
@@ -2346,9 +2435,15 @@ class ChatView(Adw.Bin):
         poll path."""
         if error:
             self._window.add_toast(_("Couldn't send: %s") % error)
-            self._cache().invalidate(prefix=self._msg_key(chat_id))
-            if chat_id == self._chat_id:
-                self._load_messages(chat_id)  # drop the failed optimistic echo
+            # Keep the bubble in place and offer Retry rather than reloading the
+            # thread (which would discard the typed message + attached images).
+            if bubble is not None:
+                self._mark_failed(bubble, lambda: self._send_message(
+                    chat_id, text, images, mentions, bubble))
+            else:
+                self._cache().invalidate(prefix=self._msg_key(chat_id))
+                if chat_id == self._chat_id:
+                    self._load_messages(chat_id)
             return False
 
         def reconcile() -> bool:
@@ -2357,6 +2452,43 @@ class ChatView(Adw.Bin):
 
         GLib.timeout_add(1500, reconcile)
         return False
+
+    def _mark_sending(self, outer) -> None:
+        """Reset a bubble to the 'sending' state, clearing any prior failed
+        badge + Retry button (used when a Retry re-fires the send)."""
+        btn = getattr(outer, "_retry_btn", None)
+        if btn is not None:
+            foot = btn.get_parent()
+            if foot is not None:
+                foot.remove(btn)
+            outer._retry_btn = None  # type: ignore[attr-defined]
+        icon = getattr(outer, "_status_icon", None)
+        if icon is not None:
+            icon.remove_css_class("error")
+            icon.set_visible(True)
+        self._set_status(outer, "sending")
+
+    def _mark_failed(self, outer, resend_cb) -> None:
+        """Flag a bubble as un-sent: a red badge + a Retry button that re-fires
+        the same send. The bubble stays put (we don't reload on failure)."""
+        # Drop the optimistic pointer so a later background poll's _apply_status
+        # won't hide this bubble's failed badge.
+        self._optimistic = None
+        icon = getattr(outer, "_status_icon", None)
+        if icon is None:
+            return
+        icon.set_from_icon_name("dialog-error-symbolic")
+        icon.set_tooltip_text(_("Not sent"))
+        icon.add_css_class("error")
+        icon.set_visible(True)
+        foot = icon.get_parent()
+        if foot is not None and getattr(outer, "_retry_btn", None) is None:
+            btn = Gtk.Button(label=_("Retry"))
+            btn.add_css_class("flat")
+            btn.add_css_class("caption")
+            btn.connect("clicked", lambda _b: resend_cb())
+            foot.append(btn)
+            outer._retry_btn = btn  # type: ignore[attr-defined]
 
     # -- per-message actions popover --------------------------------------
     def _show_actions(self, msg, anchor, x, y) -> None:
