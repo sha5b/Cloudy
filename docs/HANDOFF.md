@@ -12,7 +12,49 @@ Calendar)** and **Google (Gmail, Calendar, Drive)** on Fedora 44 (GNOME 50). It
 for mail/calendar) rather than reimplementing them. Read `docs/ARCHITECTURE.md`,
 `docs/AUTH.md`, `docs/SECRETS.md`, `docs/ROADMAP.md` for depth.
 
-## ⏭ Continue here — Chat/Teams/OneNote rework (2026-06-17, latest)
+## ⏭ Continue here — 0.2.3 released + avatar/presence fixes (2026-06-17, latest)
+
+**Where we stopped.** Shipped **v0.2.3** to GitHub (Actions `release.yml` ran on
+the `v0.2.3` tag → built RPM + Flatpak with secrets, attached both; release notes
+are the 0.2.3 CHANGELOG section). The user's local Flatpak was reinstalled from
+the bundle, so the running app == the release. Commit `fab15e5`, pushed to
+`main`. **Done and verified** (build + headless smoke + the user eyeballed flat
+colours and working presence dots).
+
+### What was actually wrong (and fixed) in the chat avatars/presence
+- **Flat avatars never applied** — the killer detail: `Adw.Avatar`'s coloured
+  background lives on an **internal child gizmo** whose CSS node is `avatar` (and
+  carries `.color1–.color14`), *not* on the `Adw.Avatar` widget we hold (node
+  `widget`). So the old `avatar.cloudy-avatar-flat` selector matched nothing. Fix:
+  reach the inner node as a descendant — `.cloudy-avatar-flat.cloudy-avatar-flat
+  avatar { … }`. Confirm with a widget-tree walk: `Avatar(widget) → AdwGizmo
+  (avatar, .colorN) → Label/Image`.
+- **Flat per-person colours** — the user then wanted distinct *flat* colours (not
+  the uniform grey, not Adwaita's gloss). `_avatar` adds `cloudy-avatar-c{0..7}`
+  by a stable byte-sum hash of the contact name (`_avatar_color_index`); palette
+  is `.cloudy-avatar-cN avatar` in `style.css` (solid fills, white initials).
+- **Presence dot appeared then vanished** — two presence fetches (`_refresh_
+  presence` list batch + `_on_members` per-chat fetch ~1s after open); the second
+  often returned `PresenceUnknown`/`""` and `_on_presence` did a blind
+  `dict.update`, erasing a freshly-resolved status. Fix: merge **without
+  downgrading** a known availability to blank/unknown. The dot is now **CSS-drawn**
+  (a sized `Gtk.Box` with `.cloudy-presence`/`-{state}`), not a `media-record-
+  symbolic` icon, so it can't go missing in a runtime theme; `Offline`/unknown now
+  shows a grey dot so a fetched 1:1 always shows *something*.
+- Diagnostic `print("[presence] …")` lines were added during debugging and
+  **removed** before release — don't reintroduce them.
+
+### CI
+- `.github/workflows/release.yml` bumped `actions/checkout@v4 → v6` and
+  `softprops/action-gh-release@v2 → v3` (Node 20 → 24 deprecation). Triggers
+  unchanged: push a `v*` tag (or workflow_dispatch with an existing tag).
+- **Release recipe:** `gh release create vX.Y.Z --target main --notes-file
+  <changelog-section>` creates the tag (→ triggers the build) *and* sets the
+  notes. `action-gh-release` preserves an existing body, so set notes at create
+  time. Locally, `make release` builds RPM + Flatpak bundle and reinstalls the
+  bundle so the running app matches.
+
+## ⏭ Earlier — Chat/Teams/OneNote rework (2026-06-17)
 
 **Where we stopped.** Reworked the Chat surface and hardened Teams/OneNote per a
 bug-sweep request. All green (`make build` + 5 meson tests) and verified
@@ -22,8 +64,10 @@ send-scroll) and a large OneNote page.
 
 ### Chat (`widgets/chat_view.py`, `data/style.css`)
 - **Flat avatars.** `_avatar` adds the `cloudy-avatar-flat` style class; CSS
-  overrides `Adw.Avatar`'s per-name rainbow (`.color1–.color14`) with one calm
-  accent fill (`avatar.cloudy-avatar-flat` in `style.css`).
+  overrides `Adw.Avatar`'s per-name rainbow (`.color1–.color14`).
+  **Superseded — see the top section:** the selector had to target the inner
+  gizmo node (`.cloudy-avatar-flat … avatar`), and avatars now use a flat
+  *per-person* palette (`cloudy-avatar-c0…c7`), not one accent fill.
 - **Live chat list.** New `ChatView.refresh_live()` re-fetches the chat list so a
   new message bumps its conversation to the top (and lights its unread mark)
   without a manual refresh — mirrors Mail. Wired: `notifications._on_chat` →

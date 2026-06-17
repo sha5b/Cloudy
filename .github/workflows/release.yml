@@ -41,7 +41,7 @@ jobs:
             rpm-build git rsync gettext findutils which blueprint-compiler \
             flatpak flatpak-builder
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Flathub
         run: |
@@ -72,7 +72,7 @@ jobs:
           ls -lh release/
 
       - name: Attach to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: |
