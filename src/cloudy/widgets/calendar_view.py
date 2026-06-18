@@ -32,6 +32,17 @@ from .source_nav import (
 )
 
 
+# Agenda response markers, keyed by the raw provider responseStatus (lowercased).
+# (icon, css accent class, tooltip). "notresponded"/"needsaction" stay unmarked
+# here — those rows are instead dimmed wholesale (see _event_row).
+_RESP_ICONS = {
+    "accepted": ("emblem-ok-symbolic", "success", _("Accepted")),
+    "tentativelyaccepted": ("dialog-question-symbolic", "warning", _("Tentative")),
+    "tentative": ("dialog-question-symbolic", "warning", _("Tentative")),
+    "declined": ("window-close-symbolic", "error", _("Declined")),
+}
+
+
 class CalendarView(Adw.Bin):
     __gtype_name__ = "CloudyCalendarView"
 
@@ -207,6 +218,23 @@ class CalendarView(Adw.Bin):
         time_lbl.set_valign(Gtk.Align.START)
         box.append(time_lbl)
 
+        # An invite you haven't answered shows up but reads as provisional:
+        # dimmed text + a "needs reply" dot. It stays activatable so a click
+        # opens the detail window where you can Accept/Tentative/Decline.
+        resp = (ev.get("response") or "").lower()
+        pending = resp in ("notresponded", "needsaction")
+        if pending:
+            row.add_css_class("dim-label")
+        icon = _RESP_ICONS.get(resp)
+        if icon:
+            dot = Gtk.Image.new_from_icon_name(icon[0])
+            dot.set_pixel_size(12)
+            dot.add_css_class(icon[1])
+            dot.set_valign(Gtk.Align.START)
+            dot.set_margin_top(2)
+            dot.set_tooltip_text(icon[2])
+            box.append(dot)
+
         text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True)
         box.append(text)
         if _is_live(ev):
@@ -216,6 +244,8 @@ class CalendarView(Adw.Bin):
         title = Gtk.Label(label=ev.get("subject") or _("(no title)"), xalign=0,
                           ellipsize=Pango.EllipsizeMode.END)
         title.add_css_class("body")
+        if resp == "declined":
+            title.add_css_class("cloudy-strikethrough")
         text.append(title)
         # Location, else the owning calendar's name (Google merges several
         # calendars into one agenda — show which one each event came from).

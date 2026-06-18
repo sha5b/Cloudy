@@ -77,6 +77,11 @@
   font-size: 0.8em;
 }
 
+/* A declined invite still listed in the agenda, struck through. */
+.cloudy-strikethrough {
+  text-decoration: line-through;
+}
+
 /* Chat list avatar circle (initials or a meeting glyph). */
 .cloudy-avatar {
   border-radius: 999px;

@@ -1561,16 +1561,30 @@ class ChatView(Adw.Bin):
                 body.connect("activate-link", self._on_link_activated)
             bubble.append(body)
 
+        # Images are gathered first so several in one message lay out as a
+        # wrapping gallery (flex/grid) rather than a tall vertical stack; other
+        # attachments stay as chips below.
+        images: list[Gtk.Widget] = []
+        others: list[Gtk.Widget] = []
         for att in msg.get("attachments", []) or []:
             is_image = (att.get("content_type") or "").lower().startswith("image")
             if att.get("data") is not None and is_image:
                 local = self._local_image_widget(att)  # optimistic echo, no fetch
                 if local is not None:
-                    bubble.append(local)
+                    images.append(local)
             elif is_image and att.get("url"):
-                bubble.append(self._image_widget(att))
+                images.append(self._image_widget(att))
             else:
-                bubble.append(self._attachment_chip(att))
+                others.append(self._attachment_chip(att))
+        if len(images) == 1:
+            bubble.append(images[0])
+        elif images:
+            gallery = Adw.WrapBox(child_spacing=4, line_spacing=4)
+            for img in images:
+                gallery.append(img)
+            bubble.append(gallery)
+        for chip in others:
+            bubble.append(chip)
 
         # Footer: timestamp and, on my own messages, a delivery status glyph.
         # The icon is built once but kept hidden here — _apply_status reveals it

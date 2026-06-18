@@ -90,16 +90,7 @@ def build_event_content(event: dict, *, on_rsvp=None) -> Gtk.Widget:
         header.append(actions)
 
     if event.get("can_respond") and on_rsvp is not None:
-        rsvp = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8, margin_top=4)
-        rsvp.add_css_class("linked")
-        current = event.get("response", "none")
-        for action, label, state in _RSVP:
-            btn = Gtk.Button(label=label)
-            if current == state:
-                btn.add_css_class("suggested-action")
-            btn.connect("clicked", lambda _b, a=action: on_rsvp(a))
-            rsvp.append(btn)
-        header.append(rsvp)
+        header.append(build_rsvp_bar(event.get("response"), on_rsvp))
 
     if attendees:
         header.append(_responses_section(attendees))
@@ -116,6 +107,37 @@ def build_event_content(event: dict, *, on_rsvp=None) -> Gtk.Widget:
                                title=_("No description"))
         empty.set_vexpand(True)
         box.append(empty)
+    return box
+
+
+def build_rsvp_bar(response, on_rsvp, *, title: str | None = None) -> Gtk.Widget:
+    """Accept / Tentative / Decline buttons with a one-line status above them
+    (mirroring Teams' "✓ Accepted"). Shared by the calendar event detail and the
+    Mail view's meeting-invite bar. ``on_rsvp(action)`` gets the raw action name
+    (accept | tentativelyAccept | decline)."""
+    current = _norm_response(response)
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4)
+    if title:
+        head = Gtk.Label(label=title, xalign=0)
+        head.add_css_class("heading")
+        box.append(head)
+
+    icon, label, accent = _RESP_META[current]
+    status = _meta_row(icon, _("Your response: %s") % label
+                       if current != "none" else _("You haven't replied yet"))
+    status.get_last_child().add_css_class(accent)
+    status.get_last_child().remove_css_class("dim-label")
+    box.append(status)
+
+    rsvp = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+    rsvp.add_css_class("linked")
+    for action, btn_label, state in _RSVP:
+        btn = Gtk.Button(label=btn_label)
+        if current == _norm_response(state):
+            btn.add_css_class("suggested-action")
+        btn.connect("clicked", lambda _b, a=action: on_rsvp(a))
+        rsvp.append(btn)
+    box.append(rsvp)
     return box
 
 

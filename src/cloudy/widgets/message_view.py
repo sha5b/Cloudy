@@ -283,11 +283,13 @@ def _attachments_bar(attachments, on_open) -> Gtk.Widget:
 
 
 # -- public builders -----------------------------------------------------
-def build_message_content(msg: dict, on_open_attachment=None) -> Gtk.Widget:
+def build_message_content(msg: dict, on_open_attachment=None, on_rsvp=None) -> Gtk.Widget:
     """Reader content: a fixed header (subject/sender/date) + the body view.
 
     ``on_open_attachment(att)`` (optional) is called when an attachment chip is
-    clicked; without it, chips are hidden. Suitable for a reading pane or page.
+    clicked; without it, chips are hidden. When the message carries a meeting
+    invite (``msg["invite"]``) and ``on_rsvp`` is given, an Accept / Tentative /
+    Decline bar is shown above the body. Suitable for a reading pane or page.
     """
     box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
 
@@ -319,6 +321,18 @@ def build_message_content(msg: dict, on_open_attachment=None) -> Gtk.Widget:
         to.add_css_class("dim-label")
         to.add_css_class("caption")
         header.append(to)
+
+    invite = msg.get("invite")
+    if invite and on_rsvp is not None:
+        from .event_view import build_rsvp_bar
+
+        bar = build_rsvp_bar(invite.get("my_response"), on_rsvp,
+                             title=_("Meeting invitation"))
+        bar.set_margin_start(20)
+        bar.set_margin_end(20)
+        bar.set_margin_bottom(6)
+        box.append(Gtk.Separator())
+        box.append(bar)
 
     attachments = msg.get("attachments") or []
     if attachments and on_open_attachment is not None:

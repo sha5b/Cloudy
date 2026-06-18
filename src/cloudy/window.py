@@ -13,6 +13,7 @@ RESOURCE_PREFIX = "/io/github/sha5b/Cloudy"
 
 # Capability key -> (translated label, symbolic icon).
 CAPABILITY_UI = {
+    "activity": (_("Activity"), "preferences-system-notifications-symbolic"),
     "files": (_("Files"), "folder-symbolic"),
     "mail": (_("Mail"), "mail-unread-symbolic"),
     "calendar": (_("Calendar"), "x-office-calendar-symbolic"),
@@ -227,6 +228,10 @@ class CloudyWindow(Adw.ApplicationWindow):
         # MailView/CalendarView).
         if account.is_personal:
             caps = [c for c in caps if c not in ("chat", "teams")]
+        # Activity is the notifier feed: always first, and the default tab on a
+        # fresh launch (the remembered-tab restore below still wins on return).
+        if caps:
+            caps = ["activity", *caps]
 
         stack = Adw.ViewStack()
         self._account_stack = stack
@@ -414,6 +419,10 @@ class CloudyWindow(Adw.ApplicationWindow):
     def _capability_placeholder(self, account, key, label) -> Gtk.Widget:
         # Signed-in surfaces get their real views.
         if account.signed_in:
+            if key == "activity":
+                from .widgets.activity_view import ActivityView
+
+                return ActivityView(self, account)
             if key == "files":
                 from .widgets.files_view import FilesView
 
@@ -589,12 +598,13 @@ class CloudyWindow(Adw.ApplicationWindow):
         from .widgets.compose_view import ComposeWindow
 
         def send(recipients, subj, bod, *, cc=None, bcc=None,
-                 attachments=None, importance="normal"):
+                 attachments=None, importance="normal", read_receipt=False):
             from .widgets.clients import build_account_client
 
             client = build_account_client(self.get_application(), account)
             client.send_mail(to=recipients, subject=subj, body=bod, cc=cc, bcc=bcc,
-                             html=True, attachments=attachments, importance=importance)
+                             html=True, attachments=attachments, importance=importance,
+                             read_receipt=read_receipt)
 
         ComposeWindow(self, account, from_label=account.display_name, send_fn=send,
                       to=to, subject=subject, body=body).present()

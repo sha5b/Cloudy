@@ -792,9 +792,36 @@ class MailView(Adw.Bin):
             from .clients import build_account_client
 
             client = build_account_client(self._window.get_application(), self._account)
-            return client.get_message(mid)
+            msg = client.get_message(mid)
+            invite = self._parse_invite(client, mid, msg)
+            if invite is not None:
+                msg["invite"] = invite
+            return msg
 
         run_async(work, lambda full, error: self._show_message(mid, full, error))
+
+    def _parse_invite(self, client, mid, msg) -> dict | None:
+        """If the message carries a ``text/calendar`` REQUEST, fetch + parse it so
+        the reader can offer Accept/Decline. Runs on the worker thread (network).
+        Returns the invite dict with ``my_response`` filled in, or ``None``."""
+        from ..core import ics
+
+        for att in msg.get("attachments") or []:
+            ct = (att.get("content_type") or "").lower()
+            name = (att.get("name") or "").lower()
+            if not (ct.startswith("text/calendar") or name.endswith(".ics")):
+                continue
+            try:
+                raw = client.fetch_mail_attachment(mid, att["id"])
+                invite = ics.parse_invite(raw.decode("utf-8", "replace"))
+            except Exception:  # noqa: BLE001 - a bad/partial .ics just means no bar
+                invite = None
+            if not invite or invite.get("method") != "REQUEST":
+                continue
+            mine = ics.find_attendee(invite, self._account.display_name)
+            invite["my_response"] = (mine or {}).get("partstat", "")
+            return invite
+        return None
 
     def _show_message(self, mid, msg, error) -> bool:
         if mid != self._open_mid:
@@ -806,11 +833,57 @@ class MailView(Adw.Bin):
             return False
         from .message_view import build_message_content
 
-        self._reader.set_child(
-            build_message_content(msg, on_open_attachment=self._open_attachment))
+        self._reader.set_child(build_message_content(
+            msg, on_open_attachment=self._open_attachment,
+            on_rsvp=self._on_invite_rsvp if msg.get("invite") else None))
         self._open_msg = msg
         self._reply_btn.set_sensitive(True)
         self._mark_read(mid)
+        return False
+
+    def _on_invite_rsvp(self, action: str) -> None:
+        """Answer the open message's meeting invite by emailing a METHOD:REPLY
+        VCALENDAR back to the organizer (iMIP). ``action`` is accept |
+        tentativelyAccept | decline."""
+        invite = (self._open_msg or {}).get("invite")
+        if not invite or not invite.get("organizer_email"):
+            self._window.add_toast(_("This invite has no organizer to reply to."))
+            return
+        self._window.add_toast(_("Sending response…"))
+        me = self._account.display_name
+
+        def work():
+            from ..core import ics
+            from .clients import build_account_client
+
+            mine = ics.find_attendee(invite, me)
+            reply = ics.build_reply(invite, attendee_email=me,
+                                    attendee_cn=(mine or {}).get("cn", ""),
+                                    action=action)
+            prefix = ics.RSVP_PARTSTAT[action][1]
+            subject = "%s: %s" % (prefix, invite.get("summary") or _("Meeting"))
+            client = build_account_client(self._window.get_application(), self._account)
+            client.send_mail(
+                to=[invite["organizer_email"]], subject=subject,
+                body=_("%s the invitation.") % prefix,
+                attachments=[{"name": "invite.ics",
+                              "content_type": "text/calendar; method=REPLY; charset=UTF-8",
+                              "data": reply.encode("utf-8")}])
+            return action
+
+        run_async(work, self._on_invite_replied)
+
+    def _on_invite_replied(self, action, error) -> bool:
+        if error:
+            self._window.add_toast(_("Couldn't send response: %s") % error)
+            return False
+        # Reflect the new answer in the open reader without a full reload.
+        self._window.add_toast(_("Response sent."))
+        if self._open_msg and self._open_msg.get("invite"):
+            partstat = {"accept": "ACCEPTED", "tentativelyAccept": "TENTATIVE",
+                        "decline": "DECLINED"}.get(action, "")
+            self._open_msg["invite"]["my_response"] = partstat
+            self._show_message(self._open_mid, self._open_msg, None)
         return False
 
     # -- attachments ------------------------------------------------------
@@ -891,13 +964,14 @@ class MailView(Adw.Bin):
         source, address = self._send_context()
 
         def send(to, subject, body, *, cc=None, bcc=None,
-                 attachments=None, importance="normal"):
+                 attachments=None, importance="normal", read_receipt=False):
             from .clients import build_account_client
 
             client = build_account_client(self._window.get_application(), self._account)
             client.send_mail(to=to, subject=subject, body=body,
                              source=source, address=address, cc=cc, bcc=bcc,
-                             html=True, attachments=attachments, importance=importance)
+                             html=True, attachments=attachments, importance=importance,
+                             read_receipt=read_receipt)
 
         ComposeWindow(self._window, self._account, from_label=self._from_label(),
                       send_fn=send).present()
@@ -914,11 +988,12 @@ class MailView(Adw.Bin):
             subject = _("Re: %s") % subject
 
         def send(_to, _subject, body, *, cc=None, bcc=None,
-                 attachments=None, importance="normal"):
+                 attachments=None, importance="normal", read_receipt=False):
             from .clients import build_account_client
 
             client = build_account_client(self._window.get_application(), self._account)
-            client.reply_mail(mid, body, html=True, attachments=attachments)
+            client.reply_mail(mid, body, html=True, attachments=attachments,
+                              read_receipt=read_receipt)
 
         ComposeWindow(
             self._window, self._account, from_label=self._account.display_name,

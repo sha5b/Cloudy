@@ -87,10 +87,19 @@ class ComposeWindow(EditorWindow):
             tooltip_text=_("Mark as high importance"))
         self._importance.set_child(self._btn_content("mail-mark-important-symbolic",
                                                      _("High importance")))
+        # Read receipt asks the recipient's client to confirm they opened it. Only
+        # Microsoft honours this for us (Graph isReadReceiptRequested); consumer
+        # Gmail has no API for it, so the toggle is hidden for Google accounts.
+        self._read_receipt = Gtk.ToggleButton(
+            tooltip_text=_("Request a read receipt"))
+        self._read_receipt.set_child(self._btn_content("emblem-ok-symbolic",
+                                                       _("Read receipt")))
+        self._read_receipt.set_visible(getattr(account, "provider", "") == "microsoft")
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
                           margin_top=4)
         actions.append(attach_btn)
         actions.append(self._importance)
+        actions.append(self._read_receipt)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
                       margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
@@ -277,13 +286,15 @@ class ComposeWindow(EditorWindow):
             for img in inline
         ]
         importance = "high" if self._importance.get_active() else "normal"
+        read_receipt = self._read_receipt.get_active()
 
         self.primary_btn.set_sensitive(False)
         self.toast(_("Sending…"))
         send_fn = self._send_fn
         run_async(
             lambda: send_fn(recipients, subject, body_html, cc=cc, bcc=bcc,
-                            attachments=attachments, importance=importance),
+                            attachments=attachments, importance=importance,
+                            read_receipt=read_receipt),
             self._on_sent)
 
     def _on_sent(self, _result, error) -> bool:

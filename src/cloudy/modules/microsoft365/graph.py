@@ -697,7 +697,8 @@ class GraphClient:
 
     def send_mail(self, *, to, subject: str, body: str, source: str = "me",
                   address: str | None = None, cc=None, bcc=None, html: bool = False,
-                  attachments=None, importance: str | None = None) -> None:
+                  attachments=None, importance: str | None = None,
+                  read_receipt: bool = False) -> None:
         """Send a new message *as the current source*.
 
         ``source='me'`` sends from the signed-in user (``/me/sendMail``);
@@ -706,7 +707,8 @@ class GraphClient:
         plain sendMail identity, so the Mail view falls back to ``'me'`` for new
         messages (group replies go through :meth:`reply_mail`). ``attachments``
         are ``[{name, content_type, data, inline?, content_id?}]``; ``importance``
-        is ``"low" | "normal" | "high"``."""
+        is ``"low" | "normal" | "high"``. ``read_receipt`` asks the recipient's
+        client for a read notification (Graph ``isReadReceiptRequested``)."""
         message = {
             "subject": subject,
             "body": {"contentType": "HTML" if html else "Text", "content": body},
@@ -718,6 +720,8 @@ class GraphClient:
             message["bccRecipients"] = self._recipients(bcc)
         if importance:
             message["importance"] = importance
+        if read_receipt:
+            message["isReadReceiptRequested"] = True
         if attachments:
             message["attachments"] = self._build_attachments(attachments)
         payload = {"message": message, "saveToSentItems": True}
@@ -727,7 +731,8 @@ class GraphClient:
             self._post("/me/sendMail", payload, SCOPES_MAIL)
 
     def reply_mail(self, message_id: str, body: str, *, reply_all: bool = False,
-                   html: bool = False, attachments=None) -> None:
+                   html: bool = False, attachments=None,
+                   read_receipt: bool = False) -> None:
         """Reply to a message, keeping it on its thread.
 
         Personal/shared messages use Graph's ``reply``/``replyAll`` action; a
@@ -746,6 +751,8 @@ class GraphClient:
         # The reply action accepts a draft override via "message"; we only set the
         # body (and any attachments) so Graph keeps the recipients/subject/thread.
         msg = {"body": comment}
+        if read_receipt:
+            msg["isReadReceiptRequested"] = True
         if attachments:
             msg["attachments"] = self._build_attachments(attachments)
         self._post(f"{base}/messages/{raw_id}/{action}",
@@ -976,7 +983,7 @@ class GraphClient:
             "endDateTime": end_iso,
             "$orderby": "start/dateTime",
             "$top": str(limit),
-            "$select": "subject,start,end,location,isAllDay",
+            "$select": "subject,start,end,location,isAllDay,responseStatus",
         })
 
     @staticmethod
@@ -990,6 +997,9 @@ class GraphClient:
                 "end": e.get("end", {}).get("dateTime", ""),
                 "location": (e.get("location") or {}).get("displayName", ""),
                 "all_day": e.get("isAllDay", False),
+                # none|organizer|tentativelyAccepted|accepted|declined|notResponded
+                # Drives the greyed "unanswered invite" styling in the agenda.
+                "response": (e.get("responseStatus") or {}).get("response", ""),
             })
         return out
 
@@ -1102,6 +1112,69 @@ class GraphClient:
                if m.get("messageType") == "message" and not m.get("deletedDateTime")]
         out.reverse()
         return out, data.get("@odata.nextLink")
+
+    def recent_chat_activity(self, *, max_chats: int = 8,
+                             per_chat: int = 15) -> list[dict]:
+        """A bounded scan of your most-recent chats for activity that targets
+        *you*: reactions on your own messages and @mentions of you. Powers the
+        Activity feed's Teams-style "X reacted to your message" / "X mentioned
+        you" rows. Returns ``[{kind, chat_id, who, emoji, text, when}]`` newest
+        first. Bounded to ``max_chats`` conversations (a handful of parallel
+        calls) so it stays cheap enough to run on every feed load."""
+        try:
+            chats = self.list_chats(limit=max_chats)
+        except GraphError:
+            return []
+        me = self._me_id()
+
+        def scan(chat: dict) -> list[dict]:
+            cid = chat.get("id", "")
+            try:
+                data = self._get(f"/me/chats/{cid}/messages?$top={per_chat}", SCOPES_CHAT)
+            except GraphError:
+                return []
+            items: list[dict] = []
+            for m in data.get("value", []):
+                if m.get("messageType") != "message" or m.get("deletedDateTime"):
+                    continue
+                user = (m.get("from") or {}).get("user") or {}
+                mine = bool(user.get("id")) and user.get("id") == me
+                body = m.get("body") or {}
+                text = (_strip_html(body.get("content", ""))
+                        if body.get("contentType") == "html"
+                        else body.get("content", "")).strip()
+                when = m.get("createdDateTime", "")
+                if mine:
+                    for r in m.get("reactions") or []:
+                        ru = (r.get("user") or {}).get("user") or {}
+                        if not ru.get("displayName") or ru.get("id") == me:
+                            continue  # skip my own reactions / unnamed
+                        rt = r.get("reactionType", "") or ""
+                        items.append({
+                            "kind": "reaction", "chat_id": cid,
+                            "who": html.unescape(ru.get("displayName", "")),
+                            "emoji": _REACTIONS.get(rt, rt),
+                            "text": text[:90],
+                            "when": r.get("createdDateTime", "") or when,
+                        })
+                for men in m.get("mentions") or []:
+                    mu = (men.get("mentioned") or {}).get("user") or {}
+                    if mu.get("id") == me:
+                        items.append({
+                            "kind": "mention", "chat_id": cid,
+                            "who": html.unescape(user.get("displayName", "")),
+                            "emoji": "", "text": text[:90], "when": when,
+                        })
+                        break
+            return items
+
+        out: list[dict] = []
+        workers = min(6, max(1, len(chats)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            for res in pool.map(scan, chats):
+                out.extend(res)
+        out.sort(key=lambda i: i.get("when") or "", reverse=True)
+        return out
 
     @staticmethod
     def _chat_message_row(m: dict, me_id: str, chat_id: str = "") -> dict:

@@ -332,15 +332,22 @@ class GoogleClient:
 
     def send_mail(self, *, to, subject: str, body: str, source: str = "me",
                   address: str | None = None, cc=None, bcc=None, html: bool = False,
-                  attachments=None, importance: str | None = None) -> None:
+                  attachments=None, importance: str | None = None,
+                  read_receipt: bool = False) -> None:
         """Send a new message (Gmail always sends as the signed-in user; the
-        ``source``/``address`` args are accepted for a uniform client API)."""
+        ``source``/``address`` args are accepted for a uniform client API).
+
+        ``read_receipt`` is accepted for API parity but not honoured: Gmail only
+        supports read receipts on Google Workspace with an admin policy, and the
+        consumer API has no equivalent — so the Mail composer offers the toggle
+        only for Microsoft accounts (see GraphClient.send_mail)."""
         raw = self._raw_message(to, subject, body, cc=cc, bcc=bcc, html=html,
                                 attachments=attachments, importance=importance)
         self._post(f"{GMAIL}/users/me/messages/send", {"raw": raw}, SCOPES_MAIL)
 
     def reply_mail(self, message_id: str, body: str, *, reply_all: bool = False,
-                   html: bool = False, attachments=None) -> None:
+                   html: bool = False, attachments=None,
+                   read_receipt: bool = False) -> None:
         """Reply on the original thread (To = original sender, subject ``Re: …``)."""
         meta = self._get(
             f"{GMAIL}/users/me/messages/{message_id}"
@@ -496,6 +503,14 @@ class GoogleClient:
     def _event_from_json(e: dict) -> dict:
         start = e.get("start", {})
         end = e.get("end", {})
+        # The current user's own attendee entry is flagged ``self: true``; its
+        # responseStatus (needsAction|declined|tentative|accepted) drives the
+        # greyed "unanswered invite" styling in the agenda.
+        response = ""
+        for a in e.get("attendees", []) or []:
+            if a.get("self"):
+                response = a.get("responseStatus", "")
+                break
         return {
             "id": e.get("id", ""),
             "subject": e.get("summary", "(no title)"),
@@ -503,6 +518,7 @@ class GoogleClient:
             "end": end.get("dateTime") or end.get("date", ""),
             "location": e.get("location", ""),
             "all_day": "date" in start,
+            "response": response,
         }
 
     def create_event(self, *, subject: str, start_iso: str, end_iso: str,
@@ -573,6 +589,9 @@ class GoogleClient:
                       "response": a.get("responseStatus", "needsAction")}
                      for a in data.get("attendees", []) or []]
         description = data.get("description", "") or ""
+        # The user can RSVP when they are an attendee and not the organizer.
+        is_attendee = any(a.get("self") for a in data.get("attendees", []) or [])
+        is_organizer = bool(organizer.get("self"))
         base.update({
             "organizer": organizer.get("displayName") or organizer.get("email", ""),
             "attendees": attendees,
@@ -580,10 +599,39 @@ class GoogleClient:
             "body_html": "<" in description and ">" in description,
             "online_url": data.get("hangoutLink", ""),
             "web_link": data.get("htmlLink", ""),
-            "response": "none",
-            "can_respond": False,  # Google calendar is read-only (scope)
+            # _event_from_json already pulled the self-attendee responseStatus.
+            "can_respond": is_attendee and not is_organizer,
         })
         return base
+
+    def respond_event(self, event_id: str, action: str,
+                      comment: str = "", send: bool = True) -> None:
+        """RSVP to a Google event (action: accept | tentativelyAccept | decline).
+
+        Google has no dedicated accept endpoint: we fetch the event, flip the
+        current user's attendee responseStatus, and PATCH the full attendee list
+        back (a bare PATCH of ``attendees`` replaces the list, so the others must
+        be preserved). ``sendUpdates`` notifies the organizer like Outlook's
+        "send response". Needs the calendar.events (write) scope."""
+        status = {"accept": "accepted", "tentativelyAccept": "tentative",
+                  "decline": "declined"}.get(action)
+        if status is None:
+            raise GoogleError(f"unknown RSVP action: {action}")
+        cal, raw = self._unwrap_event_id(event_id)
+        data = self._get(
+            f"{CALENDAR}/calendars/{self._cal_path(cal)}/events/{raw}", SCOPES_CALENDAR)
+        attendees = data.get("attendees", []) or []
+        found = False
+        for a in attendees:
+            if a.get("self"):
+                a["responseStatus"] = status
+                found = True
+        if not found:
+            raise GoogleError("You are not an attendee of this event.")
+        self._patch(
+            f"{CALENDAR}/calendars/{self._cal_path(cal)}/events/{raw}"
+            f"?sendUpdates={'all' if send else 'none'}",
+            {"attendees": attendees}, SCOPES_CALENDAR)
 
     # -- Chat (Google Chat — Workspace only) ------------------------------
     def list_chats(self, *, limit: int = 50) -> list[dict]:

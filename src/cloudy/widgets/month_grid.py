@@ -169,9 +169,14 @@ class MonthGrid(Gtk.Box):
         btn = Gtk.Button(has_frame=False)
         btn.add_css_class("flat")
         btn.add_css_class("cloudy-chip")
+        resp = (ev.get("response") or "").lower()
+        if resp in ("notresponded", "needsaction"):
+            btn.add_css_class("dim-label")  # unanswered invite reads as provisional
         lbl = Gtk.Label(label=esc(text), xalign=0, use_markup=True,
                         ellipsize=Pango.EllipsizeMode.END)
         lbl.add_css_class("caption")
+        if resp == "declined":
+            lbl.add_css_class("cloudy-strikethrough")
         btn.set_child(lbl)
         if self._on_event is not None:
             btn.connect("clicked", lambda *_a, e=ev: self._on_event(e))
