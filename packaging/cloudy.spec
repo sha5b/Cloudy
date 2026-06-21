@@ -13,7 +13,7 @@
 %global appid io.github.sha5b.Cloudy
 
 Name:           cloudy
-Version:        0.2.4
+Version:        0.2.5
 Release:        1%{?dist}
 Summary:        Use OneDrive, SharePoint and unified mail on your desktop
 
@@ -115,6 +115,13 @@ meson test -C %{_vpath_builddir} --print-errorlogs
 %{_datadir}/%{name}/
 
 %changelog
+* Sun Jun 21 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.2.5-1
+- Mail headers now show the sender's full address plus To/Cc/Bcc recipients,
+  with every address a click-to-copy link.
+- Double-click a message to open it in its own window.
+- Fixed Chat presence dots that stayed "online" for contacts who had gone
+  offline. Internal dedup/cleanup across the mail/chat/Teams surfaces.
+
 * Thu Jun 18 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.2.4-1
 - Calendar RSVP (Accept/Tentative/Decline) now works for both Microsoft and
   Google; unanswered invites show in the calendar dimmed but clickable.

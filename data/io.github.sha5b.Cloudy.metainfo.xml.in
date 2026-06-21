@@ -91,6 +91,16 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
   </screenshots>
 
   <releases>
+    <release version="0.2.5" date="2026-06-21">
+      <description>
+        <p>Clearer mail headers and a more accurate Chat presence.</p>
+        <ul>
+          <li>The message header now spells out the sender's full email address along with the To, Cc and Bcc recipients — and every address is one click to copy</li>
+          <li>Double-click a message in the list to open it in its own window, so you can read it next to the list and other mail</li>
+          <li>Chat presence dots are now accurate: contacts who have gone offline no longer keep a stale "online" dot</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.4" date="2026-06-18">
       <description>
         <p>Meeting invitations you can answer, and a new Activity feed.</p>

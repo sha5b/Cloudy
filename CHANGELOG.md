@@ -11,6 +11,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-06-21
+
+### Added
+- **Full sender and recipient details in mail**: the message header now shows the
+  sender's complete email address alongside the To, Cc and Bcc recipients. Every
+  address is a click-to-copy link, so you can grab someone's address without
+  retyping it.
+- **Open a message in its own window**: double-click a message in the list to pop
+  it out into a separate window and read it side-by-side with the list and other
+  mail.
+
+### Fixed
+- **Accurate Chat presence**: a contact who went offline could keep a stale green
+  / away dot because an authoritative "offline" status was treated like a
+  transient unknown and never applied. Offline now correctly clears the dot.
+
+### Changed
+- Internal cleanup: shared image-decode and attachment helpers (removing
+  duplicated code across the mail, chat, Teams and composer surfaces), plus
+  smaller fixes (tenant-id caching, a dashboard refresh guard).
+
 ## [0.2.4] - 2026-06-18
 
 ### Added
