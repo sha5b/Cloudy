@@ -91,14 +91,18 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
   </screenshots>
 
   <releases>
-    <release version="0.2.6" date="2026-06-22">
+    <release version="0.2.6" date="2026-06-23">
       <description>
-        <p>Drives that stay mounted, mailbox search, and more file actions.</p>
+        <p>Live updates everywhere, start-and-join online meetings, and a redesigned Activity overview.</p>
         <ul>
-          <li>Mounted drives now come back on their own — after a reboot, or if a drive drops out, Cloudy remounts the ones you had open (no need to mount them again each time) and reconnects a drive whose connection died</li>
+          <li>Activity, Calendar, Teams and Mail now update on their own as new mail, invites and posts arrive — no manual refresh — and the calendar marks events that are happening now</li>
+          <li>The Activity page is redesigned as a clean multi-column overview, grouped by what needs you: happening now, invites awaiting a reply, mentions, mail and chats</li>
+          <li>Start an online meeting from Cloudy: an "Online meeting" switch when creating an event (Teams or Google Meet), a "Meet now" button, and one-tap Join buttons — plus a meeting-starting alert with Join and a ring</li>
+          <li>Meeting-invite emails now show the time, place and a Join button, and flag updated or cancelled meetings</li>
+          <li>Mounted drives come back on their own — after a reboot, or if a drive drops out, Cloudy remounts the ones you had open and reconnects a drive whose connection died</li>
           <li>Search your whole mailbox: type to filter the open list instantly, or press Enter to search the entire folder on the server and find older mail</li>
-          <li>The file browser can now select several items at once and copy or move them to another folder — copy to a local folder to download files off a cloud drive</li>
-          <li>Filter the current folder by name with the new search button in the file browser</li>
+          <li>The file browser can select several items at once and copy or move them to another folder — copy to a local folder to download files off a cloud drive</li>
+          <li>More reliable behind the scenes: long lists of folders, contacts and calendars are no longer cut off, Reply all keeps everyone on Gmail, and Google sign-in is more secure</li>
         </ul>
       </description>
     </release>
