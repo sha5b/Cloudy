@@ -13,7 +13,7 @@
 %global appid io.github.sha5b.Cloudy
 
 Name:           cloudy
-Version:        0.2.6
+Version:        0.2.7
 Release:        1%{?dist}
 Summary:        Use OneDrive, SharePoint and unified mail on your desktop
 
@@ -115,6 +115,17 @@ meson test -C %{_vpath_builddir} --print-errorlogs
 %{_datadir}/%{name}/
 
 %changelog
+* Thu Jun 26 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.2.7-1
+- Mail: Reply all and Forward (forward carries the original attachments).
+- Per-account email signature (Preferences -> Accounts), added to new mail,
+  replies and forwards.
+- Teams chats can send any file type, not just images (max 10 per message).
+- Microsoft and Google errors shown in plain language via a shared formatter.
+- Email links and meeting Join buttons open reliably in the Flatpak sandbox.
+- Reading mail clears its desktop notification and updates the unread badge;
+  deleting a Teams message updates the thread immediately.
+- Activity overview lays out in balanced columns (no large empty gaps).
+
 * Mon Jun 22 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.2.6-1
 - Mounted drives auto-remount at startup and reconnect if their daemon dies
   (health watchdog).
