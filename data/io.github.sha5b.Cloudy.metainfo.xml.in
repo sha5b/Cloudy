@@ -91,6 +91,21 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
   </screenshots>
 
   <releases>
+    <release version="0.2.7" date="2026-06-26">
+      <description>
+        <p>Fuller mail controls, an email signature, sending any file in Teams, and clearer errors.</p>
+        <ul>
+          <li>Mail now has Reply, Reply all and Forward — forwarding carries the original message's attachments</li>
+          <li>Set a per-account email signature in Preferences → Accounts; it's added to new mail, replies and forwards</li>
+          <li>Send any file type in a Teams chat, not just images — images still show a preview, other files show a labelled chip (up to 10 per message)</li>
+          <li>Clearer error messages: Microsoft and Google failures are shown in plain language instead of raw codes</li>
+          <li>Links in emails open reliably again, including in the Flatpak build, and so do the Join buttons on online meetings</li>
+          <li>Reading an email now updates the unread badge instantly and clears its desktop notification</li>
+          <li>Deleting a Teams message updates the conversation immediately</li>
+          <li>The Activity overview lays out cleanly in balanced columns instead of leaving large empty gaps</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.6" date="2026-06-23">
       <description>
         <p>Live updates everywhere, start-and-join online meetings, and a redesigned Activity overview.</p>

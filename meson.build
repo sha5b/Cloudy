@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Shahab Nedaei
 
 project('cloudy', 'c',
-          version: '0.2.6',
+          version: '0.2.7',
     meson_version: '>= 1.0.0',
   default_options: [ 'warning_level=2', 'werror=false', ],
 )
