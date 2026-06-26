@@ -31,6 +31,9 @@ INTROSPECTION_XML = """
       <arg type="s" name="path" direction="in"/>
       <arg type="s" name="status" direction="out"/>
     </method>
+    <method name="ManagedRoots">
+      <arg type="as" name="roots" direction="out"/>
+    </method>
     <method name="SyncPath">
       <arg type="s" name="path" direction="in"/>
     </method>
@@ -112,6 +115,20 @@ class SyncStatusService:
                 return "offline"
             node = node.parent
 
+    def _managed_roots(self) -> list:
+        """The directories Cloudy manages (mount root + sync root). The host
+        Nautilus extension fetches these once and prefilters paths locally, so it
+        never has to make a D-Bus call per file/selection just to learn whether a
+        path is even ours."""
+        roots = [str(self._mount_root)]
+        try:
+            from ..modules.microsoft365.mounts import sync_root
+
+            roots.append(str(sync_root()))
+        except Exception:  # noqa: BLE001 - sync root is best-effort
+            pass
+        return roots
+
     def emit_status_changed(self, path: str, status: str) -> None:
         if not self._reg_id:
             return
@@ -127,6 +144,9 @@ class SyncStatusService:
         if method == "StatusForPath":
             (path,) = params.unpack()
             invocation.return_value(GLib.Variant("(s)", (self.status_for(path),)))
+        elif method == "ManagedRoots":
+            invocation.return_value(
+                GLib.Variant("(as)", (self._managed_roots(),)))
         elif method == "SyncPath":
             (path,) = params.unpack()
             # TODO(stage 5): trigger sync/hydration of this path.

@@ -18,6 +18,9 @@ All D-Bus calls are best-effort: if the app is not running they fail quietly,
 so the extension never breaks the file manager.
 """
 
+import os
+import time
+
 import gi
 
 # Nautilus loads its own typelib before importing us, and the version varies by
@@ -37,6 +40,9 @@ OBJECT_PATH = "/io/github/sha5b/Cloudy/Sync"
 INTERFACE = "io.github.sha5b.Cloudy.Sync"
 
 _DBUS_TIMEOUT_MS = 400
+# How long to trust the cached "managed roots" before asking the app again.
+# These paths almost never change, so a long TTL keeps the file manager fast.
+_ROOTS_TTL_S = 30.0
 
 
 def _proxy():
@@ -70,12 +76,48 @@ def _path_of(file):
     return location.get_path() if location else None
 
 
+def _managed_roots():
+    """The Cloudy-managed directories (mount + sync roots), as normalized path
+    strings. Fetched from the app over D-Bus ONCE and cached for ``_ROOTS_TTL_S``
+    so the per-file / per-folder menu hooks below can decide "is this ours?" with
+    a pure string compare — never a blocking D-Bus call on Nautilus's UI thread,
+    which is what made the whole file manager sluggish. Empty when the app isn't
+    running (so nothing is offered and no work is done)."""
+    now = time.monotonic()
+    cache = getattr(_managed_roots, "_cache", None)
+    if cache is not None and (now - cache[1]) < _ROOTS_TTL_S:
+        return cache[0]
+    roots = ()
+    result = _call("ManagedRoots", None, "(as)")
+    if result is not None:
+        (paths,) = result.unpack()
+        roots = tuple(os.path.normpath(p) for p in paths if p)
+    _managed_roots._cache = (roots, now)
+    return roots
+
+
+def _under_roots(path, roots):
+    """True when ``path`` is at or below one of the managed ``roots``. Pure
+    string compare on the normalized path — deliberately no os.path.ismount /
+    stat / resolve, since those would touch the filesystem and could block on a
+    slow or hung FUSE network mount (freezing Nautilus)."""
+    if not path or not roots:
+        return False
+    p = os.path.normpath(path)
+    return any(p == r or p.startswith(r + os.sep) for r in roots)
+
+
 class CloudyMenuProvider(GObject.GObject, Nautilus.MenuProvider):
     """Right-click controls for Cloudy-managed files/folders."""
 
     def get_file_items(self, files):  # API 4.0: no window arg
-        # Only offer controls for managed paths.
-        managed = [f for f in files if self._is_managed(_path_of(f))]
+        # Only offer controls for managed paths. This runs on Nautilus's UI
+        # thread on every selection change, so it MUST stay cheap: a local prefix
+        # test against the cached roots, no D-Bus per file.
+        roots = _managed_roots()
+        if not roots:
+            return []
+        managed = [f for f in files if _under_roots(_path_of(f), roots)]
         if not managed:
             return []
 
@@ -95,7 +137,8 @@ class CloudyMenuProvider(GObject.GObject, Nautilus.MenuProvider):
         return [copy_link, free_space]
 
     def get_background_items(self, folder):
-        if not self._is_managed(_path_of(folder)):
+        # Runs on every folder you open — keep it to a local prefix test.
+        if not _under_roots(_path_of(folder), _managed_roots()):
             return []
         sync = Nautilus.MenuItem(
             name="Cloudy::sync_folder",
@@ -106,16 +149,6 @@ class CloudyMenuProvider(GObject.GObject, Nautilus.MenuProvider):
         return [sync]
 
     # -- helpers ----------------------------------------------------------
-    @staticmethod
-    def _is_managed(path):
-        if not path:
-            return False
-        result = _call("StatusForPath", GLib.Variant("(s)", (path,)), "(s)")
-        if result is None:
-            return False
-        (status,) = result.unpack()
-        return status != "ignored"
-
     def _on_copy_link(self, _menu, files):
         path = _path_of(files[0])
         result = _call(
