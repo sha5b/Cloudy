@@ -122,7 +122,7 @@ meson test -C %{_vpath_builddir} --print-errorlogs
 - RFC 5545 iCalendar escaping, Google OAuth receiver cleanup, and pinned rclone checksums.
 - Code cleanup: extracted graph_markup, file_browser_utils, chat_avatar; removed abraunegg stub.
 
-* Thu Jun 26 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.2.7-1
+* Fri Jun 26 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.2.7-1
 - Mail: Reply all and Forward (forward carries the original attachments).
 - Per-account email signature (Preferences -> Accounts), added to new mail,
   replies and forwards.

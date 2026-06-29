@@ -33,10 +33,6 @@ from ...core.interfaces import (
     StatusKind,
     TeamsCapability,
 )
-from .files import OneDriveFiles
-from .graph import GraphClient
-
-
 class Microsoft365Module(
     ServiceModule, FilesCapability, MailCapability, CalendarCapability,
     ChatCapability, TeamsCapability,
@@ -49,8 +45,22 @@ class Microsoft365Module(
     def __init__(self):
         self._ctx: ModuleContext | None = None
         self._auth = None  # core.auth.msal_graph.GraphAuth, set on activate
-        self._graph = GraphClient(self._token_provider)
-        self._files = OneDriveFiles(self._graph)
+        self._graph_client = None
+        self._files_client = None
+
+    @property
+    def _graph(self):
+        if self._graph_client is None:
+            from .graph import GraphClient
+            self._graph_client = GraphClient(self._token_provider)
+        return self._graph_client
+
+    @property
+    def _files(self):
+        if self._files_client is None:
+            from .files import OneDriveFiles
+            self._files_client = OneDriveFiles(self._graph)
+        return self._files_client
 
     # -- shared auth ------------------------------------------------------
     def _token_provider(self, scopes):
