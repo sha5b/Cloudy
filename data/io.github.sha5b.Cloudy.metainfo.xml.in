@@ -91,6 +91,21 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
   </screenshots>
 
   <releases>
+    <release version="0.2.8" date="2026-06-29">
+      <description>
+        <p>A bug-fix and cleanup release focused on correctness, performance and trust.</p>
+        <ul>
+          <li>Mail and Chat lists now update in place, preserving your scroll position and selection</li>
+          <li>Switching between Mail, Calendar and Chat is faster thanks to a per-account API client cache</li>
+          <li>Microsoft 365 share links resolve a local file back to the right OneDrive or SharePoint drive before creating the link</li>
+          <li>Calendar events keep your local timezone when created or updated, and shared/group calendars route correctly</li>
+          <li>Large OneNote notebooks now load every section and page instead of stopping after the first batch</li>
+          <li>Meeting-invite email replies follow the iCalendar standard more reliably</li>
+          <li>rclone is provisioned from a pinned version with verified SHA-256 checksums</li>
+          <li>Google sign-in cleans up its local redirect server reliably after the flow finishes</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.7" date="2026-06-26">
       <description>
         <p>Fuller mail controls, an email signature, sending any file in Teams, and clearer errors.</p>

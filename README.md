@@ -47,7 +47,8 @@ mail, calendar & chat — behind one adaptive UI.
 - **Microsoft 365** (OneDrive + Teams/SharePoint libraries) and **Google**
   (Gmail, Calendar, My Drive) accounts side by side.
 - **Files** as live `rclone` FUSE mounts — two-way network drives that appear in
-  GNOME Files and an in-app browser (not synced copies). Optional offline sync.
+  GNOME Files and an in-app browser (not synced copies), with right-click
+  OneDrive / SharePoint share links and optional offline sync.
 - **Mail**: read (HTML), compose, reply/reply-all, with **Me / Teams / Shared**
   mailbox sources and contacts autocomplete.
 - **Calendar**: month grid + agenda, event detail with an attendee response

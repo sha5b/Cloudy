@@ -7,7 +7,7 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
 
 Cloudy is a **GTK4 / Libadwaita (Python / PyGObject)** super-app for **Microsoft 365 (OneDrive + Teams/SharePoint, Mail, Calendar)** and **Google (Gmail, Calendar, Drive)** on Fedora 44 (GNOME 50). It orchestrates proven backends (rclone for mounts; Microsoft Graph / Google REST for mail/calendar) rather than reimplementing them. Read `docs/ARCHITECTURE.md`, `docs/AUTH.md`, `docs/SECRETS.md`, `docs/ROADMAP.md` for depth.
 
-## Current status (v0.2.7, 2026-06-29+ baseline)
+## Current status (v0.2.8, 2026-06-29)
 
 Working and shipped (RPM + Flatpak; `make release` reinstalls the user Flatpak so the running app == release):
 - **Sign-in** (Microsoft via MSAL, Google via loopback+PKCE), tokens in libsecret.
@@ -17,9 +17,9 @@ Working and shipped (RPM + Flatpak; `make release` reinstalls the user Flatpak s
 - **Chat** (MS Teams chats; Google Chat Workspace-only) and **Teams** (channels + OneNote) capabilities, work/school MS only — hidden for personal accounts.
 - **Activity** tab (first/default): aggregates recent mail + upcoming/unanswered invites + recent chats + Teams reacted/mentioned.
 - **Dashboard** (Pinned / Upcoming / Recent mail / Recent file changes, + Activity feed for work MS accounts), **Command palette** (Ctrl+K), **persistent offline cache**, **notifications** with DND/quiet-hours/relevance-tiers/per-source mute/digest batching, Nautilus D-Bus emblems + extension, secrets, rclone auto-provision.
-- 0.2.4 added RSVP + Activity; 0.2.5 added fuller mail headers, pop-out message window, accurate chat presence.
+- 0.2.4 added RSVP + Activity; 0.2.5 added fuller mail headers, pop-out message window, accurate chat presence; 0.2.8 added per-account client cache, in-place Mail/Chat list updates, M365 share-link path resolution, RFC 5545 iCalendar parsing, pinned/checksum rclone provisioning, and Graph calendar/OneNote fixes.
 
-**Verification convention** (applies to nearly every change below): GUI cannot be driven from a headless/agent shell (Wayland handoff kills the wrapper shell, exit 144). So changes are verified by `make build` + `make test` (4–5 meson validators + the `tests/unit/` logic suite, 69 tests) + `make lint` (py_compile) + a **headless import/instantiate smoke test** (`gi.require_version` then import/instantiate each widget module — `window.py`/`application.py` can't be imported standalone, their `Gtk.Template` needs the compiled gresource), then the user runs `make run`/`make flatpak-run` to eyeball. "Not yet eyeballed" boilerplate is omitted per-entry below.
+**Verification convention** (applies to nearly every change below): GUI cannot be driven from a headless/agent shell (Wayland handoff kills the wrapper shell, exit 144). So changes are verified by `make build` + `make test` (4–5 meson validators + the `tests/unit/` logic suite, 104 tests) + `make lint` (py_compile) + a **headless import/instantiate smoke test** (`gi.require_version` then import/instantiate each widget module — `window.py`/`application.py` can't be imported standalone, their `Gtk.Template` needs the compiled gresource), then the user runs `make run`/`make flatpak-run` to eyeball. "Not yet eyeballed" boilerplate is omitted per-entry below.
 
 ---
 
@@ -63,19 +63,28 @@ A first attempt stopped poll/presence timers on `unrealize`, but `Adw.ViewStack`
 
 ---
 
+## Recently completed (0.2.8)
+
+- **Per-account client cache** — `widgets/clients.build_account_client` now reuses a cached client per `account.id` stored on `CloudyApplication`; evicted on sign-out/removal. Removes the repeated MSAL/libsecret rebuild on every request.
+- **Incremental Mail/Chat list updates** — `source_nav.patch_listbox` diffs rows in place so refreshes preserve selection/scroll instead of rebuilding the whole `ListBox`.
+- **Microsoft 365 share-link path resolution** — `files.create_share_link` resolves a local path back to the correct `(drive_id, relative_path)` via remembered mount records.
+- **Graph calendar hardening** — create/update send local wall-clock time + IANA timezone; `list_events` routes personal/shared/group calendars and uses `Prefer: outlook.timezone`.
+- **OneNote pagination** — notebooks/sections/pages follow `@odata.nextLink`.
+- **RFC 5545 iCalendar parser** — `core/ics.py` handles escapes and quoted parameters.
+- **Pinned rclone provisioning** — `v1.74.3` with SHA-256 checksums for `amd64`/`arm64`.
+- **Google OAuth cleanup** — local redirect server is always shut down.
+
 ## Biggest remaining wins — NOT done (architectural; need GUI/live-API testing, get sign-off)
-1. **Auth/client rebuilt on every request** (`widgets/clients.py` → `core/auth/msal_graph.py`): each `build_account_client` does a synchronous libsecret lookup + deserializes the MSAL cache + builds a new `PublicClientApplication`, and `_me_id`/`_tenant_id` instance caches are thrown away — so chat polling/presence re-auth-setup every few seconds and issue an extra `/me` per op. **Fix:** memoize one auth object per `account.id` on the app (MSAL is designed to be reused), invalidate on sign-in/out. Highest single perf win; touches auth, so test sign-in after.
-2. **Lazy view construction** (`window._show_account`): every account switch eagerly builds ALL five tab views and fires ~6 concurrent network loads though one tab is visible. Build the visible/remembered tab eagerly, the rest on first `notify::visible-child-name`.
-3. **Gmail inbox is a serial N+1** (`google_client.list_messages_page`): one blocking GET per message. Parallelize with a ThreadPoolExecutor (pattern in `list_events`) or use the Gmail batch endpoint.
-4. **Image decode on the main thread** in chat/teams `done()` callbacks and `message_view.html_body_widget` (inline-image shrink+re-encode) — move decode into the worker thread.
-5. **Shared-helper dedup**: one image `texture_from_bytes` (4 copies: media_window/rich_editor/teams_view/chat_view), one `_attachment_chip` (2), one `_reply_quote` (2) — extract to a shared module.
-6. **Live re-render churn**: `chat_view._render_filtered` / `mail_view._render` rebuild the whole ListBox on every notifier tick — diff/patch rows instead.
-7. **Mail `refresh_live` collapses pagination**; **Files** nav race + unbounded FUSE-folder render (see below).
+1. **Lazy view construction** (`window._show_account`): every account switch eagerly builds ALL five tab views and fires ~6 concurrent network loads though one tab is visible. Build the visible/remembered tab eagerly, the rest on first `notify::visible-child-name`.
+2. **Gmail inbox is a serial N+1** (`google_client.list_messages_page`): one blocking GET per message. Parallelize with a ThreadPoolExecutor (pattern in `list_events`) or use the Gmail batch endpoint.
+3. **Image decode on the main thread** in chat/teams `done()` callbacks and `message_view.html_body_widget` (inline-image shrink+re-encode) — move decode into the worker thread.
+4. **Shared-helper dedup**: one image `texture_from_bytes` (4 copies: media_window/rich_editor/teams_view/chat_view), one `_attachment_chip` (2), one `_reply_quote` (2) — extract to a shared module.
+5. **Mail `refresh_live` collapses pagination**; **Files** nav race + unbounded FUSE-folder render (see below).
 
 ---
 
 ## Known, deliberately NOT fixed (need live-API verification)
-- **Calendar times may display in UTC, not local.** `_time_label` / `month_grid._chip` / `event_view._format_when` slice the raw ISO `start` (`[:5]`); Graph `calendarView` is fetched without a `Prefer: outlook.timezone` header and ignores per-event `start.timeZone`, so non-UTC users can see a shifted wall-clock. `_format_when` also shows no end-date for multi-day/all-day spans. Deep cross-provider (MS + Google) change — must be tested against the live API before touching.
+- **Calendar display does not show an end date for multi-day / all-day spans.** `_format_when` prints only the start day. Cross-provider (MS + Google) change — must be tested against the live API before touching.
 - **Mail `refresh_live` collapses pagination**: a live refresh re-renders only page 1, discarding loaded "Load older" pages and resetting scroll.
 - **Files `_load`/`_toggle_expand` last-write-wins race** on rapid navigation (no nav-token guard); `_scan` over a FUSE mount is unbounded for huge folders.
 - **Google Shared Drives UNTESTED on a real Workspace account** (user has only personal Google): `MountManager.list_google_shared_drives` spins a throwaway rclone `drive` remote and parses `rclone backend drives` JSON — the JSON shape + Shared Drives path need a Workspace account to confirm. Shared-with-me is testable on personal. Shared Drives only appear *after* the user has mounted something once (an rclone token must already exist; the app holds no Google Drive OAuth scope).
@@ -108,7 +117,7 @@ A first attempt stopped poll/presence timers on `unrealize`, but `Adw.ViewStack`
 - **Mail reader loads remote content** (`message_view.py`) — only JS disabled; external images load → tracking-pixel/IP leak on open. Consider blocking remote resources by default with a "load remote images" opt-in.
 
 **Correctness (safe to fix, not done):**
-- **No `@odata.nextLink` pagination** anywhere in `graph.py` (folders, groups, contacts, drives, calendarView) — accounts with >`$top` items silently truncate. Loop on `@odata.nextLink`.
+- **No `@odata.nextLink` pagination** in `graph.py` for folders, groups, contacts, drives (OneNote and `calendarView` now paginate) — accounts with >`$top` items silently truncate. Loop on `@odata.nextLink`.
 - **Mount success/failure mis-detected** (`mounts.py`): `rclone mount --daemon` forks and returns 0 before the FUSE mount exists, so `is_mounted()` right after reports `active=False` and real failures are swallowed. Poll with a short timeout + capture daemon stderr.
 - **`recent_changes` walk isn't bounded _within_ a single directory** (`file_browser.py`) — the deadline/count check is only at the top of the per-dir loop, so one huge dir on a FUSE mount blocks past budget. Check the deadline in the inner loop and prune `dirnames` when over budget.
 - **Google `reply_all` drops CC/other recipients** (`google_client.py`) — only replies to the original sender even when `reply_all=True`.
