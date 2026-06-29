@@ -28,6 +28,15 @@ from gi.repository import GLib
 
 DOWNLOADS = "https://downloads.rclone.org"
 
+# Pinned release + SHA-256 sums for the Linux zip archives we provision. This
+# removes trust on downloads.rclone.org for integrity: an attacker who can
+# modify the remote archive still cannot pass the hard-coded checksum.
+RCLONE_VERSION = "v1.74.3"
+RCLONE_SHA256 = {
+    "amd64": "dbee7ccd7a5d617e4ed4cd4555c16669b511abfe8d31164f61be35ac9e999bd2",
+    "arm64": "8f8d47446e061f80c3256659fe8e21f56d72d96aaefe1275d088ea5eb6b42aa7",
+}
+
 
 def deps_bin_dir() -> Path:
     return Path(GLib.get_user_data_dir()) / "cloudy" / "bin"
@@ -105,30 +114,31 @@ def _fetch(url: str, timeout: int = 60) -> bytes:
 
 
 def ensure_rclone(log=lambda _m: None) -> str:
-    """Return a path to rclone, downloading it (rootless) if necessary."""
+    """Return a path to rclone, downloading it (rootless) if necessary.
+
+    The downloaded archive is verified against pinned SHA-256 sums so the
+    remote download site cannot swap the binary undetected. We also keep the
+    extracted binary owner-writable-only to reduce tampering surface.
+    """
     existing = resolve("rclone")
     if existing:
         return existing
 
     arch = _rclone_arch()
-    version = _fetch(f"{DOWNLOADS}/version.txt").decode().split()[-1]  # e.g. v1.71.0
+    expected = RCLONE_SHA256.get(arch)
+    if expected is None:
+        raise RuntimeError(f"unsupported architecture for rclone provisioning: {arch}")
+
+    version = RCLONE_VERSION
     zip_name = f"rclone-{version}-linux-{arch}.zip"
     log(f"Downloading {zip_name}…")
-
-    # Verify against the published SHA256SUMS for this version.
-    sums = _fetch(f"{DOWNLOADS}/{version}/SHA256SUMS").decode()
-    expected = None
-    for line in sums.splitlines():
-        if zip_name in line:
-            expected = line.split()[0]
-            break
-    if expected is None:
-        raise RuntimeError(f"no checksum found for {zip_name}")
 
     blob = _fetch(f"{DOWNLOADS}/{version}/{zip_name}")
     actual = hashlib.sha256(blob).hexdigest()
     if actual != expected:
-        raise RuntimeError(f"checksum mismatch for {zip_name}")
+        raise RuntimeError(
+            f"checksum mismatch for {zip_name}: expected {expected}, got {actual}"
+        )
 
     target_dir = deps_bin_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -137,6 +147,9 @@ def ensure_rclone(log=lambda _m: None) -> str:
         member = next(n for n in zf.namelist() if n.endswith("/rclone"))
         with zf.open(member) as src, open(target, "wb") as dst:
             shutil.copyfileobj(src, dst)
-    target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    # Owner read/write/execute; group/other read+execute (no write by others).
+    target.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
+                 | stat.S_IRGRP | stat.S_IXGRP
+                 | stat.S_IROTH | stat.S_IXOTH)
     log(f"Installed rclone {version} to {target}")
     return str(target)

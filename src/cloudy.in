@@ -18,7 +18,6 @@ localedir = '@localedir@'
 sys.path.insert(1, pkgdatadir)
 signal.signal(signal.SIGINT, signal.SIG_DFL)
 
-# Set up translations.
 try:
     locale.bindtextdomain('cloudy', localedir)
     locale.textdomain('cloudy')
@@ -32,7 +31,7 @@ if __name__ == '__main__':
     from gi.repository import Gio
     resource = Gio.Resource.load(
         os.path.join(pkgdatadir, APP_ID + '.gresource'))
-    resource._register()
+    getattr(resource, "register", resource._register)()
 
     from cloudy import main
     sys.exit(main.main(VERSION, APP_ID))

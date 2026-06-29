@@ -7,7 +7,7 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
 
 Cloudy is a **GTK4 / Libadwaita (Python / PyGObject)** super-app for **Microsoft 365 (OneDrive + Teams/SharePoint, Mail, Calendar)** and **Google (Gmail, Calendar, Drive)** on Fedora 44 (GNOME 50). It orchestrates proven backends (rclone for mounts; Microsoft Graph / Google REST for mail/calendar) rather than reimplementing them. Read `docs/ARCHITECTURE.md`, `docs/AUTH.md`, `docs/SECRETS.md`, `docs/ROADMAP.md` for depth.
 
-## Current status (v0.2.5, 2026-06-18+ baseline)
+## Current status (v0.2.7, 2026-06-29+ baseline)
 
 Working and shipped (RPM + Flatpak; `make release` reinstalls the user Flatpak so the running app == release):
 - **Sign-in** (Microsoft via MSAL, Google via loopback+PKCE), tokens in libsecret.

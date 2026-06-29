@@ -44,27 +44,45 @@ def open_attachment(parent: Gtk.Window, account, mid: str, att: dict,
     run_async(work, done)
 
 
-def _save(parent: Gtk.Window, toast: Callable[[str], None], data, name) -> None:
+def save_bytes_dialog(parent: Gtk.Window, data: bytes, name: str,
+                      on_done: Callable[[str | None], None]) -> None:
+    """Show a save dialog for ``data`` and write it when the user confirms.
+
+    ``on_done(message)`` is called with ``None`` on success or an error string.
+    """
     from .source_nav import local_initial_folder
 
     dialog = Gtk.FileDialog(title=_("Save"), initial_name=name)
     folder = local_initial_folder()
     if folder is not None:
         dialog.set_initial_folder(folder)
-    dialog.save(parent, None, lambda d, r: _on_saved(d, r, data, toast))
+
+    def _on_saved(d, result):
+        try:
+            gfile = d.save_finish(result)
+        except GLib.Error:
+            on_done(None)  # user cancelled
+            return
+        if gfile is None:
+            on_done(None)
+            return
+        try:
+            from gi.repository import Gio
+
+            gfile.replace_contents(data, None, False,
+                                   Gio.FileCreateFlags.NONE, None)
+            on_done(None)
+        except GLib.Error as exc:
+            on_done(exc.message)
+
+    dialog.save(parent, None, _on_saved)
 
 
-def _on_saved(dialog, result, data, toast: Callable[[str], None]) -> None:
-    try:
-        gfile = dialog.save_finish(result)
-    except GLib.Error:
-        return  # user cancelled
-    if gfile is None:
-        return
-    try:
-        from gi.repository import Gio
+def _save(parent: Gtk.Window, toast: Callable[[str], None], data, name) -> None:
+    def on_done(error):
+        if error:
+            toast(_("Couldn't save: %s") % error)
+        else:
+            toast(_("Saved"))
 
-        gfile.replace_contents(data, None, False, Gio.FileCreateFlags.NONE, None)
-        toast(_("Saved"))
-    except GLib.Error as exc:
-        toast(_("Couldn't save: %s") % exc.message)
+    save_bytes_dialog(parent, data, name, on_done)

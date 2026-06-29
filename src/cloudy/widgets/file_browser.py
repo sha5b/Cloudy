@@ -15,129 +15,21 @@ from __future__ import annotations
 
 import os
 import shutil
-import time
-from datetime import datetime
 from gettext import gettext as _
 from pathlib import Path
 
 from gi.repository import Adw, Gio, GLib, GObject, Gtk, Pango
 
+from .file_browser_utils import (
+    gdk_rect,
+    human_size,
+    human_time,
+    icon_for,
+    scan_directory,
+    type_label,
+)
 from .format import esc
 from .source_nav import run_async
-
-
-def recent_changes(roots: list[Path], *, limit: int = 8, max_scan: int = 3000,
-                   time_budget: float = 4.0) -> list[dict]:
-    """Most-recently-modified files under ``roots`` (for the Dashboard).
-
-    Bounded three ways so a slow network mount can never hang the caller: by
-    file count (``max_scan``) and by a wall-clock ``time_budget`` (seconds) —
-    whichever trips first stops the walk and we return what we found. A Google
-    Drive rclone mount, for instance, can take seconds *per directory*, so the
-    count guard alone isn't enough; the deadline is what actually caps it.
-    """
-    found: list[dict] = []
-    seen: set[str] = set()
-    roots = [Path(r) for r in roots]
-    dirs = [r for r in roots if r.is_dir() and str(r) not in seen
-            and not seen.add(str(r))]
-    if not dirs:
-        return []
-    overall_deadline = time.monotonic() + time_budget
-    # Fair share per root: one big/slow account folder must not starve the
-    # others (that's why the Dashboard previously showed only one account). Each
-    # root gets its own file cap and time slice, plus the overall deadline.
-    per_root_cap = max(50, max_scan // len(dirs))
-    per_root_budget = time_budget / len(dirs)
-    for root in dirs:
-        root_scanned = 0
-        root_deadline = min(overall_deadline, time.monotonic() + per_root_budget)
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
-            for fn in filenames:
-                if fn.startswith("."):
-                    continue
-                root_scanned += 1
-                fp = os.path.join(dirpath, fn)
-                try:
-                    found.append({"name": fn, "path": fp, "mtime": os.path.getmtime(fp)})
-                except OSError:
-                    continue
-                # Check inside the inner loop too: a single huge directory on a
-                # FUSE mount can exceed the budget before the outer check.
-                if root_scanned >= per_root_cap or time.monotonic() >= root_deadline:
-                    break
-            if root_scanned >= per_root_cap or time.monotonic() >= root_deadline:
-                break
-        if time.monotonic() >= overall_deadline:
-            break
-    found.sort(key=lambda e: e["mtime"], reverse=True)
-    return found[:limit]
-
-
-def _scan(path: Path) -> list[dict]:
-    """List a directory with size/mtime, folders flagged."""
-    out = []
-    with os.scandir(path) as it:
-        for entry in it:
-            if entry.name.startswith("."):
-                continue
-            try:
-                is_dir = entry.is_dir()
-                st = entry.stat()
-            except OSError:
-                continue
-            out.append({
-                "name": entry.name, "is_dir": is_dir, "path": entry.path,
-                "size": 0 if is_dir else st.st_size, "mtime": st.st_mtime,
-            })
-    return out
-
-
-def _human_size(n: int) -> str:
-    size = float(n)
-    for unit in ("B", "kB", "MB", "GB", "TB"):
-        if size < 1024 or unit == "TB":
-            return (f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}")
-        size /= 1024
-    return f"{size:.1f} TB"
-
-
-def _human_time(mtime: float) -> str:
-    try:
-        dt = datetime.fromtimestamp(mtime)
-    except (OSError, OverflowError, ValueError):
-        return ""
-    today = datetime.now().date()
-    if dt.date() == today:
-        return _("Today %s") % dt.strftime("%H:%M")
-    return dt.strftime("%Y-%m-%d %H:%M")
-
-
-def _type_label(entry: dict) -> str:
-    if entry["is_dir"]:
-        return _("Folder")
-    ctype, _unc = Gio.content_type_guess(entry["name"], None)
-    if ctype:
-        return Gio.content_type_get_description(ctype)
-    return _("File")
-
-
-def _icon_for(entry: dict) -> Gio.Icon:
-    if entry["is_dir"]:
-        return Gio.ThemedIcon.new("folder")
-    ctype, _unc = Gio.content_type_guess(entry["name"], None)
-    if ctype:
-        return Gio.content_type_get_icon(ctype)
-    return Gio.ThemedIcon.new("text-x-generic")
-
-
-def _gdk_rect(x: float, y: float):
-    from gi.repository import Gdk
-
-    rect = Gdk.Rectangle()
-    rect.x, rect.y, rect.width, rect.height = int(x), int(y), 1, 1
-    return rect
 
 
 class FileBrowserPane(Adw.Bin):
@@ -423,7 +315,7 @@ class FileBrowserPane(Adw.Bin):
         self._update_nav()
         self._build_crumbs()
         self._show_status("content-loading-symbolic", _("Loading…"), "")
-        run_async(lambda: _scan(path), self._on_scanned)
+        run_async(lambda: scan_directory(path), self._on_scanned)
 
     def _update_nav(self) -> None:
         self._back.set_sensitive(self._hpos > 0)
@@ -474,7 +366,7 @@ class FileBrowserPane(Adw.Bin):
         elif key == "mtime":
             keyf = lambda e: e["mtime"]
         else:  # type
-            keyf = lambda e: _type_label(e).lower()
+            keyf = lambda e: type_label(e).lower()
         dirs = sorted((e for e in entries if e["is_dir"]), key=keyf,
                       reverse=self._sort_desc)
         files = sorted((e for e in entries if not e["is_dir"]), key=keyf,
@@ -534,7 +426,7 @@ class FileBrowserPane(Adw.Bin):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=8,
                       margin_bottom=8, margin_start=4, margin_end=4, width_request=92)
         image = Gtk.Image(pixel_size=48)
-        image.set_from_gicon(_icon_for(entry))
+        image.set_from_gicon(icon_for(entry))
         box.append(image)
         label = Gtk.Label(label=entry["name"], justify=Gtk.Justification.CENTER,
                           wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR,
@@ -568,16 +460,16 @@ class FileBrowserPane(Adw.Bin):
         name_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10,
                            hexpand=True)
         icon = Gtk.Image(pixel_size=20)
-        icon.set_from_gicon(_icon_for(entry))
+        icon.set_from_gicon(icon_for(entry))
         name_box.append(icon)
         name = Gtk.Label(label=entry["name"], xalign=0, hexpand=True,
                          ellipsize=Pango.EllipsizeMode.END)
         name_box.append(name)
         box.append(name_box)
-        box.append(self._cell(_human_size(entry["size"]) if not entry["is_dir"] else "",
+        box.append(self._cell(human_size(entry["size"]) if not entry["is_dir"] else "",
                               96))
-        box.append(self._cell(_type_label(entry), 130))
-        box.append(self._cell(_human_time(entry["mtime"]), 160))
+        box.append(self._cell(type_label(entry), 130))
+        box.append(self._cell(human_time(entry["mtime"]), 160))
         row.set_child(box)
 
         click = Gtk.GestureClick(button=1)
@@ -632,7 +524,7 @@ class FileBrowserPane(Adw.Bin):
             return
         self._expanded.add(path)
         if path not in self._child_cache:
-            run_async(lambda: _scan(Path(path)),
+            run_async(lambda: scan_directory(Path(path)),
                       lambda res, err: self._on_children(path, res, err))
         self._render_list()  # chevron flips now; children appear once loaded
 
@@ -681,7 +573,7 @@ class FileBrowserPane(Adw.Bin):
                       margin_bottom=6, margin_start=6, margin_end=6)
         popover = Gtk.Popover(child=box, has_arrow=True)
         popover.set_parent(widget)
-        popover.set_pointing_to(_gdk_rect(x, y))
+        popover.set_pointing_to(gdk_rect(x, y))
         # Tear the popover down once dismissed, otherwise each right-click leaks
         # an unparented-on-popdown popover attached to the row.
         popover.connect("closed", lambda p: p.unparent() if p.get_parent() else None)
@@ -750,8 +642,19 @@ class FileBrowserPane(Adw.Bin):
             name = row.get_text().strip()
             if not name or name == entry["name"]:
                 return
+            err = self._valid_child_name(name)
+            if err:
+                self._window.add_toast(err)
+                return
             dest = os.path.join(str(cur), name)
             src = entry["path"]
+            try:
+                if not Path(dest).resolve().is_relative_to(Path(cur).resolve()):
+                    self._window.add_toast(_("Invalid destination."))
+                    return
+            except OSError:
+                self._window.add_toast(_("Invalid destination."))
+                return
             run_async(lambda: os.rename(src, dest),
                       lambda _r, err: self._toast_then_reload(
                           err, _("Renamed."), _("Couldn't rename: %s")))
@@ -858,7 +761,18 @@ class FileBrowserPane(Adw.Bin):
             name = row.get_text().strip()
             if not name:
                 return
+            err = self._valid_child_name(name)
+            if err:
+                self._window.add_toast(err)
+                return
             dest = os.path.join(str(cur), name)
+            try:
+                if not Path(dest).resolve().is_relative_to(Path(cur).resolve()):
+                    self._window.add_toast(_("Invalid destination."))
+                    return
+            except OSError:
+                self._window.add_toast(_("Invalid destination."))
+                return
             run_async(lambda: os.mkdir(dest),
                       lambda _r, err: self._toast_then_reload(
                           err, _("Folder created."), _("Couldn't create folder: %s")))

@@ -31,6 +31,10 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
         'full' caches opened files on demand (recommended); 'minimal' streams
         with the least local disk use.
       </description>
+      <choices>
+        <choice value='full'/>
+        <choice value='minimal'/>
+      </choices>
     </key>
 
     <key name="mount-layout" type="s">
@@ -40,6 +44,10 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
         'one-folder' mounts every library as a subfolder of the single mount
         location; 'individual' lets each account choose its own mount folder.
       </description>
+      <choices>
+        <choice value='one-folder'/>
+        <choice value='individual'/>
+      </choices>
     </key>
 
     <key name="default-sync-type" type="s">
@@ -49,6 +57,10 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
         'stream' mounts libraries on demand (no local copy); 'full' keeps a
         two-way synced offline copy on disk.
       </description>
+      <choices>
+        <choice value='stream'/>
+        <choice value='full'/>
+      </choices>
     </key>
 
     <key name="autostart" type="b">
@@ -57,11 +69,11 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
     </key>
 
     <key name="offline-sync-enabled" type="b">
-      <default>false</default>
+      <default>true</default>
       <summary>Master switch for per-account two-way offline sync</summary>
       <description>
-        When off, per-account "keep a synced copy" toggles are inactive and no
-        background bisync runs.
+        When off, no background rclone bisync runs even if individual accounts
+        have “Sync files offline” turned on.
       </description>
     </key>
 
@@ -76,11 +88,6 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
       <description>
         Which modules the module engine should activate at startup.
       </description>
-    </key>
-
-    <key name="last-active-view" type="s">
-      <default>'welcome'</default>
-      <summary>The view shown when the app was last closed</summary>
     </key>
 
     <key name="notifications-enabled" type="b">
@@ -98,6 +105,11 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
         notifies only for the direct/important ones — group-chat chatter and
         ordinary mail update the badges silently.
       </description>
+      <choices>
+        <choice value='all'/>
+        <choice value='digest'/>
+        <choice value='priority'/>
+      </choices>
     </key>
 
     <key name="notify-respect-system-dnd" type="b">

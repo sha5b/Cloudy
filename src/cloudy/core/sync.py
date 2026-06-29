@@ -36,11 +36,40 @@ class SyncManager:
     # -- lifecycle --------------------------------------------------------
     def start(self) -> None:
         """Begin syncing every account that has full_sync enabled."""
+        self._settings_changed = self._app.settings.connect(
+            "changed::offline-sync-enabled", lambda *_: self._on_master_toggled())
+        if not self._master_enabled():
+            return
         for account in self._app.registry.accounts():
             if account.signed_in and getattr(account, "full_sync", False):
                 self.enable(account)
 
+    def stop(self) -> None:
+        """Stop all sync timers and disconnect settings handler."""
+        if hasattr(self, "_settings_changed") and self._settings_changed:
+            self._app.settings.disconnect(self._settings_changed)
+            self._settings_changed = None
+        for account_id in list(self._timers):
+            self._disable_by_id(account_id)
+
+    def _master_enabled(self) -> bool:
+        try:
+            return self._app.settings.get_boolean("offline-sync-enabled")
+        except Exception:  # noqa: BLE001
+            return True  # default to enabled if setting is missing
+
+    def _on_master_toggled(self) -> None:
+        if self._master_enabled():
+            for account in self._app.registry.accounts():
+                if account.signed_in and getattr(account, "full_sync", False):
+                    self.enable(account)
+        else:
+            for account_id in list(self._timers):
+                self._disable_by_id(account_id)
+
     def enable(self, account) -> None:
+        if not self._master_enabled():
+            return
         if account.id not in self._timers:
             self._timers[account.id] = GLib.timeout_add_seconds(
                 SYNC_INTERVAL, self._on_timer, account.id
@@ -48,13 +77,17 @@ class SyncManager:
         self.sync_now(account)
 
     def disable(self, account) -> None:
-        source = self._timers.pop(account.id, None)
+        self._disable_by_id(account.id)
+
+    def _disable_by_id(self, account_id: str) -> None:
+        source = self._timers.pop(account_id, None)
         if source is not None:
             GLib.source_remove(source)
 
     def _on_timer(self, account_id: str) -> bool:
         account = self._app.registry.get(account_id)
-        if account is None or not getattr(account, "full_sync", False):
+        if account is None or not self._master_enabled() \
+                or not getattr(account, "full_sync", False):
             self._timers.pop(account_id, None)
             return False  # GLib removes the timer
         self.sync_now(account)

@@ -21,7 +21,16 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Callable, Sequence
+
+from .graph_markup import (
+    html_to_pango,
+    parse_message_reference,
+    split_attachments,
+    strip_html,
+    strip_reply_placeholder,
+)
 
 from ...core.auth.msal_graph import (
     SCOPES_BASE,
@@ -39,129 +48,11 @@ from ...core.auth.msal_graph import (
 
 BASE_URL = "https://graph.microsoft.com/v1.0"
 
-_TAG_RE = re.compile(r"<[^>]+>")
-
 # Teams' named reaction types → emoji (custom reactions arrive as unicode).
 _REACTIONS = {
     "like": "👍", "heart": "❤️", "laugh": "😆", "surprised": "😮",
     "sad": "😢", "angry": "😠",
 }
-
-
-def _strip_html(value: str) -> str:
-    """Collapse an HTML message body to readable single-line plain text."""
-    if not value:
-        return ""
-    text = _TAG_RE.sub(" ", value)
-    return html.unescape(re.sub(r"\s+", " ", text)).strip()
-
-
-def _strip_reply_placeholder(content: str) -> str:
-    """Drop the ``<attachment id=…>`` placeholder Teams leaves in a reply's body
-    where the quoted message goes — we render the quote ourselves from the
-    ``messageReference`` attachment, so the empty tag would otherwise show as a
-    stray gap (or a bogus "attachment" chip)."""
-    if not content:
-        return content
-    content = re.sub(r"(?is)<attachment\b[^>]*>.*?</attachment>", "", content)
-    return re.sub(r"(?is)<attachment\b[^>]*/?>", "", content)
-
-
-def _parse_message_reference(att: dict) -> dict:
-    """Turn a Teams ``messageReference`` attachment into a normalized reply quote
-    ``{id, text, from}`` so a replied-to message shows what it was (and can be
-    clicked to jump to the original) instead of rendering as "attachment"."""
-    raw = att.get("content") or ""
-    ref_id = str(att.get("id") or "")
-    preview, sender = "", ""
-    try:
-        data = json.loads(raw) if raw else {}
-        preview = _strip_html(data.get("messagePreview") or "")
-        ref_id = str(data.get("messageId") or ref_id)
-        user = (data.get("messageSender") or {}).get("user") or {}
-        sender = html.unescape(user.get("displayName") or "")
-    except (ValueError, TypeError):
-        pass
-    return {"id": ref_id, "text": preview, "from": sender}
-
-
-def _split_attachments(m: dict):
-    """Split a message's attachments into (reply_to, file/image attachments),
-    pulling out the ``messageReference`` (reply quote) so it isn't rendered as a
-    file chip. Returns ``(reply_to_or_None, [attachment dicts])``."""
-    reply_to = None
-    attachments = []
-    for a in (m.get("attachments") or []):
-        if (a.get("contentType") or "") == "messageReference":
-            if reply_to is None:
-                reply_to = _parse_message_reference(a)
-            continue
-        attachments.append({
-            "name": a.get("name") or "attachment",
-            "url": a.get("contentUrl", ""),
-            "content_type": a.get("contentType", ""),
-        })
-    return reply_to, attachments
-
-
-# HTML inline tags that map cleanly onto Pango markup, so chat bubbles can show
-# the same bold/italic/underline/strike/links Teams renders (instead of flat
-# plain text). Everything else is dropped; block tags become line breaks.
-_PANGO_TAGS = {
-    "b": "b", "strong": "b", "i": "i", "em": "i", "u": "u",
-    "s": "s", "strike": "s", "del": "s", "code": "tt", "pre": "tt",
-}
-
-
-def _pango_escape(text: str) -> str:
-    return (text.replace("&", "&amp;").replace("<", "&lt;")
-            .replace(">", "&gt;").replace('"', "&quot;"))
-
-
-def _html_to_pango(content: str) -> str:
-    """Convert a chat message's HTML body to a safe Pango-markup subset
-    (bold/italic/underline/strike/monospace/links). Returns ``""`` when the
-    result carries no markup, so callers can fall back to plain text."""
-    if not content:
-        return ""
-    s = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", "", content)
-    s = re.sub(r"(?is)<img[^>]*>", "", s)              # images render separately
-    s = re.sub(r"(?i)<br\s*/?>", "\n", s)
-    s = re.sub(r"(?i)</(p|div|tr|h[1-6])>", "\n", s)
-    s = re.sub(r"(?i)<li[^>]*>", "\n• ", s)
-    out: list[str] = []
-    has_markup = False
-    pos = 0
-    for m in re.finditer(r"<[^>]+>", s):
-        chunk = s[pos:m.start()]
-        if chunk:
-            out.append(_pango_escape(html.unescape(chunk)))
-        pos = m.end()
-        tag = m.group(0)
-        tm = re.match(r"</?\s*([a-zA-Z0-9]+)", tag)
-        if not tm:
-            continue
-        name, closing = tm.group(1).lower(), tag.startswith("</")
-        if name == "a":
-            if closing:
-                out.append("</a>")
-            else:
-                hm = (re.search(r'href="([^"]*)"', tag)
-                      or re.search(r"href='([^']*)'", tag))
-                href = _pango_escape(html.unescape(hm.group(1))) if hm else ""
-                out.append(f'<a href="{href}">')
-            has_markup = True
-        elif name in _PANGO_TAGS:
-            pt = _PANGO_TAGS[name]
-            out.append(f"</{pt}>" if closing else f"<{pt}>")
-            has_markup = True
-    tail = s[pos:]
-    if tail:
-        out.append(_pango_escape(html.unescape(tail)))
-    if not has_markup:
-        return ""  # nothing to gain over plain text
-    result = re.sub(r"\n{3,}", "\n\n", "".join(out)).strip()
-    return result
 
 
 class GraphError(Exception):
@@ -342,11 +233,23 @@ class GraphClient:
         drives.sort(key=lambda d: d.name.lower())
         return drives
 
+    def item_by_path(self, drive_id: str, rel_path: str) -> dict:
+        """Resolve a path relative to a drive root to a driveItem dict.
+
+        ``drive_id`` may be ``"me"`` to target the current user's default drive.
+        """
+        rel = urllib.parse.quote(rel_path.lstrip("/"), safe="/")
+        if drive_id == "me":
+            return self._get(f"/me/drive/root:/{rel}", SCOPES_FILES)
+        return self._get(f"/drives/{drive_id}/root:/{rel}", SCOPES_FILES)
+
     def create_share_link(self, drive_id: str, item_id: str, *, editable: bool = False) -> str:
         body = {"type": "edit" if editable else "view", "scope": "organization"}
-        data = self._post(
-            f"/drives/{drive_id}/items/{item_id}/createLink", body, SCOPES_FILES
-        )
+        if drive_id == "me":
+            path = f"/me/drive/items/{item_id}/createLink"
+        else:
+            path = f"/drives/{drive_id}/items/{item_id}/createLink"
+        data = self._post(path, body, SCOPES_FILES)
         return data.get("link", {}).get("webUrl", "")
 
     @staticmethod
@@ -441,13 +344,7 @@ class GraphClient:
 
     def list_messages_page(self, folder_id: str = "inbox", *, limit: int = 25,
                            page_token: str | None = None, query: str = ""):
-        """Like :meth:`list_messages` but returns ``(messages, next_token)``.
-
-        ``next_token`` is the Graph ``@odata.nextLink`` (an absolute URL) or
-        ``None`` when there are no older messages; pass it back as
-        ``page_token`` to fetch the following page. When ``query`` is set the
-        folder is searched server-side (Graph ``$search``) instead of listed —
-        group-thread folders, which have no search endpoint, ignore it."""
+        """Return ``(messages, next_token)`` for a mail folder page."""
         if folder_id.startswith("group:"):
             return self._list_group_threads(
                 folder_id.split(":", 1)[1], limit, page_token)
@@ -848,24 +745,70 @@ class GraphClient:
             for c in self._get_all("/me/calendars?$top=50", SCOPES_MAIL)
         ]
 
-    def list_events(self, start_iso: str, end_iso: str, *, limit: int = 50) -> list[dict]:
-        """The user's own calendar view between two ISO-8601 UTC timestamps."""
-        data = self._get(
-            f"/me/calendarView?{self._calview_params(start_iso, end_iso, limit)}",
-            SCOPES_MAIL,
-        )
-        return self._events_from_json(data)
+    def list_events(self, start_iso: str, end_iso: str, *,
+                    calendar_id: str | None = None, limit: int = 50) -> list[dict]:
+        """Calendar view between two ISO-8601 UTC timestamps.
+
+        ``calendar_id`` selects a specific calendar:
+        * ``None`` or empty — the user's default calendar (`/me/calendarView`).
+        * ``"me:<id>"`` or just ``"<id>"`` — a specific owned calendar.
+        * ``"shared:<address>:<id>"`` — a delegated/shared calendar.
+        * ``"group:<group_id>"`` — a group/team calendar.
+        """
+        headers = self._calendar_headers()
+        path = self._calendar_view_path(calendar_id, start_iso, end_iso, limit)
+        scope = self._calendar_scope(calendar_id)
+        items = self._get_all(path, scope, headers)
+        events = self._events_from_json({"value": items})
+        if calendar_id and calendar_id.startswith("group:"):
+            _, gid = calendar_id.split(":", 1)
+            for e in events:
+                e["id"] = f"group:{gid}:{e['id']}"
+        elif calendar_id and calendar_id.startswith("shared:"):
+            parts = calendar_id.split(":", 2)
+            if len(parts) >= 2:
+                addr = parts[1]
+                for e in events:
+                    e["id"] = f"shared:{addr}:{e['id']}"
+        return events
+
+    def _calendar_view_path(self, calendar_id: str | None,
+                            start_iso: str, end_iso: str, limit: int) -> str:
+        params = self._calview_params(start_iso, end_iso, limit)
+        if not calendar_id:
+            return f"/me/calendarView?{params}"
+        if calendar_id.startswith("group:"):
+            _, gid = calendar_id.split(":", 1)
+            return f"/groups/{gid}/calendarView?{params}"
+        if calendar_id.startswith("shared:"):
+            parts = calendar_id.split(":", 2)
+            address = parts[1] if len(parts) > 1 else ""
+            cal = parts[2] if len(parts) > 2 else ""
+            if cal:
+                return f"/users/{address}/calendars/{cal}/calendarView?{params}"
+            return f"/users/{address}/calendarView?{params}"
+        if calendar_id.startswith("me:"):
+            calendar_id = calendar_id.split(":", 1)[1]
+        return f"/me/calendars/{calendar_id}/calendarView?{params}"
+
+    def _calendar_scope(self, calendar_id: str | None) -> list[str]:
+        if calendar_id and calendar_id.startswith("shared:"):
+            return SCOPES_MAIL_SHARED
+        if calendar_id and calendar_id.startswith("group:"):
+            return SCOPES_GROUPS
+        return SCOPES_MAIL
 
     def list_group_events(self, group_id: str, start_iso: str, end_iso: str,
                           *, limit: int = 50) -> list[dict]:
         """A group/team calendar view (needs Group.Read.All). Event ids are
         prefixed ``group:<groupId>:`` so detail/RSVP know the group context."""
-        data = self._get(
+        headers = self._calendar_headers()
+        items = self._get_all(
             f"/groups/{group_id}/calendarView?"
             f"{self._calview_params(start_iso, end_iso, limit)}",
-            SCOPES_GROUPS,
+            SCOPES_GROUPS, headers,
         )
-        events = self._events_from_json(data)
+        events = self._events_from_json({"value": items})
         for e in events:
             e["id"] = f"group:{group_id}:{e['id']}"
         return events
@@ -875,12 +818,13 @@ class GraphClient:
         """A shared/other mailbox's calendar view (needs Mail.ReadWrite.Shared,
         i.e. delegated calendar access). Event ids are prefixed
         ``shared:<address>:`` so detail routes back to that mailbox."""
-        data = self._get(
+        headers = self._calendar_headers()
+        items = self._get_all(
             f"/users/{address}/calendarView?"
             f"{self._calview_params(start_iso, end_iso, limit)}",
-            SCOPES_MAIL_SHARED,
+            SCOPES_MAIL_SHARED, headers,
         )
-        events = self._events_from_json(data)
+        events = self._events_from_json({"value": items})
         for e in events:
             e["id"] = f"shared:{address}:{e['id']}"
         return events
@@ -956,15 +900,23 @@ class GraphClient:
         """Create an event on the current source's calendar.
 
         ``me`` → ``/me/events``; ``shared`` → ``/users/{address}/events`` (needs
-        Calendars.ReadWrite.Shared). Times are ISO-8601; a trailing ``Z`` is
-        dropped and the slot is sent as UTC. ``online=True`` makes it a Teams
-        meeting — Graph provisions the meeting and fills ``onlineMeeting.joinUrl``
-        on the returned event. Group/team calendars are read-only here (the
-        Calendar view doesn't offer New there)."""
+        Calendars.ReadWrite.Shared). ``online=True`` makes it a Teams meeting —
+        Graph provisions the meeting and fills ``onlineMeeting.joinUrl`` on the
+        returned event. Group/team calendars are read-only here (the Calendar
+        view doesn't offer New there)."""
+        tz = self._local_tz()
+
+        def _slot(iso: str) -> dict:
+            # The editor sends a UTC ISO, but Graph stores wall-clock time + tz.
+            dt = datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone()
+            if all_day:
+                return {"dateTime": dt.strftime("%Y-%m-%dT00:00:00"), "timeZone": tz}
+            return {"dateTime": dt.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": tz}
+
         event = {
             "subject": subject,
-            "start": {"dateTime": start_iso.rstrip("Z"), "timeZone": "UTC"},
-            "end": {"dateTime": end_iso.rstrip("Z"), "timeZone": "UTC"},
+            "start": _slot(start_iso),
+            "end": _slot(end_iso),
             "isAllDay": all_day,
         }
         if online:
@@ -989,10 +941,18 @@ class GraphClient:
         """Edit an existing event (PATCH). Group/team events are read-only."""
         if event_id.startswith("group:"):
             raise GraphError("Group events can't be edited from here.")
+        tz = self._local_tz()
+
+        def _slot(iso: str) -> dict:
+            dt = datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone()
+            if all_day:
+                return {"dateTime": dt.strftime("%Y-%m-%dT00:00:00"), "timeZone": tz}
+            return {"dateTime": dt.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": tz}
+
         event: dict = {
             "subject": subject,
-            "start": {"dateTime": start_iso.rstrip("Z"), "timeZone": "UTC"},
-            "end": {"dateTime": end_iso.rstrip("Z"), "timeZone": "UTC"},
+            "start": _slot(start_iso),
+            "end": _slot(end_iso),
             "isAllDay": all_day,
         }
         # PATCH leaves omitted fields untouched — so an empty body/location keeps
@@ -1035,14 +995,39 @@ class GraphClient:
         })
 
     @staticmethod
+    def _local_tz() -> str:
+        """Best-effort local IANA timezone name for Graph Prefer headers."""
+        import os
+        import time
+
+        if tz := os.environ.get("TZ"):
+            return tz
+        try:
+            from zoneinfo import ZoneInfo
+            tzinfo = datetime.now().astimezone().tzinfo
+            if isinstance(tzinfo, ZoneInfo):
+                return tzinfo.key
+        except Exception:  # noqa: BLE001
+            pass
+        return time.tzname[0] if time.daylight == 0 else time.tzname[1]
+
+    @classmethod
+    def _calendar_headers(cls) -> dict:
+        return {"Prefer": f'outlook.timezone="{cls._local_tz()}"'}
+
+    @staticmethod
     def _events_from_json(data: dict) -> list[dict]:
         out = []
         for e in data.get("value", []):
+            start = e.get("start", {})
+            end = e.get("end", {})
             out.append({
                 "id": e["id"],
                 "subject": e.get("subject", "(no title)"),
-                "start": e.get("start", {}).get("dateTime", ""),
-                "end": e.get("end", {}).get("dateTime", ""),
+                "start": start.get("dateTime", ""),
+                "end": end.get("dateTime", ""),
+                "start_tz": start.get("timeZone", ""),
+                "end_tz": end.get("timeZone", ""),
                 "location": (e.get("location") or {}).get("displayName", ""),
                 "all_day": e.get("isAllDay", False),
                 # none|organizer|tentativelyAccepted|accepted|declined|notResponded
@@ -1120,7 +1105,7 @@ class GraphClient:
         else:
             name = "Chat"
         lmp = c.get("lastMessagePreview") or {}
-        preview = _strip_html((lmp.get("body") or {}).get("content", ""))
+        preview = strip_html((lmp.get("body") or {}).get("content", ""))
         last_at = lmp.get("createdDateTime", "")
         # Unread only when we have a read marker AND the last message is newer
         # than it (compared at second precision to dodge fractional-second
@@ -1190,7 +1175,7 @@ class GraphClient:
                 user = (m.get("from") or {}).get("user") or {}
                 mine = bool(user.get("id")) and user.get("id") == me
                 body = m.get("body") or {}
-                text = (_strip_html(body.get("content", ""))
+                text = (strip_html(body.get("content", ""))
                         if body.get("contentType") == "html"
                         else body.get("content", "")).strip()
                 when = m.get("createdDateTime", "")
@@ -1232,12 +1217,12 @@ class GraphClient:
         body = m.get("body") or {}
         content = body.get("content", "")
         is_html = body.get("contentType") == "html"
-        reply_to, attachments = _split_attachments(m)
+        reply_to, attachments = split_attachments(m)
         # Strip the reply placeholder so the quoted text doesn't pollute the body
         # (we render the quote separately from ``reply_to``).
         if is_html:
-            content = _strip_reply_placeholder(content)
-        text = _strip_html(content) if is_html else content
+            content = strip_reply_placeholder(content)
+        text = strip_html(content) if is_html else content
         # Inline images (pasted screenshots, GIFs) live as <img> in the HTML body
         # via hosted contents. Resolve relative src= to the absolute, auth-gated
         # hosted-content URL so we can fetch + thumbnail them.
@@ -1263,7 +1248,7 @@ class GraphClient:
         return {
             "id": m["id"],
             "text": text,
-            "markup": _html_to_pango(content) if is_html else "",
+            "markup": html_to_pango(content) if is_html else "",
             "from": html.unescape(user.get("displayName", "") or ""),
             "sent": m.get("createdDateTime", ""),
             "is_mine": bool(user.get("id")) and user.get("id") == me_id,
@@ -1338,12 +1323,7 @@ class GraphClient:
             {"body": {"contentType": "text", "content": text}}, SCOPES_CHAT)
 
     def set_reaction(self, chat_id: str, message_id: str, emoji: str) -> None:
-        """Add a reaction to a chat message.
-
-        The reaction endpoints live under ``/chats/{id}`` (NOT ``/me/chats/{id}``
-        — that path 404s "API not supported"), and v1.0 wants the actual emoji
-        *Unicode* character as ``reactionType`` (the old named types like ``like``
-        are rejected: "Unicode 'like' … is not supported")."""
+        """Add a Unicode emoji reaction to a chat message."""
         self._post(f"/chats/{chat_id}/messages/{message_id}/setReaction",
                    {"reactionType": emoji}, SCOPES_CHAT)
 
@@ -1557,13 +1537,13 @@ class GraphClient:
                 for hit in container.get("hits", []):
                     r = hit.get("resource", {})
                     sender = ((r.get("from") or {}).get("user") or {})
-                    summary = hit.get("summary") or _strip_html(
+                    summary = hit.get("summary") or strip_html(
                         (r.get("body") or {}).get("content", ""))
                     out.append({
                         "chat_id": r.get("chatId", ""),
                         "message_id": r.get("id", ""),
                         "from": html.unescape(sender.get("displayName", "") or ""),
-                        "snippet": _strip_html(summary),
+                        "snippet": strip_html(summary),
                         "sent": r.get("createdDateTime", ""),
                     })
         return out
@@ -1636,10 +1616,10 @@ class GraphClient:
         body = m.get("body") or {}
         content = body.get("content", "")
         is_html = body.get("contentType") == "html"
-        reply_to, attachments = _split_attachments(m)
+        reply_to, attachments = split_attachments(m)
         if is_html:
-            content = _strip_reply_placeholder(content)
-        text = _strip_html(content) if is_html else content
+            content = strip_reply_placeholder(content)
+        text = strip_html(content) if is_html else content
         # Inline images live as <img> in the HTML body via hosted contents;
         # resolve relative src= to the absolute, auth-gated channel URL.
         if is_html and "<img" in content.lower():
@@ -1664,7 +1644,7 @@ class GraphClient:
             "id": m["id"],
             "subject": html.unescape(m.get("subject") or ""),
             "text": text,
-            "markup": _html_to_pango(content) if is_html else "",
+            "markup": html_to_pango(content) if is_html else "",
             "from": html.unescape(user.get("displayName", "") or ""),
             "sent": m.get("createdDateTime", ""),
             "is_mine": bool(user.get("id")) and user.get("id") == me_id,
@@ -1696,11 +1676,11 @@ class GraphClient:
         """The team (group) OneNote notebooks: ``[{id, name}]``. Group notebooks
         require ``Notes.ReadWrite.All`` (the non-".All" Notes scope can't reach
         them)."""
-        data = self._get(
+        items = self._get_all(
             f"/groups/{team_id}/onenote/notebooks?$select=id,displayName",
             SCOPES_NOTES)
         return [{"id": n["id"], "name": n.get("displayName") or "Notebook"}
-                for n in data.get("value", []) if n.get("id")]
+                for n in items if n.get("id")]
 
     def list_note_sections(self, team_id: str,
                            notebook_id: str = "") -> list[dict]:
@@ -1710,21 +1690,21 @@ class GraphClient:
             path = f"/groups/{team_id}/onenote/notebooks/{notebook_id}/sections"
         else:
             path = f"/groups/{team_id}/onenote/sections"
-        data = self._get(f"{path}?$select=id,displayName", SCOPES_NOTES)
+        items = self._get_all(f"{path}?$select=id,displayName", SCOPES_NOTES)
         return [{"id": s["id"], "name": s.get("displayName") or "Section"}
-                for s in data.get("value", []) if s.get("id")]
+                for s in items if s.get("id")]
 
     def list_note_pages(self, team_id: str, section_id: str, *,
                         limit: int = 50) -> list[dict]:
         """Pages in a section, newest first:
         ``[{id, title, web_url, last_at}]``."""
-        data = self._get(
+        items = self._get_all(
             f"/groups/{team_id}/onenote/sections/{section_id}/pages"
             "?$select=id,title,links,lastModifiedDateTime"
             f"&$top={limit}&$orderby=lastModifiedDateTime%20desc",
             SCOPES_NOTES)
         out = []
-        for p in data.get("value", []):
+        for p in items:
             if not p.get("id"):
                 continue
             links = p.get("links") or {}

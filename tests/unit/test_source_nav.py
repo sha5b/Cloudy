@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Shahab Nedaei
-"""Pin / mute / scope-error helpers used by the Mail/Calendar/Chat views."""
 
 import unittest
 

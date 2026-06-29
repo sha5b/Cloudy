@@ -14,6 +14,7 @@ from gettext import gettext as _
 
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
+from .attachments import save_bytes_dialog
 from .imaging import thumbnail_texture
 
 _MAX_EDGE = 2200  # cap the decoded texture so huge images stay light to render
@@ -135,23 +136,17 @@ class ImageWindow(Adw.Window):
 
     # -- download ---------------------------------------------------------
     def _save(self) -> None:
-        from .source_nav import local_initial_folder
+        def on_done(error):
+            if error:
+                self._toast(error)
 
-        dialog = Gtk.FileDialog(title=_("Save"), initial_name=self._name)
-        folder = local_initial_folder()
-        if folder is not None:
-            dialog.set_initial_folder(folder)
-        dialog.save(self, None, self._on_save)
+        save_bytes_dialog(self, self._data, self._name, on_done)
 
-    def _on_save(self, dialog, result) -> None:
-        try:
-            gfile = dialog.save_finish(result)
-        except GLib.Error:
-            return  # cancelled
-        if gfile is None:
-            return
-        try:
-            gfile.replace_contents(self._data, None, False,
-                                   Gio.FileCreateFlags.NONE, None)
-        except GLib.Error:
-            pass
+    def _toast(self, message: str) -> None:
+        """Best-effort toast on the parent window or as a fallback print."""
+        app = self._parent.get_application() if self._parent else None
+        win = app.props.active_window if app else None
+        if win is not None and hasattr(win, "add_toast"):
+            win.add_toast(message)
+        else:
+            print(f"[media-window] {message}")

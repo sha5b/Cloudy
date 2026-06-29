@@ -12,16 +12,7 @@ _ANGLE_RE = re.compile(r"^(.*?)<([^>]+)>\s*$")
 
 
 def esc(text: str) -> str:
-    """Escape text for Adw/Gtk widgets that parse Pango markup in titles.
-
-    Without this, a literal '&' or '<' in a name (e.g. "60_R&D") breaks the
-    markup parser and the label renders blank.
-
-    Only ``& < >`` are escaped — the three characters that actually break markup
-    in element *text*. We deliberately don't use ``GLib.markup_escape_text``,
-    which also turns ``'``/``"`` into ``&apos;``/``&quot;``; Pango's markup parser
-    doesn't decode those entities, so "Couldn't" would render as "Couldn&apos;t".
-    """
+    """Escape ``& < >`` for Pango markup labels."""
     return ((text or "").replace("&", "&amp;").replace("<", "&lt;")
             .replace(">", "&gt;"))
 

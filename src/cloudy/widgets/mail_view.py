@@ -25,6 +25,7 @@ from .source_nav import (
     is_pinned,
     is_scope_error,
     message_row,
+    patch_listbox,
     present_add_shared_dialog,
     run_async,
     toggle_pin,
@@ -526,21 +527,33 @@ class MailView(Adw.Bin):
         return False
 
     def _render(self, messages) -> None:
-        self._messages_by_id = {}
-        self._rows_by_id = {}
-        self._more_row = None  # dropped by _clear(); rebuilt by _sync_more_row()
+        if self._more_row is not None:
+            self._list.remove(self._more_row)
+            self._more_row = None
         if not messages:
+            self._messages_by_id = {}
+            self._rows_by_id = {}
             self._set_placeholder(
                 _("No messages match “%s”.") % self._search_query
                 if self._search_query else _("This folder is empty."))
             self._has_data = False
             return
-        self._clear()
-        for msg in messages:
-            row = self._mail_row(msg)
-            self._list.append(row)
-            self._messages_by_id[msg["id"]] = msg
-            self._rows_by_id[msg["id"]] = row
+        if not self._has_data:
+            clear_listbox(self._list)
+        selected = [r._mid for r in self._list.get_selected_rows()
+                    if getattr(r, "_mid", None)]
+
+        def factory(msg):
+            return self._mail_row(msg)
+
+        def update(row, msg):
+            self._update_mail_row(row, msg)
+
+        self._rows_by_id = patch_listbox(
+            self._list, messages, lambda m: m["id"], factory, update,
+            selection=selected,
+        )
+        self._messages_by_id = {m["id"]: m for m in messages}
         self._has_data = True
         self._sync_more_row()
 
@@ -698,63 +711,114 @@ class MailView(Adw.Bin):
 
     # -- a single email row (plain Gtk.Labels: no markup parsing) ---------
     def _mail_row(self, msg) -> Gtk.ListBoxRow:
+        row = Gtk.ListBoxRow(activatable=True)
+        self._update_mail_row(row, msg, create=True)
+        return row
+
+    def _update_mail_row(self, row: Gtk.ListBoxRow, msg: dict,
+                         create: bool = False) -> None:
         unread = not msg.get("is_read", True)
         sender = _oneline(sender_name(msg.get("from", ""))) or _("Unknown sender")
         subject = _oneline(msg.get("subject", "")) or _("(no subject)")
         preview = _oneline(msg.get("preview", ""))
 
-        row = Gtk.ListBoxRow(activatable=True)
         row._mid = msg["id"]
         row._search = f"{sender} {subject} {preview}".lower()
         row._unread = unread
 
-        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10,
-                       margin_top=8, margin_bottom=8, margin_start=12, margin_end=12)
-        row.set_child(hbox)
+        if create:
+            hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10,
+                           margin_top=8, margin_bottom=8, margin_start=12, margin_end=12)
+            row.set_child(hbox)
 
-        dot = Gtk.Image.new_from_icon_name(
-            "mail-unread-symbolic" if unread else "mail-read-symbolic"
-        )
-        dot.set_valign(Gtk.Align.CENTER)
-        if not unread:
-            dot.add_css_class("dim-label")
-        hbox.append(dot)
+            dot = Gtk.Image.new_from_icon_name(
+                "mail-unread-symbolic" if unread else "mail-read-symbolic"
+            )
+            dot.set_valign(Gtk.Align.CENTER)
+            if not unread:
+                dot.add_css_class("dim-label")
+            hbox.append(dot)
+            row._dot = dot
 
-        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True)
-        hbox.append(body)
+            body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True)
+            hbox.append(body)
 
-        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        body.append(top)
-        sender_lbl = Gtk.Label(label=sender, xalign=0, hexpand=True,
-                               ellipsize=Pango.EllipsizeMode.END)
-        sender_lbl.add_css_class("heading" if unread else "body")
-        top.append(sender_lbl)
-        time_lbl = Gtk.Label(label=short_time(msg.get("received", "")), xalign=1)
-        time_lbl.add_css_class("dim-label")
-        time_lbl.add_css_class("caption")
-        top.append(time_lbl)
+            top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            body.append(top)
+            sender_lbl = Gtk.Label(label=sender, xalign=0, hexpand=True,
+                                   ellipsize=Pango.EllipsizeMode.END)
+            sender_lbl.add_css_class("heading" if unread else "body")
+            top.append(sender_lbl)
+            row._sender_lbl = sender_lbl
+            time_lbl = Gtk.Label(label=short_time(msg.get("received", "")), xalign=1)
+            time_lbl.add_css_class("dim-label")
+            time_lbl.add_css_class("caption")
+            top.append(time_lbl)
+            row._time_lbl = time_lbl
 
-        subj_lbl = Gtk.Label(label=subject, xalign=0, ellipsize=Pango.EllipsizeMode.END)
-        if unread:
-            subj_lbl.add_css_class("heading")
-        body.append(subj_lbl)
+            subj_lbl = Gtk.Label(label=subject, xalign=0, ellipsize=Pango.EllipsizeMode.END)
+            if unread:
+                subj_lbl.add_css_class("heading")
+            body.append(subj_lbl)
+            row._subj_lbl = subj_lbl
 
-        if preview:
-            prev_lbl = Gtk.Label(label=preview, xalign=0, ellipsize=Pango.EllipsizeMode.END)
-            prev_lbl.add_css_class("dim-label")
-            prev_lbl.add_css_class("caption")
-            body.append(prev_lbl)
+            if preview:
+                prev_lbl = Gtk.Label(label=preview, xalign=0, ellipsize=Pango.EllipsizeMode.END)
+                prev_lbl.add_css_class("dim-label")
+                prev_lbl.add_css_class("caption")
+                body.append(prev_lbl)
+                row._prev_lbl = prev_lbl
+            else:
+                row._prev_lbl = None
 
-        if msg.get("important") or msg.get("starred"):
             flags = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2,
                             valign=Gtk.Align.CENTER)
-            if msg.get("important"):
-                flags.append(Gtk.Image.new_from_icon_name("mail-mark-important-symbolic"))
-            if msg.get("starred"):
-                flags.append(Gtk.Image.new_from_icon_name("starred-symbolic"))
+            row._flags = flags
             hbox.append(flags)
+        else:
+            row._dot.set_from_icon_name(
+                "mail-unread-symbolic" if unread else "mail-read-symbolic"
+            )
+            if unread:
+                row._dot.remove_css_class("dim-label")
+            else:
+                row._dot.add_css_class("dim-label")
+            row._sender_lbl.set_label(sender)
+            row._sender_lbl.set_css_classes(
+                ["heading" if unread else "body"])
+            row._time_lbl.set_label(short_time(msg.get("received", "")))
+            row._subj_lbl.set_label(subject)
+            row._subj_lbl.set_css_classes(
+                ["heading"] if unread else [])
+            if preview:
+                if row._prev_lbl is None:
+                    prev_lbl = Gtk.Label(label=preview, xalign=0, ellipsize=Pango.EllipsizeMode.END)
+                    prev_lbl.add_css_class("dim-label")
+                    prev_lbl.add_css_class("caption")
+                    hbox = row.get_child()
+                    body = hbox.get_first_child().get_next_sibling()
+                    body.append(prev_lbl)
+                    row._prev_lbl = prev_lbl
+                else:
+                    row._prev_lbl.set_label(preview)
+                    row._prev_lbl.set_visible(True)
+            elif row._prev_lbl is not None:
+                row._prev_lbl.set_visible(False)
+            # Rebuild flags box.
+            child = row._flags.get_first_child()
+            while child is not None:
+                nxt = child.get_next_sibling()
+                row._flags.remove(child)
+                child = nxt
 
-        return row
+        if msg.get("important") or msg.get("starred"):
+            if msg.get("important"):
+                row._flags.append(Gtk.Image.new_from_icon_name("mail-mark-important-symbolic"))
+            if msg.get("starred"):
+                row._flags.append(Gtk.Image.new_from_icon_name("starred-symbolic"))
+            row._flags.set_visible(True)
+        else:
+            row._flags.set_visible(False)
 
     # -- open a message into the reading pane -----------------------------
     def _on_list_scrolled(self, adj) -> None:

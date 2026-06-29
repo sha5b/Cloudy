@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Shahab Nedaei
-"""Entry point: create and run the Adwaita application."""
 
 import os
 import sys
@@ -22,7 +21,6 @@ from .application import CloudyApplication
 
 
 def main(version: str = "0.0.0", app_id: str = "io.github.sha5b.Cloudy") -> int:
-    """Run the application. Returns the process exit code."""
     from .core.credentials import load_local_env
 
     load_local_env()  # pull CLOUDY_* secrets from ~/.config/cloudy/secrets.env

@@ -426,18 +426,21 @@ class CloudyWindow(Adw.ApplicationWindow):
                 ).sign_out()
         except Exception:  # noqa: BLE001 - clearing local token is best-effort
             pass
+        app.evict_account_client(account.id)
         account.signed_in = False
         self._registry.update(account)
         self.add_toast(_("Signed out. Sign in again to refresh permissions."))
         self._show_account(account)
 
     def _remove_account(self, account) -> None:
-        secrets = self.get_application().secrets
+        app = self.get_application()
+        secrets = app.secrets
         for kind in ("msal-cache", "google-token", "rclone-onedrive"):
             try:
                 secrets.clear(account.id, kind)
             except Exception:  # noqa: BLE001
                 pass
+        app.evict_account_client(account.id)
         self._registry.remove(account.id)
         self.content_nav.pop_to_tag("welcome")
         self.add_toast(_("Removed %s.") % account.display_name)

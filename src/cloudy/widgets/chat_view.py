@@ -20,8 +20,9 @@ from gettext import gettext as _
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 
 
+from .chat_avatar import build_avatar, refresh_presence
 from .format import esc, relative_time
-from .imaging import thumbnail_texture
+from .imaging import shrink_image_bytes, texture_from_png_bytes, thumbnail_texture
 from .source_nav import (
     SCOPE_HINT,
     action_row,
@@ -33,6 +34,7 @@ from .source_nav import (
     is_scope_error,
     local_initial_folder,
     message_row,
+    patch_listbox,
     run_async,
     toggle_mute,
     toggle_pin,
@@ -420,26 +422,32 @@ class ChatView(Adw.Bin):
         chats = self._all_chats
         if self._query:
             chats = [c for c in chats if self._query in (c.get("name", "") or "").lower()]
-        self._rows_by_id = {}
         if not self._all_chats:
+            self._rows_by_id = {}
             self._set_list_message(_("No conversations."))
             return
         if not chats:
+            self._rows_by_id = {}
             self._set_list_message(_("No chats match “%s”.") % self._query)
             return
-        clear_listbox(self._list)
-        for chat in chats:
-            row = self._chat_row(chat)
-            self._list.append(row)
-            self._rows_by_id[chat["id"]] = row
-        # Keep the open conversation highlighted after a live re-render (the row
-        # is a brand-new widget, so the previous selection is gone).
-        if self._chat_id is not None:
-            open_row = self._rows_by_id.get(self._chat_id)
-            if open_row is not None:
-                self._list.select_row(open_row)
+        if self._chats_more_row is not None:
+            self._list.remove(self._chats_more_row)
+            self._chats_more_row = None
+        selected = [r._chat_id for r in self._list.get_selected_rows()
+                    if getattr(r, "_chat_id", None)]
+
+        def factory(chat):
+            return self._chat_row(chat)
+
+        def update(row, chat):
+            self._update_chat_row(row, chat)
+
+        self._rows_by_id = patch_listbox(
+            self._list, chats, lambda c: c["id"], factory, update,
+            selection=selected,
+        )
+
         # "Load older conversations" — only when not filtering by a search query.
-        self._chats_more_row = None
         if not self._query and self._chats_next_token:
             self._chats_more_row = Gtk.ListBoxRow(activatable=True, selectable=False)
             self._chats_more_row._more_chats = True
@@ -453,6 +461,11 @@ class ChatView(Adw.Bin):
         return lbl
 
     def _chat_row(self, chat) -> Gtk.ListBoxRow:
+        row = Gtk.ListBoxRow(activatable=True)
+        self._update_chat_row(row, chat)
+        return row
+
+    def _update_chat_row(self, row: Gtk.ListBoxRow, chat: dict) -> None:
         # Unread if Graph's read-receipt says so OR the notifier flagged a new
         # message (the source of the red account badge) — so the badge count and
         # the bold rows always agree. Cleared once opened this session.
@@ -461,13 +474,19 @@ class ChatView(Adw.Bin):
         unread = ((bool(chat.get("unread")) or flagged)
                   and chat["id"] not in self._read_ids)
         is_meeting = chat.get("kind") == "meeting"
-        row = Gtk.ListBoxRow(activatable=True)
         row._chat_id = chat["id"]
         row._chat_name = chat.get("name", "")
+
+        # Rebuild the row content so avatars/labels stay correct; the row widget
+        # itself is reused by patch_listbox to avoid recreating the whole list.
+        child = row.get_child()
+        if child is not None:
+            row.set_child(None)
+
         outer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10,
                         margin_top=8, margin_bottom=8, margin_start=12, margin_end=12)
-        avatar = self._avatar(chat, is_meeting, unread)
-        row._avatar_overlay = avatar  # so presence updates can patch its dot
+        avatar = build_avatar(chat, is_meeting, unread, self._presence)
+        row._avatar_overlay = avatar
         outer.append(avatar)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True,
@@ -501,93 +520,6 @@ class ChatView(Adw.Bin):
             box.append(prev)
         outer.append(box)
         row.set_child(outer)
-        return row
-
-    def _avatar(self, chat, is_meeting: bool, unread: bool) -> Gtk.Widget:
-        """A round avatar (Adw.Avatar auto-centers initials) with a Teams-style
-        presence dot (bottom-right) and, when unread, an accent dot (top-right
-        so it doesn't collide with presence)."""
-        overlay = Gtk.Overlay(valign=Gtk.Align.CENTER)
-        face = Adw.Avatar(size=38)
-        # Flat avatar: kill Adw.Avatar's glossy per-name gradient, then give each
-        # person ONE flat solid colour picked deterministically from our own
-        # palette (so the same contact always gets the same calm, flat fill).
-        face.add_css_class("cloudy-avatar-flat")
-        if is_meeting:
-            face.set_show_initials(False)
-            face.set_icon_name("x-office-calendar-symbolic")
-        else:
-            face.set_show_initials(True)
-            face.set_text(chat.get("name", "") or "?")
-            face.add_css_class(f"cloudy-avatar-c{self._avatar_color_index(chat)}")
-        overlay.set_child(face)
-        overlay._presence_dot = None  # tracked so presence updates swap it in place
-        # Presence dot — only for 1:1 chats (a single "other" member whose
-        # availability we know). Groups/meetings show a member count instead.
-        dot = self._presence_dot_for(chat)
-        if dot is not None:
-            dot.set_halign(Gtk.Align.END)
-            dot.set_valign(Gtk.Align.END)
-            overlay.add_overlay(dot)
-            overlay._presence_dot = dot
-        if unread:
-            udot = Gtk.Image.new_from_icon_name("media-record-symbolic")
-            udot.set_pixel_size(11)
-            udot.add_css_class("cloudy-unread-dot")
-            udot.set_halign(Gtk.Align.END)
-            udot.set_valign(Gtk.Align.START)
-            overlay.add_overlay(udot)
-        return overlay
-
-    # -- avatar colour ----------------------------------------------------
-    # Flat per-person palette (CSS classes cloudy-avatar-c0…cN in style.css).
-    _AVATAR_COLORS = 8
-
-    def _avatar_color_index(self, chat) -> int:
-        """Pick a stable palette slot for a contact — a plain byte-sum hash so
-        the same person always gets the same flat colour across launches
-        (Python's built-in hash() is salted per process, so we avoid it)."""
-        key = (chat.get("name") or chat.get("id") or "?")
-        return sum(key.encode("utf-8")) % self._AVATAR_COLORS
-
-    # -- presence ---------------------------------------------------------
-    # Graph availability values → (css state class, human label). A known-but-
-    # unmapped value (and Offline/Unknown) falls back to a grey "offline" dot,
-    # so once presence is fetched a 1:1 chat always shows *some* indicator.
-    _PRESENCE = {
-        "Available": ("available", _("Available")),
-        "AvailableIdle": ("available", _("Available")),
-        "Away": ("away", _("Away")),
-        "BeRightBack": ("away", _("Be right back")),
-        "Busy": ("busy", _("Busy")),
-        "BusyIdle": ("busy", _("Busy")),
-        "DoNotDisturb": ("dnd", _("Do not disturb")),
-        "Offline": ("offline", _("Offline")),
-        "PresenceUnknown": ("offline", _("Offline")),
-        "OffWork": ("offline", _("Off work")),
-    }
-
-    def _presence_dot_for(self, chat) -> Gtk.Widget | None:
-        if chat.get("kind") not in ("oneOnOne", ""):
-            return None
-        ids = chat.get("member_ids") or []
-        if len(ids) != 1:
-            return None
-        avail = (self._presence.get(ids[0]) or {}).get("availability", "")
-        return self._presence_dot(avail)
-
-    def _presence_dot(self, availability: str) -> Gtk.Widget | None:
-        if not availability:
-            return None  # presence not fetched yet — no dot
-        state, label = self._PRESENCE.get(availability, ("offline", availability))
-        # A CSS-drawn circle (a sized box with a rounded background + ring) — no
-        # dependency on a symbolic icon being present in the runtime theme.
-        dot = Gtk.Box(halign=Gtk.Align.END, valign=Gtk.Align.END)
-        dot.set_size_request(13, 13)
-        dot.add_css_class("cloudy-presence")
-        dot.add_css_class(f"cloudy-presence-{state}")
-        dot.set_tooltip_text(label)
-        return dot
 
     def _refresh_presence(self) -> None:
         """Batch-fetch presence for everyone in the visible 1:1 chats, then
@@ -652,16 +584,7 @@ class ChatView(Adw.Bin):
             overlay = getattr(row, "_avatar_overlay", None)
             if chat is None or overlay is None:
                 continue
-            old = getattr(overlay, "_presence_dot", None)
-            if old is not None:
-                overlay.remove_overlay(old)
-                overlay._presence_dot = None
-            dot = self._presence_dot_for(chat)
-            if dot is not None:
-                dot.set_halign(Gtk.Align.END)
-                dot.set_valign(Gtk.Align.END)
-                overlay.add_overlay(dot)
-                overlay._presence_dot = dot
+            refresh_presence(overlay, chat, self._presence)
         return None
 
     def _start_presence_timer(self) -> None:
@@ -907,7 +830,6 @@ class ChatView(Adw.Bin):
         if error:
             self._window.add_toast(_("Couldn't update the group: %s") % friendly_error(error))
             return False
-        # Refresh the roster + chat list (name/members may have changed).
         self._cache().invalidate(prefix=f"{self._account.id}:chat-members:{chat_id}")
         self._cache().invalidate(prefix=f"{self._account.id}:chats")
         self._load_members(chat_id)
@@ -1788,28 +1710,8 @@ class ChatView(Adw.Bin):
         downscaled PNG — a format Graph always accepts, small enough to keep the
         whole message under the per-message size limit. Falls back to the
         original bytes if re-encoding fails for any reason."""
-        from gi.repository import GdkPixbuf
-
         try:
-            loader = GdkPixbuf.PixbufLoader()
-
-            def _on_size(ldr, w, h):
-                if w <= 0 or h <= 0:
-                    return
-                scale = min(1.0, max_edge / w, max_edge / h)
-                if scale < 1.0:
-                    ldr.set_size(max(1, int(w * scale)), max(1, int(h * scale)))
-
-            loader.connect("size-prepared", _on_size)
-            loader.write(data)
-            loader.close()
-            pix = loader.get_pixbuf()
-            if pix is None:
-                return data, "image/png"
-            ok, buf = pix.save_to_bufferv("png", [], [])
-            if not ok:
-                return data, "image/png"
-            return bytes(buf), "image/png"
+            return shrink_image_bytes(data, max_edge), "image/png"
         except Exception:  # noqa: BLE001 - never let a re-encode block a send
             return data, "image/png"
 
@@ -1838,16 +1740,20 @@ class ChatView(Adw.Bin):
             from .clients import build_account_client
 
             client = build_account_client(self._window.get_application(), self._account)
-            return client.fetch_bytes(url)
+            data = client.fetch_bytes(url)
+            # Decode/scale off the GTK thread — Pillow is thread-safe; GDK is not.
+            png = shrink_image_bytes(data, self._THUMB_MAX)
+            return data, png
 
-        def done(data, error):
-            if error or not data:
+        def done(result, error):
+            if error or not result:
                 placeholder.get_last_child().set_text(
                     _("Image unavailable") if error else _("Image"))
                 placeholder.set_tooltip_text(str(error) if error else None)
                 return False
+            data, png = result
             try:
-                texture = thumbnail_texture(data, self._THUMB_MAX)
+                texture = texture_from_png_bytes(png)
             except Exception as exc:  # noqa: BLE001 - undecodable payload → keep label
                 placeholder.get_last_child().set_text(_("Image"))
                 placeholder.set_tooltip_text(str(exc))
@@ -1875,7 +1781,8 @@ class ChatView(Adw.Bin):
         Send."""
         data = att.get("data")
         try:
-            texture = thumbnail_texture(data, self._THUMB_MAX)
+            png = shrink_image_bytes(data, self._THUMB_MAX)
+            texture = texture_from_png_bytes(png)
         except Exception:  # noqa: BLE001 - undecodable → skip the thumbnail
             return None
         return self._picture_for(texture, data, att.get("name") or "image")
@@ -2366,14 +2273,17 @@ class ChatView(Adw.Bin):
         # formatting (**bold** / _italic_); otherwise a cheap plain-text send.
         rich = bool(images or files or mentions or self._has_markdown(text))
 
+        # Prepare outgoing images on the GTK main thread: GdkPixbuf is not
+        # thread-safe and must not be touched from the worker thread.
+        send_images = None
+        if rich and images:
+            send_images = [self._image_for_send(d) for d, _c in images]
+
         def work():
             from .clients import build_account_client
 
             client = build_account_client(self._window.get_application(), self._account)
             if rich:
-                # Normalise each image (downscaled PNG) so Graph accepts the
-                # payload — multiple full-res images otherwise 400.
-                send_images = [self._image_for_send(d) for d, _c in images]
                 file_atts = [client.upload_chat_file(name, data, ctype)
                              for data, ctype, name in files]
                 content, mention_array = self._compose_html(text, mentions)

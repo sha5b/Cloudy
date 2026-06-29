@@ -52,10 +52,16 @@ def _parse_dt(value: str) -> datetime | None:
     try:
         dt = datetime.fromisoformat(txt.replace("Z", "+00:00"))
     except ValueError:
-        # Graph sometimes returns 7-digit fractional seconds; trim and retry.
-        head = txt.split(".", 1)[0]
+        # Graph sometimes returns 7-digit fractional seconds; trim and retry,
+        # preserving any trailing timezone offset.
+        head, _, tail = txt.partition(".")
+        tz = ""
+        for marker in ("+", "-"):
+            if marker in tail:
+                tz = marker + tail.split(marker, 1)[1]
+                break
         try:
-            dt = datetime.fromisoformat(head)
+            dt = datetime.fromisoformat(head + tz)
         except ValueError:
             return None
     if dt.tzinfo is None:
@@ -64,6 +70,13 @@ def _parse_dt(value: str) -> datetime | None:
 
 
 class NotificationManager:
+    # Bound how many IDs we remember per account to prevent unbounded growth in
+    # long-running background sessions.
+    _MAX_SEEN_MAIL = 2000
+    _MAX_SEEN_EVENTS = 500
+    _MAX_SEEN_CHAT = 500
+    _MAX_NOTIFIED_EVENTS = 500
+
     def __init__(self, app):
         self._app = app
         self._seen_mail: dict[str, set] = {}      # account id -> {message id}
@@ -76,19 +89,14 @@ class NotificationManager:
         self._digest: dict[str, dict] = {}        # account id -> pending tier-2 summary
         self._timer = None
         self._digest_timer = None
+        self._prime_source = None
 
     def unread_count(self, account_id: str) -> int:
         """Last-polled inbox unread count for an account (0 until first poll)."""
         return self._unread.get(account_id, 0)
 
     def mark_mail_read(self, account_id: str, message_id: str | None = None) -> None:
-        """Drop the cached inbox unread count by one when the user reads (or
-        deletes) a message, so the sidebar/tab mail badge updates immediately
-        instead of waiting for the next poll. Floors at zero; the next poll
-        re-syncs the exact figure (mirrors how mark_chat_read keeps the chat
-        badge live). Also withdraws that message's desktop notification — GNOME
-        does NOT auto-clear it when you read the mail, so a stale banner would
-        otherwise linger in the tray."""
+        """Lower the cached inbox unread count and withdraw the desktop banner."""
         if message_id:
             try:
                 self._app.withdraw_notification(f"mail-{account_id}-{message_id}")
@@ -130,10 +138,29 @@ class NotificationManager:
         # Prime soon (baseline, no notifications), then poll on a steady cadence.
         # The priming tick is one-shot — return False so it doesn't keep firing
         # every _FIRST_POLL_SECONDS alongside the steady timer (doubling traffic).
-        GLib.timeout_add_seconds(_FIRST_POLL_SECONDS, self._prime_once)
+        self._prime_source = GLib.timeout_add_seconds(_FIRST_POLL_SECONDS, self._prime_once)
         self._timer = GLib.timeout_add_seconds(_POLL_SECONDS, self._tick)
         self._digest_timer = GLib.timeout_add_seconds(
             _DIGEST_SECONDS, self._flush_digest)
+
+    def stop(self) -> None:
+        """Remove all timers and release the GSound context. Called from
+        Application.do_shutdown() to avoid leaking background work."""
+        if self._prime_source is not None:
+            GLib.source_remove(self._prime_source)
+            self._prime_source = None
+        if self._timer is not None:
+            GLib.source_remove(self._timer)
+            self._timer = None
+        if self._digest_timer is not None:
+            GLib.source_remove(self._digest_timer)
+            self._digest_timer = None
+        if hasattr(self, "_gsound") and self._gsound is not None:
+            try:
+                self._gsound.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._gsound = None
 
     def _prime_once(self) -> bool:
         self._tick()
@@ -164,9 +191,6 @@ class NotificationManager:
     # relevance tier. Badges/unread counts always update; only the *banner* is
     # suppressed, so nothing is lost — it's just not interruptive.
     def _gnome_notif_settings(self):
-        """GNOME's notification settings (for the DND/show-banners flag), or None
-        when that schema isn't installed (e.g. inside a minimal Flatpak runtime).
-        Looked up once and cached; a None result degrades to 'not in DND'."""
         if not hasattr(self, "_gnome_notif"):
             self._gnome_notif = None
             try:
@@ -206,10 +230,7 @@ class NotificationManager:
         return self._system_dnd_active() or self._quiet_hours_active()
 
     def _allowed(self, tier: int) -> bool:
-        """Whether a banner of the given relevance tier (1 = direct/important,
-        2 = ambient) should interrupt *immediately* right now. At any level other
-        than 'all', tier-2 is held back — to a digest ('digest') or to the badge
-        only ('priority'); see ``_digest_active`` and ``_on_chat``/``_on_mail``."""
+        """Whether a banner of the given relevance tier may show now."""
         if not self._enabled() or self._focus_active():
             return False
         if tier > 1 and self._str("notify-level", "all") != "all":
@@ -332,11 +353,13 @@ class NotificationManager:
         ids = {m.get("id") for m in messages}
         if first_time:  # baseline only: learn current inbox without notifying
             seen.update(ids)
+            self._trim_set(seen, self._MAX_SEEN_MAIL)
             self._primed.add(account.id)
             return False
         fresh = [m for m in messages
                  if m.get("id") not in seen and not m.get("is_read", True)]
         seen.update(ids)
+        self._trim_set(seen, self._MAX_SEEN_MAIL)
         # Live-update the open mail list and Activity feed (like the badge, this
         # happens even when the banner is suppressed by DND/quiet hours — nothing
         # is interruptive).
@@ -404,6 +427,7 @@ class NotificationManager:
         first_time = f"cal:{account.id}" not in self._primed
         new_ids = ids - seen
         seen.update(ids)
+        self._trim_set(seen, self._MAX_SEEN_EVENTS)
         if first_time:
             self._primed.add(f"cal:{account.id}")
         elif new_ids:
@@ -430,6 +454,7 @@ class NotificationManager:
                 if self._allowed(1):
                     self._notify_event(account, ev, start)
                 self._notified_events.add(key)
+                self._trim_set(self._notified_events, self._MAX_NOTIFIED_EVENTS)
         return False
 
     def _notify_event(self, account, ev, start) -> None:
@@ -498,6 +523,7 @@ class NotificationManager:
         if first_time:  # baseline only: learn current chats without notifying
             for c in chats:
                 seen[c["id"]] = c.get("last_at", "")
+            self._trim_chat_seen(seen, self._MAX_SEEN_CHAT)
             self._primed.add(f"chat:{account.id}")
             return False
         unread = self._chat_unread.setdefault(account.id, set())
@@ -524,6 +550,7 @@ class NotificationManager:
                 to_notify.append((c, tier))
             elif tier > 1 and self._digest_active():
                 self._enqueue_chat(account, c)
+        self._trim_chat_seen(seen, self._MAX_SEEN_CHAT)
         if badge_changed:
             self._push_chat_badge(account.id)
         # Live-update the open chat list (reorder + unread marks) on any change,
@@ -552,6 +579,31 @@ class NotificationManager:
         note.set_default_action(
             Gio.Action.print_detailed_name("app.notify-open-chat", payload))
         self._app.send_notification(f"chat-{account.id}-{chat['id']}", note)
+
+    @staticmethod
+    def _trim_set(s: set, max_size: int) -> None:
+        """Drop oldest items from a set to keep it bounded.
+
+        Sets don't remember insertion order, so we fall back to an arbitrary
+        deterministic subset when over capacity. The cap is large enough that
+        in practice we won't drop live items prematurely."""
+        if len(s) <= max_size:
+            return
+        # Keep the newest max_size items by sorting if possible, otherwise trim.
+        items = sorted(s)
+        excess = len(items) - max_size
+        if excess > 0:
+            s.difference_update(items[:excess])
+
+    @staticmethod
+    def _trim_chat_seen(seen: dict, max_size: int) -> None:
+        """Keep only the most recently touched chats in the seen map."""
+        if len(seen) <= max_size:
+            return
+        # Sort by last_at value (newest first) and drop the oldest entries.
+        items = sorted(seen.items(), key=lambda kv: kv[1], reverse=True)
+        seen.clear()
+        seen.update(items[:max_size])
 
     # -- thread plumbing --------------------------------------------------
     @staticmethod

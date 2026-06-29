@@ -92,8 +92,8 @@ class Microsoft365Module(
         return self._graph.list_calendars()
 
     def list_events(self, calendar_id: str, start, end) -> list:
-        # calendarView spans the default calendar; start/end are ISO-8601 UTC.
-        return self._graph.list_events(start, end)
+        # calendarView spans the selected calendar; start/end are ISO-8601 UTC.
+        return self._graph.list_events(start, end, calendar_id=calendar_id)
 
     # -- ChatCapability (Teams chats) -------------------------------------
     def list_chats(self) -> list:

@@ -11,6 +11,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-06-29
+
+### Added
+- Per-account API client cache in `CloudyApplication`, reused across Mail/Calendar/Chat views and evicted on sign-out/removal.
+- `patch_listbox()` helper for incremental list updates; Mail and Chat lists now refresh in place instead of rebuilding every row.
+- New unit-test coverage for client caching, OneDrive share-link path resolution, RFC 5545 iCalendar parsing, rclone provisioning trust model, and Graph calendar routing/timezones.
+
+### Fixed
+- **Microsoft 365 share links**: local paths are resolved back to the correct `(drive_id, relative_path)` via remembered mount records before asking Graph for a share link.
+- **Graph calendar timezone handling**: create/update events now send local wall-clock time with the local IANA timezone; `list_events` routes specific/shared/group calendars correctly and requests `Prefer: outlook.timezone`.
+- **Graph pagination**: OneNote notebooks/sections/pages now follow `@odata.nextLink`.
+- **iCalendar parser**: properly handles RFC 5545 escaping and quoted parameters.
+- **Google OAuth redirect receiver**: always shuts down the local HTTP server cleanly.
+- **Resource registration on older PyGObject**: the launcher now calls `_register()` when `register()` is unavailable.
+
+### Changed
+- **Provisioned rclone trust model**: pinned to `v1.74.3` with hard-coded SHA-256 sums for `amd64`/`arm64` so the download site cannot swap binaries undetected.
+- Refactored monoliths: extracted `graph_markup.py`, `file_browser_utils.py`, and `chat_avatar.py`; removed the unused `abraunegg.py` stub.
+- Cleaned up verbose/AI-generated docstrings and redundant comments across tests and source.
+
 ## [0.2.5] - 2026-06-21
 
 ### Added

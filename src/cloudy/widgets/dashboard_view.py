@@ -24,7 +24,7 @@ from ..modules.microsoft365.mounts import (
     sync_root,
 )
 from .event_window import EventDetailWindow
-from .file_browser import recent_changes
+from .file_browser_utils import recent_changes
 from .format import relative_time
 from .metrics import SPACE_L, SPACE_M
 from .month_grid import MonthGrid

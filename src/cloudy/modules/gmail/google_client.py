@@ -341,13 +341,7 @@ class GoogleClient:
                   address: str | None = None, cc=None, bcc=None, html: bool = False,
                   attachments=None, importance: str | None = None,
                   read_receipt: bool = False) -> None:
-        """Send a new message (Gmail always sends as the signed-in user; the
-        ``source``/``address`` args are accepted for a uniform client API).
-
-        ``read_receipt`` is accepted for API parity but not honoured: Gmail only
-        supports read receipts on Google Workspace with an admin policy, and the
-        consumer API has no equivalent — so the Mail composer offers the toggle
-        only for Microsoft accounts (see GraphClient.send_mail)."""
+        """Send a new message. ``read_receipt`` is accepted for API parity only."""
         raw = self._raw_message(to, subject, body, cc=cc, bcc=bcc, html=html,
                                 attachments=attachments, importance=importance)
         self._post(f"{GMAIL}/users/me/messages/send", {"raw": raw}, SCOPES_MAIL)
@@ -547,13 +541,23 @@ class GoogleClient:
             if a.get("self"):
                 response = a.get("responseStatus", "")
                 break
+        all_day = "date" in start
+        end_value = end.get("dateTime") or end.get("date", "")
+        if all_day and end_value:
+            # Google returns all-day end dates as exclusive; normalize to the
+            # last day the event actually occurs, matching the Graph convention.
+            from datetime import timedelta
+            try:
+                end_value = (datetime.fromisoformat(end_value) - timedelta(days=1)).date().isoformat()
+            except ValueError:
+                pass
         return {
             "id": e.get("id", ""),
             "subject": e.get("summary", "(no title)"),
             "start": start.get("dateTime") or start.get("date", ""),
-            "end": end.get("dateTime") or end.get("date", ""),
+            "end": end_value,
             "location": e.get("location", ""),
-            "all_day": "date" in start,
+            "all_day": all_day,
             "response": response,
             "online_url": e.get("hangoutLink", ""),
         }
@@ -680,10 +684,7 @@ class GoogleClient:
 
     # -- Chat (Google Chat — Workspace only) ------------------------------
     def list_chats(self, *, limit: int = 50) -> list[dict]:
-        """The user's Chat spaces (DMs + rooms). ``[{id, name, kind, ...}]``.
-
-        Google Chat is a Workspace product; consumer Gmail accounts have no
-        Chat API, so this raises a GoogleError the view shows as unavailable."""
+        """The user's Chat spaces (DMs + rooms)."""
         return self.list_chats_page(limit=limit)[0]
 
     def list_chats_page(self, *, limit: int = 50, page_token: str | None = None):
@@ -737,7 +738,7 @@ class GoogleClient:
             {"name": a.get("contentName") or "attachment",
              "url": a.get("downloadUri") or a.get("thumbnailUri") or "",
              "content_type": a.get("contentType", "")}
-            for a in (m.get("attachment") or [])
+            for a in (m.get("attachments") or m.get("attachment") or [])
         ]
         return {
             "id": m.get("name", ""),

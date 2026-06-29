@@ -30,6 +30,7 @@ class CloudyPreferences(Adw.PreferencesDialog):
         self._app = app
 
         self._account_rows = []
+        self._sync_rows = []  # (Adw.SwitchRow, account) for master-switch updates
         self._reg_handler = None
 
         self.add(self._general_page())
@@ -46,7 +47,6 @@ class CloudyPreferences(Adw.PreferencesDialog):
         )
         page.add(files)
 
-        # Mount location (the base folder).
         self._location_row = Adw.ActionRow(title=_("Mount location"))
         self._location_row.set_subtitle(self._mount_location_display())
         choose = Gtk.Button(label=_("Choose…"), valign=Gtk.Align.CENTER)
@@ -54,7 +54,6 @@ class CloudyPreferences(Adw.PreferencesDialog):
         self._location_row.add_suffix(choose)
         files.add(self._location_row)
 
-        # Mount layout: one shared folder vs. per-account folders.
         layout = Adw.ComboRow(title=_("Mount layout"))
         layout.set_subtitle(_("One folder for all, or a folder per account."))
         self._layout_values = ["one-folder", "individual"]
@@ -66,7 +65,6 @@ class CloudyPreferences(Adw.PreferencesDialog):
         layout.connect("notify::selected", self._on_layout_changed)
         files.add(layout)
 
-        # Cache mode.
         cache = Adw.ComboRow(title=_("File caching"))
         cache.set_subtitle(_("How much is kept on disk versus fetched on demand."))
         self._cache_values = ["full", "minimal"]
@@ -78,7 +76,6 @@ class CloudyPreferences(Adw.PreferencesDialog):
         cache.connect("notify::selected", self._on_cache_changed)
         files.add(cache)
 
-        # Sync type (the default an account uses when you enable file sync).
         sync = Adw.PreferencesGroup(
             title=_("Sync"),
             description=_(
@@ -97,6 +94,14 @@ class CloudyPreferences(Adw.PreferencesDialog):
         sync_type.set_selected(self._index_of("default-sync-type", self._sync_values))
         sync_type.connect("notify::selected", self._on_sync_type_changed)
         sync.add(sync_type)
+
+        offline_master = Adw.SwitchRow(
+            title=_("Offline sync"),
+            subtitle=_("Allow accounts to keep two-way offline copies."))
+        self._settings.bind("offline-sync-enabled", offline_master, "active",
+                            Gio.SettingsBindFlags.DEFAULT)
+        offline_master.connect("notify::active", self._on_offline_sync_toggled)
+        sync.add(offline_master)
 
         startup = Adw.PreferencesGroup(title=_("Startup"))
         page.add(startup)
@@ -238,6 +243,7 @@ class CloudyPreferences(Adw.PreferencesDialog):
         for row in self._account_rows:
             self._accounts_group.remove(row)
         self._account_rows = []
+        self._sync_rows = []
         registry = getattr(self._app, "registry", None)
         accounts = registry.accounts() if registry else []
         if not accounts:
@@ -340,13 +346,22 @@ class CloudyPreferences(Adw.PreferencesDialog):
 
     def _sync_row(self, account) -> Adw.SwitchRow:
         full = self._setting_str("default-sync-type") == "full"
-        sub = (_("Keep a two-way offline copy of this account's files")
-               if full else
-               _("Set Sync type to “Full sync” in General to enable"))
+        master = False
+        try:
+            master = self._settings.get_boolean("offline-sync-enabled")
+        except Exception:  # noqa: BLE001
+            pass
+        if not master:
+            sub = _("Offline sync is disabled in General")
+        elif full:
+            sub = _("Keep a two-way offline copy of this account's files")
+        else:
+            sub = _("Set Sync type to “Full sync” in General to enable")
         sync_row = Adw.SwitchRow(title=_("Sync files offline"), subtitle=sub)
-        sync_row.set_sensitive(full and account.signed_in)
-        sync_row.set_active(bool(getattr(account, "full_sync", False)) and full)
+        sync_row.set_sensitive(full and master and account.signed_in)
+        sync_row.set_active(bool(getattr(account, "full_sync", False)) and full and master)
         sync_row.connect("notify::active", self._on_sync_toggled, account)
+        self._sync_rows.append((sync_row, account))
         return sync_row
 
     def _mount_location_row(self, account) -> Adw.ActionRow:
@@ -465,6 +480,23 @@ class CloudyPreferences(Adw.PreferencesDialog):
         self._settings.set_string("default-sync-type", self._sync_values[combo.get_selected()])
         self._rebuild_accounts()  # refresh the per-account sync toggles' state
 
+    def _on_offline_sync_toggled(self, _switch, _param) -> None:
+        self._rebuild_accounts()  # refresh the per-account sync toggles' state
+
+    def _refresh_sync_row_sensitivity(self) -> None:
+        full = self._setting_str("default-sync-type") == "full"
+        master = False
+        try:
+            master = self._settings.get_boolean("offline-sync-enabled")
+        except Exception:  # noqa: BLE001
+            pass
+        for row, account in self._sync_rows:
+            row.set_sensitive(full and master and account.signed_in)
+            if not master:
+                row.set_active(False)
+            elif full:
+                row.set_active(bool(getattr(account, "full_sync", False)))
+
     def _on_autostart_changed(self, switch, _param) -> None:
         enabled = switch.get_active()
         self._settings.set_boolean("autostart", enabled)
@@ -482,14 +514,31 @@ class CloudyPreferences(Adw.PreferencesDialog):
 def _write_autostart(enabled: bool) -> None:
     """Create/remove a host autostart .desktop entry (rootless)."""
     path = Path(GLib.get_user_config_dir()) / "autostart" / "io.github.sha5b.Cloudy.desktop"
-    if enabled:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            "[Desktop Entry]\n"
-            "Type=Application\n"
-            "Name=Cloudy\n"
-            "Exec=cloudy --gapplication-service\n"
-            "X-GNOME-Autostart-enabled=true\n"
-        )
-    elif path.exists():
-        path.unlink()
+    try:
+        if enabled:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # If the app's installed desktop entry is available, copy and adapt
+            # it so the autostart file stays consistent with packaging.
+            installed = Path(GLib.get_user_data_dir()).parent / "applications" / "io.github.sha5b.Cloudy.desktop"
+            if installed.exists():
+                text = installed.read_text(encoding="utf-8")
+                text = text.replace("Exec=cloudy", "Exec=cloudy --gapplication-service")
+                text += "X-GNOME-Autostart-enabled=true\n"
+                path.write_text(text, encoding="utf-8")
+                return
+            path.write_text(
+                "[Desktop Entry]\n"
+                "Type=Application\n"
+                "Name=Cloudy\n"
+                "Comment=Cloudy background service\n"
+                "Exec=cloudy --gapplication-service\n"
+                "Icon=io.github.sha5b.Cloudy\n"
+                "Categories=Network;Office;\n"
+                "Terminal=false\n"
+                "X-GNOME-Autostart-enabled=true\n",
+                encoding="utf-8",
+            )
+        elif path.exists():
+            path.unlink()
+    except OSError:
+        pass  # best-effort: autostart is not security-critical

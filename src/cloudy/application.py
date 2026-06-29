@@ -5,11 +5,13 @@
 import os
 import threading
 from gettext import gettext as _
+from typing import Any
 
 from gi.repository import Adw, Gio, GLib, Gtk
 
 from .core.account_registry import AccountRegistry
 from .core.cache import MemoryCache
+from .core.interfaces import ModuleContext
 from .core.plugin_engine import PluginEngine
 from .core.secrets import SecretStore
 from .window import CloudyWindow
@@ -37,6 +39,15 @@ class CloudyApplication(Adw.Application):
         self.secrets = SecretStore()
         self.registry = AccountRegistry(self.settings)
         self.engine = PluginEngine(self.settings)
+        self.engine.set_context(
+            ModuleContext(settings=self.settings,
+                          secrets=self.secrets,
+                          registry=self.registry))
+        # Per-account API clients are expensive to build (MSAL token cache,
+        # PublicClientApplication, etc.) and are reused for the lifetime of the
+        # account. Evicted on sign-out / removal so stale tokens aren't reused.
+        self._account_client_lock = threading.RLock()
+        self._account_clients: dict[str, Any] = {}
         # Persist the cache so mail/agenda show last-known data offline on launch.
         from pathlib import Path
 
@@ -101,6 +112,21 @@ class CloudyApplication(Adw.Application):
             "CLOUDY_GOOGLE_CLIENT_SECRET"
         ) or self.settings.get_string("google-client-secret")
 
+    # -- Per-account API client cache --------------------------------------
+    def get_account_client(self, account) -> Any:
+        """Return the cached client for ``account``, if any."""
+        with self._account_client_lock:
+            return self._account_clients.get(account.id)
+
+    def set_account_client(self, account, client: Any) -> None:
+        with self._account_client_lock:
+            self._account_clients[account.id] = client
+
+    def evict_account_client(self, account_id: str) -> None:
+        """Drop a cached client (called on sign-out / account removal)."""
+        with self._account_client_lock:
+            self._account_clients.pop(account_id, None)
+
     def _setup_actions(self) -> None:
         self._add_action("quit", self._on_quit, ["<primary>q"])
         self._add_action("about", self._on_about)
@@ -156,6 +182,22 @@ class CloudyApplication(Adw.Application):
         self._provision_backends()
 
     def do_shutdown(self):
+        # Stop background timers so they don't outlive the app.
+        if hasattr(self, "notifier") and self.notifier is not None:
+            try:
+                self.notifier.stop()
+            except Exception:  # noqa: BLE001 - never block shutdown
+                pass
+        if hasattr(self, "engine") and self.engine is not None:
+            try:
+                self.engine.shutdown()
+            except Exception:  # noqa: BLE001 - never block shutdown
+                pass
+        if hasattr(self, "sync_manager") and self.sync_manager is not None:
+            try:
+                self.sync_manager.stop()
+            except Exception:  # noqa: BLE001 - never block shutdown
+                pass
         # Persist any pending cache so the next launch shows mail/agenda offline.
         try:
             self.cache.flush()
@@ -177,8 +219,9 @@ class CloudyApplication(Adw.Application):
                 Gtk.StyleContext.add_provider_for_display(
                     display, provider,
                     Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-        except Exception:  # noqa: BLE001
-            pass
+            self._css_provider = provider
+        except Exception as exc:  # noqa: BLE001
+            print(f"[style] could not load stylesheet: {exc}")
 
     def _provision_backends(self) -> None:
         # Ensure rclone is available without any user/system install (rootless
@@ -425,7 +468,7 @@ class CloudyApplication(Adw.Application):
             application_icon=self.application_id,
             developer_name=_("Shahab Nedaei"),
             version=self.version,
-            license_type=Gtk.License.GPL_3_0,
+            license_type=Gtk.License.GPL_3_0_OR_LATER,
             website="https://github.com/sha5b/Cloudy",
             issue_url="https://github.com/sha5b/Cloudy/issues",
             copyright="© 2026 Shahab Nedaei",

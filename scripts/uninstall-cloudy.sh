@@ -24,6 +24,7 @@ CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/cloudy"
 MOUNTS_DIR="$DATA_DIR/mounts"
 NAUTILUS_EXT="${XDG_DATA_HOME:-$HOME/.local/share}/nautilus-python/extensions/cloudy_nautilus.py"
 GTK3_BOOKMARKS="${XDG_CONFIG_HOME:-$HOME/.config}/gtk-3.0/bookmarks"
+AUTOSTART_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
 
 PURGE=0
 [ "${1:-}" = "--purge" ] && PURGE=1
@@ -60,6 +61,8 @@ if [ "$PURGE" -eq 1 ]; then
   fi
   # Host Nautilus extension
   rm -f "$NAUTILUS_EXT" && echo "  removed Nautilus extension"
+  # Autostart desktop entry
+  rm -f "$AUTOSTART_DIR/$APP_ID.desktop" && echo "  removed autostart entry"
   # Flatpak per-app data, if any
   if command -v flatpak >/dev/null 2>&1; then
     rm -rf "$HOME/.var/app/$APP_ID" 2>/dev/null && echo "  removed ~/.var/app/$APP_ID" || true

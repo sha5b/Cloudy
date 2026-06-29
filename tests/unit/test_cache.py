@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Shahab Nedaei
-"""MemoryCache: stale-while-revalidate semantics + disk persistence."""
 
 import json
 import tempfile
@@ -82,6 +81,17 @@ class TestPersistentCache(unittest.TestCase):
         self.path.write_text("{ this is not json")
         c = MemoryCache(path=self.path)  # must not raise
         self.assertIsNone(c.get("anything"))
+
+    def test_max_entries_evicts_oldest(self):
+        c = MemoryCache(ttl=90, max_entries=2)
+        c.set("a", 1)
+        time.sleep(0.02)
+        c.set("b", 2)
+        time.sleep(0.02)
+        c.set("c", 3)  # over capacity; oldest (a) should be evicted
+        self.assertIsNone(c.get("a"))
+        self.assertIsNotNone(c.get("b"))
+        self.assertIsNotNone(c.get("c"))
 
     def test_flush_without_path_is_noop(self):
         MemoryCache().flush()  # no path → silently does nothing

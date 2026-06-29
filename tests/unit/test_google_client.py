@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Shahab Nedaei
-"""GoogleClient: normalization + multi-calendar aggregation/routing (no network)."""
 
 import unittest
 
@@ -47,17 +46,36 @@ class TestNormalization(unittest.TestCase):
         row = GoogleClient._event_from_json(e)
         self.assertTrue(row["all_day"])
         self.assertEqual(row["start"], "2026-12-25")
+        # Google returns exclusive end dates; we normalize to the last actual day.
+        self.assertEqual(row["end"], "2026-12-25")
+
+    def test_event_from_json_all_day_multi_day(self):
+        e = {"id": "e3", "summary": "Trip",
+             "start": {"date": "2026-06-10"}, "end": {"date": "2026-06-13"}}
+        row = GoogleClient._event_from_json(e)
+        self.assertTrue(row["all_day"])
+        self.assertEqual(row["start"], "2026-06-10")
+        self.assertEqual(row["end"], "2026-06-12")
 
     def test_chat_message_row(self):
         m = {"name": "spaces/A/messages/1", "text": "hi",
              "sender": {"displayName": "Bob &amp; co"}, "createTime": "t",
-             "attachment": [{"contentName": "f.png", "downloadUri": "u",
-                             "contentType": "image/png"}]}
+             "attachments": [{"contentName": "f.png", "downloadUri": "u",
+                              "contentType": "image/png"}]}
         row = GoogleClient._chat_message_row(m)
         self.assertEqual(row["id"], "spaces/A/messages/1")
         self.assertEqual(row["from"], "Bob & co")
         self.assertFalse(row["is_mine"])
         self.assertEqual(row["attachments"][0]["name"], "f.png")
+
+    def test_chat_message_row_legacy_attachment_key(self):
+        # Older payloads may use the singular "attachment" key; keep fallback.
+        m = {"name": "spaces/A/messages/2", "text": "hi",
+             "sender": {"displayName": "Bob"}, "createTime": "t",
+             "attachment": [{"contentName": "legacy.png", "downloadUri": "u",
+                             "contentType": "image/png"}]}
+        row = GoogleClient._chat_message_row(m)
+        self.assertEqual(row["attachments"][0]["name"], "legacy.png")
 
 
 class TestCalendarIds(unittest.TestCase):

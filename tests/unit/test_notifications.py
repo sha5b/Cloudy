@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Shahab Nedaei
-"""NotificationManager gating + digest batching (no GUI, no network)."""
 
 import unittest
 from unittest import mock

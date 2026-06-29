@@ -1,13 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Shahab Nedaei
-"""Lightweight fakes so the logic layer can be tested without the GUI/network."""
 
 from __future__ import annotations
 
 
 class FakeSettings:
-    """A dict-backed stand-in for Gio.Settings (no installed gschema needed)."""
-
     def __init__(self, values: dict | None = None):
         self._v = dict(values or {})
 
@@ -51,8 +48,6 @@ class FakeApp:
 
 
 class FakeWindow:
-    """Minimal window whose only contract here is get_application()."""
-
     def __init__(self, app):
         self._app = app
 

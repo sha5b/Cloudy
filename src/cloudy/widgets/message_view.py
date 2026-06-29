@@ -11,6 +11,7 @@ still works everywhere.
 from __future__ import annotations
 
 import html
+import io
 import re
 from gettext import gettext as _
 
@@ -49,6 +50,22 @@ _PAGE_BG = "#ffffff"
 _CID_IMG_RE = re.compile(r"<img\b[^>]*\bsrc\s*=\s*[\"']cid:[^>]*>", re.IGNORECASE)
 _CID_SRC_RE = re.compile(r"""src\s*=\s*["']cid:([^"']+)["']""", re.IGNORECASE)
 
+# Remote image sources are blocked by default to prevent tracking pixels / IP
+# leaks. Only http(s) image URLs are replaced; cid: (resolved to data:) and
+# other schemes are left alone. A future toggle can pass load_remote=True.
+_REMOTE_IMG_RE = re.compile(
+    r"(<img\b[^>]*\bsrc\s*=\s*['\"])(https?://[^'\"]+)(['\"][^>]*>)",
+    re.IGNORECASE,
+)
+_REMOTE_BG_RE = re.compile(
+    r"(background(?:-image)?\s*:\s*[^;]*url\s*\(\s*['\"]?)(https?://[^'\"\)]+)(['\"]?\s*\))",
+    re.IGNORECASE,
+)
+_REMOTE_IMG_PLACEHOLDER = (
+    "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' "
+    "height='24'%3E%3Ctext x='4' y='17' font-size='12' fill='%23999'%3E?%3C/text%3E%3C/svg%3E"
+)
+
 
 _INLINE_MAX_EDGE = 1400  # downscale inline images past this (longest edge)
 
@@ -61,21 +78,18 @@ def _shrink_inline(b64: str, content_type: str):
     import base64
 
     try:
-        from gi.repository import GdkPixbuf
+        from .imaging import shrink_image_bytes
 
-        loader = GdkPixbuf.PixbufLoader()
-        loader.write(base64.b64decode(b64))
-        loader.close()
-        pix = loader.get_pixbuf()
-        w, h = pix.get_width(), pix.get_height()
-        scale = min(1.0, _INLINE_MAX_EDGE / w, _INLINE_MAX_EDGE / h)
-        if scale >= 1.0:
-            return b64, content_type
-        pix = pix.scale_simple(max(1, int(w * scale)), max(1, int(h * scale)),
-                               GdkPixbuf.InterpType.BILINEAR)
-        ok, buf = pix.save_to_bufferv("png", [], [])
-        if ok:
-            return base64.b64encode(buf).decode(), "image/png"
+        data = base64.b64decode(b64)
+        # Pillow gives the decoded size without full decode/scale, so we can
+        # bail out early for small images.
+        from PIL import Image
+        with Image.open(io.BytesIO(data)) as img:
+            w, h = img.size
+            if max(w, h) <= _INLINE_MAX_EDGE:
+                return b64, content_type
+        png = shrink_image_bytes(data, _INLINE_MAX_EDGE)
+        return base64.b64encode(png).decode(), "image/png"
     except Exception:  # noqa: BLE001 - undecodable → keep the original
         pass
     return b64, content_type
@@ -99,16 +113,27 @@ def _resolve_cids(content: str, inline_images) -> str:
     return _CID_SRC_RE.sub(repl, content)
 
 
-def _wrap_html(content: str, is_html: bool, inline_images=None) -> str:
+def _block_remote_images(body: str) -> str:
+    """Replace remote image URLs with a local placeholder."""
+    body = _REMOTE_IMG_RE.sub(r"\1" + _REMOTE_IMG_PLACEHOLDER + r"\3", body)
+    body = _REMOTE_BG_RE.sub(r"\1" + _REMOTE_IMG_PLACEHOLDER + r"\3", body)
+    return body
+
+
+def _wrap_html(content: str, is_html: bool, inline_images=None,
+               load_remote: bool = False) -> str:
     """Wrap a message body in a minimal HTML document on a light page."""
     fg, bg, link, quote = "#1a1a1a", _PAGE_BG, "#1a73e8", "#5e5c64"
 
     if is_html:
         # Resolve inline (cid:) images to data URIs so they render; any cid
         # without a matching attachment is dropped (it'd be a broken "?" — common
-        # in Outlook/Teams meeting invites). http(s) images load normally.
+        # in Outlook/Teams meeting invites). http(s) images are blocked by
+        # default to avoid tracking pixels / IP leaks.
         body = _resolve_cids(content, inline_images)
         body = _CID_IMG_RE.sub("", body)
+        if not load_remote:
+            body = _block_remote_images(body)
     else:
         body = "<pre>%s</pre>" % html.escape(content)
 

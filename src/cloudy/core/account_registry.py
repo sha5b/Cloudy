@@ -11,6 +11,7 @@ this class only stores identifiers and display state, persisted as JSON in the
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import asdict, dataclass, field
 
 from gi.repository import GObject
@@ -92,6 +93,7 @@ class AccountRegistry(GObject.Object):
         super().__init__()
         self._settings = settings
         self._accounts: dict[str, Account] = {}
+        self._lock = threading.RLock()
         self._load()
 
     # -- persistence ------------------------------------------------------
@@ -101,41 +103,55 @@ class AccountRegistry(GObject.Object):
             data = json.loads(raw) if raw else []
         except json.JSONDecodeError:
             data = []
-        self._accounts = {
-            d["id"]: Account.from_dict(d) for d in data if "id" in d
-        }
+        with self._lock:
+            self._accounts = {
+                d["id"]: Account.from_dict(d) for d in data if "id" in d
+            }
 
     def _save(self) -> None:
-        data = [a.to_dict() for a in self._accounts.values()]
+        with self._lock:
+            data = [a.to_dict() for a in self._accounts.values()]
         self._settings.set_string("accounts", json.dumps(data))
 
     # -- access -----------------------------------------------------------
     def accounts(self) -> list[Account]:
-        return list(self._accounts.values())
+        with self._lock:
+            return list(self._accounts.values())
 
     def get(self, account_id: str) -> Account | None:
-        return self._accounts.get(account_id)
+        with self._lock:
+            return self._accounts.get(account_id)
 
     def is_empty(self) -> bool:
-        return not self._accounts
+        with self._lock:
+            return not self._accounts
 
     # -- mutation ---------------------------------------------------------
     def add(self, account: Account) -> None:
-        self._accounts[account.id] = account
+        with self._lock:
+            self._accounts[account.id] = account
         self._save()
         self.emit("changed")
 
-    # Persist an in-place mutation of an existing account.
-    update = add
+    def update(self, account: Account) -> None:
+        """Persist an in-place mutation of an existing account."""
+        with self._lock:
+            if account.id not in self._accounts:
+                return
+        self._save()
+        self.emit("changed")
 
     def remove(self, account_id: str) -> None:
-        if self._accounts.pop(account_id, None) is not None:
+        with self._lock:
+            removed = self._accounts.pop(account_id, None) is not None
+        if removed:
             self._save()
             self.emit("changed")
 
     def new_id(self, provider: str) -> str:
         """Return a stable-ish unique id for a new account of ``provider``."""
         n = 1
-        while f"{provider}-{n}" in self._accounts:
-            n += 1
-        return f"{provider}-{n}"
+        with self._lock:
+            while f"{provider}-{n}" in self._accounts:
+                n += 1
+            return f"{provider}-{n}"

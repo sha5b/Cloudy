@@ -2,6 +2,7 @@
 # Python runtime dependencies (bundled as wheels in the Flatpak; pip-installable
 # for local development). PyGObject/GTK/Adw/Secret come from the GNOME runtime.
 msal>=1.31
+Pillow>=10.0
 # Stage 6 (Gmail/Calendar):
 # google-auth-oauthlib>=1.2
 # google-api-python-client>=2.0

@@ -10,15 +10,15 @@ docs/MODULES.md and docs/ARCHITECTURE.md.
 
 from __future__ import annotations
 
-from .abraunegg import AbrauneggClient
-from .mounts import MountManager
+from pathlib import Path
+
+from .mounts import MountManager, load_mount_records, mount_root
 
 
 class OneDriveFiles:
     def __init__(self, graph):
         self._graph = graph
         self.mounts = MountManager()
-        self._client = AbrauneggClient()
 
     # -- enumeration (Graph) ---------------------------------------------
     def list_drives(self) -> list:
@@ -51,6 +51,54 @@ class OneDriveFiles:
         return self.mounts.is_mounted(self.mounts.mountpoint_for(drive.name))
 
     # -- share links ------------------------------------------------------
+    def _resolve_path(self, path: str) -> tuple[str, str]:
+        """Map a local filesystem path to ``(drive_id, relative_path)``.
+
+        Uses remembered mount records (including the stored mountpoint) so a
+        SharePoint/team-drive file resolves to the correct drive/item instead of
+        being treated as the user's personal OneDrive.
+        """
+        p = Path(path).expanduser().resolve()
+
+        # 1. Match against stored mountpoints.
+        for rec in load_mount_records():
+            mp = rec.get("mountpoint")
+            if not mp:
+                continue
+            try:
+                rel = p.relative_to(Path(mp))
+            except ValueError:
+                continue
+            drive_id = rec.get("drive_id") or ""
+            if drive_id:
+                return drive_id, str(rel)
+
+        # 2. Fallback: recompute the per-account mount base from the account id.
+        for rec in load_mount_records():
+            account_id = rec.get("account_id", "")
+            drive_name = rec.get("drive_name", "")
+            drive_id = rec.get("drive_id") or ""
+            if not account_id or not drive_id:
+                continue
+            base = mount_root() / MountManager._safe_name(account_id)
+            mp = self.mounts.mountpoint_for(drive_name, base)
+            try:
+                rel = p.relative_to(mp)
+            except ValueError:
+                continue
+            return drive_id, str(rel)
+
+        # 3. Last resort: assume the user's default drive and a path relative to
+        #    the home directory so a bare file path doesn't fail completely.
+        home = Path.home()
+        try:
+            return "me", str(p.relative_to(home))
+        except ValueError:
+            return "me", str(p)
+
     def create_share_link(self, path: str, *, editable: bool = False) -> str:
-        # Path-based link via the host client (used in full-sync mode).
-        return self._client.create_share_link(path, editable=editable)
+        drive_id, rel_path = self._resolve_path(path)
+        item = self._graph.item_by_path(drive_id, rel_path)
+        return self._graph.create_share_link(
+            drive_id, item["id"], editable=editable
+        )

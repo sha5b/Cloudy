@@ -158,7 +158,6 @@ class RichTextEditor(Gtk.Box):
         img_btn.connect("clicked", self._on_insert_image)
         bar.append(img_btn)
 
-        # Clear formatting.
         clear_btn = Gtk.Button(icon_name="edit-clear-all-symbolic",
                               tooltip_text=_("Clear formatting"))
         clear_btn.connect("clicked", self._on_clear)

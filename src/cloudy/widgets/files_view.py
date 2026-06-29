@@ -284,7 +284,7 @@ class FilesView(Adw.Bin):
             self._window.add_toast(_("Mount failed: %s") % error)
             return False
         # Remember it so it remounts automatically on the next startup.
-        record_mount(self._account.id, lib["drive"])
+        record_mount(self._account.id, lib["drive"], mountpoint=str(info.mountpoint))
         self._apply_button(lib)
         self._window.add_toast(_("%s is ready.") % lib["drive"].name)
         # Open it straight away for a one-click feel.

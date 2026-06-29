@@ -23,9 +23,9 @@ from gettext import gettext as _
 
 from gi.repository import Adw, Gdk, GLib, Gtk, Pango
 
-from ..modules.microsoft365.graph import _html_to_pango, _strip_html
+from ..modules.microsoft365.graph_markup import html_to_pango, strip_html
 from .format import esc, relative_time
-from .imaging import thumbnail_texture
+from .imaging import shrink_image_bytes, texture_from_png_bytes
 from .source_nav import (
     SCOPE_HINT,
     action_row,
@@ -650,14 +650,15 @@ class TeamsView(Adw.Bin):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         box.append(placeholder)
 
-        def done(data, error):
-            if error or not data:
+        def done(result, error):
+            if error or not result:
                 placeholder.get_last_child().set_text(_("Image unavailable"))
                 if error:
                     placeholder.set_tooltip_text(str(error))
                 return False
+            data, png = result
             try:
-                texture = thumbnail_texture(data, max_px)
+                texture = texture_from_png_bytes(png)
             except Exception as exc:  # noqa: BLE001 - undecodable payload
                 placeholder.get_last_child().set_text(_("Image"))
                 placeholder.set_tooltip_text(str(exc))
@@ -675,7 +676,12 @@ class TeamsView(Adw.Bin):
             box.append(pic)
             return False
 
-        run_async(fetch, done)
+        def work():
+            data = fetch()
+            png = shrink_image_bytes(data, max_px)
+            return data, png
+
+        run_async(work, done)
         return box
 
     def _open_image_viewer(self, data: bytes, name: str = "image") -> None:
@@ -934,8 +940,8 @@ class TeamsView(Adw.Bin):
                     _("image"), max_px=760))
                 rendered_any = True
                 continue
-            markup = _html_to_pango(seg)
-            text = _strip_html(seg)
+            markup = html_to_pango(seg)
+            text = strip_html(seg)
             if not text:
                 continue
             # A short block keeps its inline formatting (bold/links/…); a block

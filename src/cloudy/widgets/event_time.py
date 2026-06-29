@@ -42,11 +42,13 @@ def parse_hhmm(text: str, fallback: tuple[int, int]) -> tuple[int, int]:
 def local_to_utc_iso(dt: datetime, *, all_day: bool) -> str:
     """Naive local wall-clock → UTC ISO-8601 (trailing ``Z``).
 
-    All-day events keep their picked date — shifting midnight across the UTC
-    boundary would move them to the wrong day.
+    All-day events are returned as the picked calendar date at UTC midnight;
+    callers slice ``[:10]`` to obtain the date. Using the local midnight with a
+    ``Z`` suffix shifted events east of UTC to the previous calendar day.
     """
     if all_day:
-        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return datetime(dt.year, dt.month, dt.day, 0, 0,
+                        tzinfo=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     local_tz = datetime.now().astimezone().tzinfo
     return (dt.replace(tzinfo=local_tz).astimezone(timezone.utc)
             .strftime("%Y-%m-%dT%H:%M:%SZ"))

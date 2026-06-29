@@ -39,7 +39,7 @@ BUS_NAME = "io.github.sha5b.Cloudy"
 OBJECT_PATH = "/io/github/sha5b/Cloudy/Sync"
 INTERFACE = "io.github.sha5b.Cloudy.Sync"
 
-_DBUS_TIMEOUT_MS = 400
+_DBUS_TIMEOUT_MS = 2000
 # How long to trust the cached "managed roots" before asking the app again.
 # These paths almost never change, so a long TTL keeps the file manager fast.
 _ROOTS_TTL_S = 30.0
@@ -59,14 +59,21 @@ def _proxy():
     return _proxy._p
 
 
-def _call(method, variant, reply_type):
+def _call(method, variant, reply_type=None):
     proxy = _proxy()
     if proxy is None:
         return None
     try:
-        return proxy.call_sync(
+        result = proxy.call_sync(
             method, variant, Gio.DBusCallFlags.NONE, _DBUS_TIMEOUT_MS, None
         )
+        if reply_type is not None:
+            # Best-effort sanity check: if the result doesn't match the expected
+            # variant signature, treat it as no result (keeps the extension safe
+            # against future interface changes).
+            if result is not None and result.get_type_string() != reply_type:
+                return None
+        return result
     except GLib.Error:
         return None
 
@@ -110,7 +117,10 @@ def _under_roots(path, roots):
 class CloudyMenuProvider(GObject.GObject, Nautilus.MenuProvider):
     """Right-click controls for Cloudy-managed files/folders."""
 
-    def get_file_items(self, files):  # API 4.0: no window arg
+    def get_file_items(self, *args):
+        # API 4.0: get_file_items(files); API 4.1+: get_file_items(window, files).
+        # Accept both by taking the last list-typed argument.
+        files = args[-1] if args else []
         # Only offer controls for managed paths. This runs on Nautilus's UI
         # thread on every selection change, so it MUST stay cheap: a local prefix
         # test against the cached roots, no D-Bus per file.
@@ -136,9 +146,11 @@ class CloudyMenuProvider(GObject.GObject, Nautilus.MenuProvider):
         free_space.connect("activate", self._on_free_space, managed)
         return [copy_link, free_space]
 
-    def get_background_items(self, folder):
+    def get_background_items(self, *args):
+        # API 4.0: get_background_items(folder); API 4.1+: get_background_items(window, folder).
+        folder = args[-1] if args else None
         # Runs on every folder you open — keep it to a local prefix test.
-        if not _under_roots(_path_of(folder), _managed_roots()):
+        if folder is None or not _under_roots(_path_of(folder), _managed_roots()):
             return []
         sync = Nautilus.MenuItem(
             name="Cloudy::sync_folder",
@@ -158,9 +170,9 @@ class CloudyMenuProvider(GObject.GObject, Nautilus.MenuProvider):
             return
         (url,) = result.unpack()
         if url:
-            display = self._clipboard()
-            if display is not None:
-                display.set(url)
+            clipboard = self._clipboard()
+            if clipboard is not None:
+                clipboard.set_text(url)
 
     def _on_free_space(self, _menu, files):
         for f in files:

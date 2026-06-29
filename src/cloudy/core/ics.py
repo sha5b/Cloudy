@@ -42,16 +42,70 @@ def _unfold(text: str) -> list[str]:
     return out
 
 
+def _unescape(value: str) -> str:
+    """Undo RFC 5545 escaping (\\, \\;, \\, \\n/\\N → newline)."""
+    out: list[str] = []
+    i = 0
+    while i < len(value):
+        ch = value[i]
+        if ch == "\\" and i + 1 < len(value):
+            nxt = value[i + 1]
+            if nxt in "\\;,nN":
+                out.append("\n" if nxt in "nN" else nxt)
+                i += 2
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _split_params(head: str) -> list[str]:
+    """Split ``NAME;P1=V1;P2="V;2"`` at semicolons, respecting quoted values."""
+    parts: list[str] = []
+    cur: list[str] = []
+    in_quotes = False
+    for ch in head:
+        if ch == '"':
+            in_quotes = not in_quotes
+            cur.append(ch)
+        elif ch == ";" and not in_quotes:
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    if cur or parts:
+        parts.append("".join(cur))
+    return parts
+
+
 def _split(line: str) -> tuple[str, dict, str]:
-    """``NAME;P=v:value`` → (NAME upper, {param: value}, value)."""
-    head, _sep, value = line.partition(":")
-    parts = head.split(";")
+    """``NAME;P=v:value`` → (NAME upper, {param: value}, value).
+
+    Handles escaped colons and quoted parameters with embedded separators."""
+    # Split on the first *unescaped* colon.
+    idx = 0
+    while idx < len(line):
+        if line[idx] == ":" and (idx == 0 or line[idx - 1] != "\\"):
+            break
+        idx += 1
+    else:
+        idx = len(line)
+    head = line[:idx]
+    value = line[idx + 1:]
+
+    parts = _split_params(head)
+    if not parts:
+        return "", {}, value
     name = parts[0].upper()
-    params = {}
+    params: dict[str, str] = {}
     for p in parts[1:]:
-        k, _s, v = p.partition("=")
-        params[k.upper()] = v.strip('"')
-    return name, params, value
+        if "=" not in p:
+            continue
+        k, v = p.split("=", 1)
+        if v.startswith('"') and v.endswith('"'):
+            v = v[1:-1]
+        params[k.upper()] = _unescape(v)
+    return name, params, _unescape(value)
 
 
 def _mailto(value: str) -> str:
@@ -85,9 +139,9 @@ def parse_invite(text: str) -> dict | None:
         elif name == "SEQUENCE":
             ev["sequence"] = int(value.strip() or 0)
         elif name == "SUMMARY":
-            ev["summary"] = value.replace("\\,", ",").replace("\\n", " ").strip()
+            ev["summary"] = value.replace("\n", " ").strip()
         elif name == "LOCATION":
-            ev["location"] = value.replace("\\,", ",").strip()
+            ev["location"] = value.strip()
         elif name == "STATUS":
             ev["status"] = value.strip().upper()
         elif name == "DTSTART":
@@ -96,7 +150,7 @@ def parse_invite(text: str) -> dict | None:
         elif name == "DTEND":
             ev["dtend"] = value.strip()
         elif name == "DESCRIPTION":
-            ev["description"] = value.replace("\\,", ",").replace("\\n", "\n").strip()
+            ev["description"] = value.strip()
         # Machine-readable conferencing links Microsoft/Google add to invites.
         elif name in ("URL", "X-MICROSOFT-SKYPETEAMSMEETINGURL", "X-GOOGLE-CONFERENCE"):
             if value.strip().lower().startswith("http") and not ev["join_url"]:
@@ -133,7 +187,11 @@ def find_attendee(invite: dict, email: str) -> dict | None:
 
 
 def _esc(value: str) -> str:
-    return value.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,")
+    """Escape property values per RFC 5545."""
+    return (value.replace("\\", "\\\\")
+            .replace(";", "\\;")
+            .replace(",", "\\,")
+            .replace("\n", "\\n"))
 
 
 def build_reply(invite: dict, *, attendee_email: str, attendee_cn: str = "",

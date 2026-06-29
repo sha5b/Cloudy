@@ -116,6 +116,7 @@ class GoogleAuth:
         state = _b64url(_secrets.token_bytes(24))  # CSRF / auth-code-injection guard
 
         server = http.server.HTTPServer(("127.0.0.1", 0), _CodeHandler)
+        server.allow_reuse_address = True
         server.auth_code = server.auth_error = server.auth_state = None
         port = server.server_address[1]
         # Bind and redirect on the SAME literal (127.0.0.1) — Google treats
@@ -145,13 +146,21 @@ class GoogleAuth:
 
             webbrowser.open(url)
 
-        threading.Thread(target=server.handle_request, daemon=True).start()
-        # Wait (bounded) for the redirect to arrive.
-        for _ in range(600):  # up to ~120s
-            if server.auth_code or server.auth_error:
-                break
-            time.sleep(0.2)
-        server.server_close()
+        # Run the receiver in a daemon thread and shut it down cleanly once the
+        # redirect arrives or the timeout expires. ``serve_forever`` blocks until
+        # ``shutdown()``, so the socket is never left half-closed.
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            # Wait (bounded) for the redirect to arrive.
+            for _ in range(600):  # up to ~120s
+                if server.auth_code or server.auth_error:
+                    break
+                time.sleep(0.2)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
         if server.auth_error or not server.auth_code:
             raise AuthError(server.auth_error or "no authorization code received")

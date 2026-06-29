@@ -115,7 +115,7 @@ def _save_mount_records(records: list[dict]) -> None:
     path.write_text(json.dumps(records, indent=2) + "\n")
 
 
-def record_mount(account_id: str, drive) -> None:
+def record_mount(account_id: str, drive, mountpoint: str | None = None) -> None:
     """Remember a mounted drive so it remounts on the next startup."""
     records = [
         r for r in load_mount_records()
@@ -127,6 +127,7 @@ def record_mount(account_id: str, drive) -> None:
         "drive_name": getattr(drive, "name", ""),
         "drive_id": getattr(drive, "id", "") or "",
         "drive_kind": getattr(drive, "kind", "") or "",
+        "mountpoint": mountpoint,
     })
     _save_mount_records(records)
 

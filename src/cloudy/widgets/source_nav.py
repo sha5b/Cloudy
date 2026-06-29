@@ -45,12 +45,26 @@ def run_async(work: Callable[[], object], on_done: Callable[[object, str | None]
     This is the one place the views' "fetch off-thread, render on-thread"
     pattern lives.
     """
+    # Capture the calling widget (if any) so we can drop the callback when the
+    # widget is destroyed before the worker finishes. This avoids idle callbacks
+    # touching finalized GTK objects.
+    caller = None
+    frame = __import__("sys")._getframe(1)
+    self_var = frame.f_locals.get("self")
+    if isinstance(self_var, Gtk.Widget):
+        caller = self_var
+
+    def guarded_on_done(result, error):
+        if caller is not None and not caller.get_parent():
+            return False
+        return on_done(result, error)
+
     def worker():
         try:
             result = work()
-            GLib.idle_add(on_done, result, None)
+            GLib.idle_add(guarded_on_done, result, None)
         except Exception as exc:  # noqa: BLE001 - surfaced to the UI as a string
-            GLib.idle_add(on_done, None, str(exc))
+            GLib.idle_add(guarded_on_done, None, str(exc))
 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -63,6 +77,67 @@ def clear_listbox(listbox: Gtk.ListBox) -> None:
         nxt = child.get_next_sibling()
         listbox.remove(child)
         child = nxt
+
+
+def patch_listbox(listbox: Gtk.ListBox, items: list[dict],
+                  key_func: Callable[[dict], str],
+                  factory: Callable[[dict], Gtk.ListBoxRow],
+                  update: Callable[[Gtk.ListBoxRow, dict], None] | None = None,
+                  *, selection: list[str] | None = None) -> dict[str, Gtk.ListBoxRow]:
+    """Update a ``Gtk.ListBox`` to match ``items`` while reusing existing rows.
+
+    Rows created by ``factory`` should have ``row._patch_key`` set to the item
+    key (the helper sets it automatically for new rows). ``update(row, item)``
+    is called for reused rows so labels/icons can refresh in place instead of
+    rebuilding the widget tree. Any row without ``_patch_key`` is left alone.
+
+    ``selection`` is a list of keys that should be selected after patching; the
+    caller must restore selection because brand-new rows lose it.
+    """
+    desired_keys = [key_func(i) for i in items]
+    desired_set = set(desired_keys)
+
+    # Index existing data rows by key.
+    existing: dict[str, Gtk.ListBoxRow] = {}
+    child = listbox.get_first_child()
+    while child is not None:
+        key = getattr(child, "_patch_key", None)
+        if key is not None:
+            existing[key] = child
+        child = child.get_next_sibling()
+
+    # Update or create rows for the desired set.
+    rows_by_key: dict[str, Gtk.ListBoxRow] = {}
+    for item in items:
+        key = key_func(item)
+        row = existing.get(key)
+        if row is None:
+            row = factory(item)
+            row._patch_key = key
+        elif update is not None:
+            update(row, item)
+        rows_by_key[key] = row
+
+    # Drop rows that disappeared.
+    for key, row in list(existing.items()):
+        if key not in desired_set:
+            listbox.remove(row)
+
+    # Re-add data rows in the desired order. Removing and re-inserting the same
+    # widget is cheap and gives us correct ordering without recreating widgets.
+    for key in desired_keys:
+        row = rows_by_key[key]
+        listbox.remove(row)
+        listbox.append(row)
+
+    # Restore selection for the requested keys.
+    if selection:
+        for key in selection:
+            row = rows_by_key.get(key)
+            if row is not None:
+                listbox.select_row(row)
+
+    return rows_by_key
 
 
 def message_row(text: str) -> Gtk.ListBoxRow:

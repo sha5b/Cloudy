@@ -13,7 +13,7 @@
 %global appid io.github.sha5b.Cloudy
 
 Name:           cloudy
-Version:        0.2.7
+Version:        0.2.8
 Release:        1%{?dist}
 Summary:        Use OneDrive, SharePoint and unified mail on your desktop
 
@@ -115,6 +115,13 @@ meson test -C %{_vpath_builddir} --print-errorlogs
 %{_datadir}/%{name}/
 
 %changelog
+* Mon Jun 29 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.2.8-1
+- Per-account API client cache; Mail/Chat lists refresh in place instead of rebuilding.
+- Microsoft 365 share links resolve local paths to the correct drive/item.
+- Graph calendar timezone handling, calendar-id routing, and OneNote pagination.
+- RFC 5545 iCalendar escaping, Google OAuth receiver cleanup, and pinned rclone checksums.
+- Code cleanup: extracted graph_markup, file_browser_utils, chat_avatar; removed abraunegg stub.
+
 * Thu Jun 26 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.2.7-1
 - Mail: Reply all and Forward (forward carries the original attachments).
 - Per-account email signature (Preferences -> Accounts), added to new mail,
