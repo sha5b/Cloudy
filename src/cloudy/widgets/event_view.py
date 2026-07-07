@@ -157,6 +157,13 @@ def build_invite_card(invite: dict, on_rsvp) -> Gtk.Widget:
 
     if not cancelled:
         box.append(build_rsvp_bar(invite.get("my_response"), on_rsvp))
+    elif on_rsvp is not None:
+        # A cancellation should also clear the staged copy on the calendar.
+        remove = Gtk.Button(label=_("Remove from calendar"),
+                            halign=Gtk.Align.START, margin_top=4)
+        remove.add_css_class("destructive-action")
+        remove.connect("clicked", lambda *_a: on_rsvp("removeCancelled"))
+        box.append(remove)
     return box
 
 

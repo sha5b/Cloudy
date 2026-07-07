@@ -17,16 +17,20 @@ from gettext import gettext as _
 from gi.repository import Adw, Gdk, GLib, Gtk, Pango
 
 from .event_window import EventDetailWindow
+from .format import parse_iso_utc
 from .month_grid import MonthGrid
 from .source_nav import (
     SCOPE_HINT,
     SourceTabs,
     action_row,
     clear_listbox,
+    data_rows,
     friendly_error,
+    invalidate_cached,
     is_pinned,
     is_scope_error,
     message_row,
+    move_selection,
     present_add_shared_dialog,
     run_async,
     toggle_pin,
@@ -491,28 +495,10 @@ class CalendarView(Adw.Bin):
 
     # -- keyboard navigation / multi-select ------------------------------
     def _event_rows(self) -> list:
-        rows = []
-        child = self._list.get_first_child()
-        while child is not None:
-            if getattr(child, "_ev", None) is not None:
-                rows.append(child)
-            child = child.get_next_sibling()
-        return rows
+        return data_rows(self._list, "_ev")
 
     def _nav(self, delta: int, *, extend: bool = False) -> None:
-        rows = self._event_rows()
-        if not rows:
-            return
-        sel = [r for r in self._list.get_selected_rows() if r in rows]
-        if not sel:
-            target = rows[0]
-        else:
-            cur = rows.index(sel[-1])
-            target = rows[max(0, min(len(rows) - 1, cur + delta))]
-        if not extend:
-            self._list.unselect_all()
-        self._list.select_row(target)
-        target.grab_focus()
+        move_selection(self._list, self._event_rows(), delta, extend=extend)
 
     def _on_list_key(self, _ctrl, keyval, _code, state) -> bool:
         shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
@@ -622,6 +608,9 @@ class CalendarView(Adw.Bin):
 
     def _reload_current(self) -> bool:
         """Force a re-fetch of the active source/month after a write."""
+        # Other months/sources (and the Dashboard) also hold this account's
+        # events; drop them all so switching there can't show the pre-write data.
+        invalidate_cached(self._window.get_application(), self._account.id, "events")
         self._has_data = False
         self._load_async()
         return False
@@ -655,28 +644,12 @@ def _join_url(event: dict) -> str:
     return url or ""
 
 
-def _parse_iso(value: str):
-    if not value or "T" not in value:
-        return None
-    txt = value.strip().replace("Z", "+00:00")
-    try:
-        d = datetime.fromisoformat(txt)
-    except ValueError:
-        try:
-            d = datetime.fromisoformat(txt.split(".", 1)[0])
-        except ValueError:
-            return None
-    if d.tzinfo is None:
-        d = d.replace(tzinfo=timezone.utc)
-    return d.astimezone(timezone.utc)
-
-
 def _is_live(ev) -> bool:
     """True when the event is happening right now (start ≤ now ≤ end)."""
     if ev.get("all_day"):
         return False
-    start = _parse_iso(ev.get("start", ""))
-    end = _parse_iso(ev.get("end", ""))
+    start = parse_iso_utc(ev.get("start", ""))
+    end = parse_iso_utc(ev.get("end", ""))
     if start is None or end is None:
         return False
     return start <= datetime.now(timezone.utc) <= end

@@ -91,6 +91,21 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
   </screenshots>
 
   <releases>
+    <release version="0.2.9" date="2026-07-07">
+      <description>
+        <p>Meeting invites land on your calendar, mail gets organized, and stale data is gone.</p>
+        <ul>
+          <li>Accepting a meeting invite from Mail now updates your own calendar too, and a cancellation mail can remove the event</li>
+          <li>Right-click a message to mark it unread, flag it for follow-up, or move it to another folder</li>
+          <li>Save drafts from the composer and resume them later from the Drafts folder</li>
+          <li>Edited events no longer show their old time on the Dashboard or Calendar — caches refresh after every change</li>
+          <li>Fixed the calendar failing to load with a timezone error (CEST) on European systems</li>
+          <li>Fixed event, message and compose windows getting stuck on their loading spinner</li>
+          <li>A single malformed message or event from the server no longer blanks the whole list</li>
+          <li>Invitations opened from .ics files keep their full title and description</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.8" date="2026-06-29">
       <description>
         <p>A bug-fix and cleanup release focused on correctness, performance and trust.</p>

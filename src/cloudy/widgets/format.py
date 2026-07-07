@@ -61,13 +61,29 @@ def _parse_iso(iso: str):
     try:
         dt = datetime.fromisoformat(txt)
     except ValueError:
+        # Graph sometimes returns 7-digit fractional seconds; trim the fraction
+        # and retry, preserving any trailing timezone offset.
+        head, _sep, tail = txt.partition(".")
+        tz = ""
+        for marker in ("+", "-"):
+            if marker in tail:
+                tz = marker + tail.split(marker, 1)[1]
+                break
         try:
-            dt = datetime.fromisoformat(txt.split(".", 1)[0])
+            dt = datetime.fromisoformat(head + tz)
         except ValueError:
             return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone()  # local time
+
+
+def parse_iso_utc(iso: str):
+    """The same tolerant ISO-8601 parse, normalized to UTC — the one parser for
+    comparisons against ``datetime.now(timezone.utc)`` (calendar live markers,
+    dashboard countdowns, notification reminders)."""
+    dt = _parse_iso(iso)
+    return dt.astimezone(timezone.utc) if dt is not None else None
 
 
 def relative_time(iso: str) -> str:

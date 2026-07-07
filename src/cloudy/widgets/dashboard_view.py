@@ -25,7 +25,7 @@ from ..modules.microsoft365.mounts import (
 )
 from .event_window import EventDetailWindow
 from .file_browser_utils import recent_changes
-from .format import relative_time
+from .format import parse_iso_utc, relative_time
 from .metrics import SPACE_L, SPACE_M
 from .month_grid import MonthGrid
 from .source_nav import is_pinned, run_async
@@ -466,7 +466,10 @@ class DashboardView(Adw.Bin):
     def _open_event(self, ev) -> None:
         account = self._registry.get(ev.get("_account_id", ""))
         if account is not None and ev.get("id"):
-            EventDetailWindow(self._window, account, ev["id"]).present()
+            # on_changed re-aggregates: the editor invalidated the caches, so
+            # this refetch really hits the server instead of the stale copy.
+            EventDetailWindow(self._window, account, ev["id"],
+                              on_changed=self._load_async).present()
 
     def _build_mail(self) -> Gtk.Widget:
         scroller, add = self._section_page()
@@ -712,7 +715,7 @@ class DashboardView(Adw.Bin):
     def _next_event(events):
         now = datetime.now(timezone.utc)
         for account, ev in events:
-            dt = _parse(ev.get("start", ""))
+            dt = parse_iso_utc(ev.get("start", ""))
             if dt is not None and dt >= now:
                 return (account, ev)
         return None
@@ -813,23 +816,8 @@ def _fmt(start: str, all_day: bool) -> str:
     return date if all_day else f"{date} {rest[:5]}"
 
 
-def _parse(start: str):
-    if not start or "T" not in start:
-        return None
-    try:
-        dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
-    except ValueError:
-        try:
-            dt = datetime.fromisoformat(start.split(".", 1)[0])
-        except ValueError:
-            return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
 def _rel_time(start: str) -> str:
-    dt = _parse(start)
+    dt = parse_iso_utc(start)
     if dt is None:
         return ""
     delta = (dt - datetime.now(timezone.utc)).total_seconds()

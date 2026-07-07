@@ -55,7 +55,12 @@ def run_async(work: Callable[[], object], on_done: Callable[[object, str | None]
         caller = self_var
 
     def guarded_on_done(result, error):
-        if caller is not None and not caller.get_parent():
+        # Drop the callback only when the calling widget is no longer rooted
+        # (view rebuilt / row discarded). Checking get_parent() here broke every
+        # toplevel caller — EventDetailWindow, MessageWindow, ComposeWindow are
+        # windows, and a window never has a parent, so their loads spun forever.
+        # A window is its own root, so get_root() keeps those alive.
+        if caller is not None and caller.get_root() is None:
             return False
         return on_done(result, error)
 
@@ -67,6 +72,19 @@ def run_async(work: Callable[[], object], on_done: Callable[[object, str | None]
             GLib.idle_add(guarded_on_done, None, str(exc))
 
     threading.Thread(target=worker, daemon=True).start()
+
+
+# -- cache helpers ---------------------------------------------------------
+def invalidate_cached(app, account_id: str, kind: str) -> None:
+    """Drop an account's cached ``kind`` lists ("events" / "messages") plus the
+    Dashboard aggregate after a write. Stale-while-revalidate only refetches
+    once an entry reads stale, so without this an edit keeps serving the
+    pre-write data as "fresh" for the whole TTL (the "old event time" bug)."""
+    cache = getattr(app, "cache", None)
+    if cache is None:
+        return
+    cache.invalidate(prefix=f"{account_id}:{kind}:")
+    cache.invalidate(prefix="dashboard:")
 
 
 # -- listbox helpers ------------------------------------------------------
@@ -125,9 +143,12 @@ def patch_listbox(listbox: Gtk.ListBox, items: list[dict],
 
     # Re-add data rows in the desired order. Removing and re-inserting the same
     # widget is cheap and gives us correct ordering without recreating widgets.
+    # Brand-new rows have no parent yet — removing them anyway spams
+    # "Tried to remove non-child" warnings (one per new row, per render).
     for key in desired_keys:
         row = rows_by_key[key]
-        listbox.remove(row)
+        if row.get_parent() is not None:
+            listbox.remove(row)
         listbox.append(row)
 
     # Restore selection for the requested keys.
@@ -138,6 +159,36 @@ def patch_listbox(listbox: Gtk.ListBox, items: list[dict],
                 listbox.select_row(row)
 
     return rows_by_key
+
+
+def data_rows(listbox: Gtk.ListBox, attr: str) -> list:
+    """The listbox rows carrying a data attribute (``_mid`` for mail, ``_ev``
+    for events) — skips day headers, placeholders and the "Load older" row."""
+    rows = []
+    child = listbox.get_first_child()
+    while child is not None:
+        if getattr(child, attr, None) is not None:
+            rows.append(child)
+        child = child.get_next_sibling()
+    return rows
+
+
+def move_selection(listbox: Gtk.ListBox, rows: list, delta: int,
+                   *, extend: bool = False) -> None:
+    """Arrow-key navigation over ``rows``: move the selection by ``delta``
+    (Shift ``extend``s it) and focus the target so it scrolls into view."""
+    if not rows:
+        return
+    sel = [r for r in listbox.get_selected_rows() if r in rows]
+    if not sel:
+        target = rows[0]
+    else:
+        cur = rows.index(sel[-1])
+        target = rows[max(0, min(len(rows) - 1, cur + delta))]
+    if not extend:
+        listbox.unselect_all()
+    listbox.select_row(target)
+    target.grab_focus()
 
 
 def message_row(text: str) -> Gtk.ListBoxRow:

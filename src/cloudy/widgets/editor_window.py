@@ -42,6 +42,7 @@ class EditorWindow(Adw.Window):
         header.set_decoration_layout(":minimize,maximize,close")
         header.pack_start(cancel)
         header.pack_end(self.primary_btn)
+        self._header = header
 
         self._toolbar = Adw.ToolbarView()
         self._toolbar.add_top_bar(header)
@@ -49,6 +50,14 @@ class EditorWindow(Adw.Window):
         self.set_content(self._toast)
 
     # -- API for subclasses ----------------------------------------------
+    def add_secondary(self, label: str, on_click) -> Gtk.Button:
+        """Add a secondary header action beside the primary one (e.g. the
+        composer's Save draft)."""
+        btn = Gtk.Button(label=label)
+        btn.connect("clicked", lambda *_a: on_click())
+        self._header.pack_end(btn)
+        return btn
+
     def set_body(self, widget: Gtk.Widget) -> None:
         self._toolbar.set_content(widget)
 

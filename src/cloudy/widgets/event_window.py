@@ -25,7 +25,7 @@ from gi.repository import Adw, GLib, Gtk
 from .event_time import iso_to_local_naive, local_to_utc_iso, parse_hhmm
 from .format import esc
 from .metrics import WIN_READ
-from .source_nav import friendly_error, run_async
+from .source_nav import friendly_error, invalidate_cached, run_async
 
 
 class EventDetailWindow(Adw.Window):
@@ -302,6 +302,7 @@ class EventDetailWindow(Adw.Window):
             self._window.add_toast(_("Couldn't save event: %s") % friendly_error(error))
             return False
         self._window.add_toast(_("Event saved."))
+        self._invalidate()
         if self._on_changed is not None:
             self._on_changed()
         self._form = {}
@@ -325,6 +326,7 @@ class EventDetailWindow(Adw.Window):
             self._window.add_toast(_("Couldn't send response: %s") % friendly_error(error))
             return False
         self._window.add_toast(_("Response sent."))
+        self._invalidate()
         if self._on_changed is not None:
             self._on_changed()
         self._load()  # refresh the detail (response state changed)
@@ -357,10 +359,18 @@ class EventDetailWindow(Adw.Window):
             self._window.add_toast(_("Couldn't delete event: %s") % friendly_error(error))
             return False
         self._window.add_toast(_("Event deleted."))
+        self._invalidate()
         if self._on_changed is not None:
             self._on_changed()
         self.close()
         return False
+
+    def _invalidate(self) -> None:
+        # Every opener (Calendar tab, Dashboard, notifications) may hold a
+        # "fresh" cached copy of this event; drop them all so the next render
+        # can't serve the pre-write state.
+        invalidate_cached(self._window.get_application(),
+                          self._account.id, "events")
 
     @staticmethod
     def _spinner() -> Gtk.Widget:

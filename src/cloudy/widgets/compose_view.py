@@ -31,13 +31,17 @@ from .source_nav import local_initial_folder, run_async
 class ComposeWindow(EditorWindow):
     def __init__(self, window, account, *, from_label: str, send_fn,
                  to: str = "", subject: str = "", body: str = "",
-                 title: str | None = None):
+                 title: str | None = None, draft_fn=None):
         super().__init__(window, title=title or _("New message"),
                          primary_label=_("Send"))
         self._window = window
         self._account = account
         self._send_fn = send_fn
+        self._draft_fn = draft_fn
         self._attachments: list[dict] = []  # [{name, content_type, data, widget}]
+        if draft_fn is not None:
+            self._draft_btn = self.add_secondary(_("Save draft"),
+                                                 self._on_save_draft)
 
         # From (read-only identity).
         from_lbl = Gtk.Label(label=_("From: %s") % from_label, xalign=0)
@@ -266,12 +270,11 @@ class ComposeWindow(EditorWindow):
             self._chips.remove(parent if isinstance(parent, Gtk.FlowBoxChild) else child)
         self._chips_revealer.set_reveal_child(bool(self._attachments))
 
-    # -- send -------------------------------------------------------------
-    def on_primary(self) -> None:
+    # -- send / save draft -------------------------------------------------
+    def _collect(self):
+        """Gather the message fields as ``(to, cc, bcc, subject, body_html,
+        attachments)`` — shared by Send and Save draft."""
         recipients = [e for _n, e in getaddresses([self._to.get_text()]) if e]
-        if not recipients:
-            self.toast(_("Add at least one recipient."))
-            return
         cc = [e for _n, e in getaddresses([self._cc.get_text()]) if e]
         bcc = [e for _n, e in getaddresses([self._bcc.get_text()]) if e]
         subject = self._subject.get_text().strip()
@@ -285,6 +288,13 @@ class ComposeWindow(EditorWindow):
              "inline": True, "content_id": img["content_id"]}
             for img in inline
         ]
+        return recipients, cc, bcc, subject, body_html, attachments
+
+    def on_primary(self) -> None:
+        recipients, cc, bcc, subject, body_html, attachments = self._collect()
+        if not recipients:
+            self.toast(_("Add at least one recipient."))
+            return
         importance = "high" if self._importance.get_active() else "normal"
         read_receipt = self._read_receipt.get_active()
 
@@ -296,6 +306,25 @@ class ComposeWindow(EditorWindow):
                             attachments=attachments, importance=importance,
                             read_receipt=read_receipt),
             self._on_sent)
+
+    def _on_save_draft(self) -> None:
+        recipients, cc, bcc, subject, body_html, attachments = self._collect()
+        self._draft_btn.set_sensitive(False)
+        self.toast(_("Saving draft…"))
+        draft_fn = self._draft_fn
+        run_async(
+            lambda: draft_fn(recipients, subject, body_html, cc=cc, bcc=bcc,
+                             attachments=attachments),
+            self._on_draft_saved)
+
+    def _on_draft_saved(self, _result, error) -> bool:
+        if error:
+            self._draft_btn.set_sensitive(True)
+            self.toast(_("Couldn't save draft: %s") % error)
+            return False
+        self._window.add_toast(_("Draft saved."))
+        self.close()
+        return False
 
     def _on_sent(self, _result, error) -> bool:
         if error:

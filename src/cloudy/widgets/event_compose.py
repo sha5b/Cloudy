@@ -21,39 +21,43 @@ from .event_time import local_to_utc_iso, parse_hhmm
 from .source_nav import run_async
 
 
-def _ics_dt(value: str) -> tuple[datetime | None, bool]:
-    """Parse an ICS date/date-time value → ``(datetime, all_day)``."""
-    value = value.strip()
-    for fmt, all_day in (("%Y%m%dT%H%M%SZ", False), ("%Y%m%dT%H%M%S", False),
-                         ("%Y%m%d", True)):
-        try:
-            return datetime.strptime(value, fmt), all_day
-        except ValueError:
-            continue
-    return None, False
+def _ics_dt(value: str) -> datetime | None:
+    """A basic-format iCalendar date/date-time as a naive *local* datetime for
+    prefilling the form (a trailing ``Z`` is converted from UTC)."""
+    from datetime import timezone
+
+    txt = (value or "").strip()
+    try:
+        if "T" not in txt:
+            return datetime.strptime(txt, "%Y%m%d")
+        utc = txt.endswith("Z")
+        dt = datetime.strptime(txt.rstrip("Z"), "%Y%m%dT%H%M%S")
+    except ValueError:
+        return None
+    if utc:
+        dt = dt.replace(tzinfo=timezone.utc).astimezone().replace(tzinfo=None)
+    return dt
 
 
 def parse_ics(path: str) -> dict:
-    """Minimal VEVENT reader: title, start/end, location, description."""
-    fields: dict = {}
+    """VEVENT reader for the system ``.ics`` handler, backed by
+    ``core.ics.parse_invite`` (full RFC 5545 line unfolding + escaping — the
+    previous line-by-line reader truncated folded SUMMARY/DESCRIPTION values,
+    which real Outlook/Google invites always contain)."""
+    from ..core import ics
+
     with open(path, encoding="utf-8", errors="replace") as fh:
-        for raw in fh:
-            line = raw.rstrip("\n").rstrip("\r")
-            key, _sep, val = line.partition(":")
-            name = key.split(";", 1)[0].upper()
-            if name == "SUMMARY":
-                fields["subject"] = val
-            elif name == "LOCATION":
-                fields["location"] = val
-            elif name == "DESCRIPTION":
-                fields["body"] = val.replace("\\n", "\n").replace("\\,", ",")
-            elif name == "DTSTART":
-                dt, all_day = _ics_dt(val)
-                fields["start_dt"], fields["all_day"] = dt, all_day
-            elif name == "DTEND":
-                dt, _ad = _ics_dt(val)
-                fields["end_dt"] = dt
-    return fields
+        invite = ics.parse_invite(fh.read())
+    if not invite:
+        return {}
+    return {
+        "subject": invite.get("summary", ""),
+        "location": invite.get("location", ""),
+        "body": invite.get("description", ""),
+        "all_day": invite.get("all_day", False),
+        "start_dt": _ics_dt(invite.get("dtstart", "")),
+        "end_dt": _ics_dt(invite.get("dtend", "")),
+    }
 
 
 class EventWindow(EditorWindow):

@@ -191,6 +191,8 @@ class GoogleClient:
         listing = self._get(url, SCOPES_MAIL)
         out = []
         for ref in listing.get("messages", []):
+            if not ref.get("id"):
+                continue
             msg = self._get(
                 f"{GMAIL}/users/me/messages/{ref['id']}"
                 f"?format=metadata&metadataHeaders=Subject&metadataHeaders=From",
@@ -200,17 +202,30 @@ class GoogleClient:
         return out, listing.get("nextPageToken")
 
     @staticmethod
-    def _message_from_json(msg: dict) -> dict:
-        headers = {
-            h["name"].lower(): h["value"]
-            for h in msg.get("payload", {}).get("headers", [])
-        }
-        received = ""
-        internal = msg.get("internalDate")
-        if internal:
-            received = datetime.fromtimestamp(
-                int(internal) / 1000, tz=timezone.utc
-            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    def _headers(payload: dict) -> dict:
+        """Header name→value map, tolerating malformed entries (a single header
+        without name/value must not sink the whole folder render)."""
+        out: dict = {}
+        for h in payload.get("headers", []) or []:
+            name = (h.get("name") or "").lower()
+            if name:
+                out[name] = h.get("value", "") or ""
+        return out
+
+    @staticmethod
+    def _received(msg: dict) -> str:
+        """internalDate (ms since epoch) as an ISO string, "" when unparsable."""
+        try:
+            return datetime.fromtimestamp(
+                int(msg.get("internalDate") or 0) / 1000, tz=timezone.utc
+            ).strftime("%Y-%m-%dT%H:%M:%SZ") if msg.get("internalDate") else ""
+        except (ValueError, TypeError, OSError, OverflowError):
+            return ""
+
+    @classmethod
+    def _message_from_json(cls, msg: dict) -> dict:
+        headers = cls._headers(msg.get("payload", {}))
+        received = cls._received(msg)
         labels = msg.get("labelIds", [])
         # Gmail's snippet (and occasionally header values) are HTML-escaped
         # ('&amp;', '&#39;', …); decode so plain Gtk.Labels read naturally.
@@ -228,12 +243,8 @@ class GoogleClient:
     def get_message(self, message_id: str) -> dict:
         data = self._get(f"{GMAIL}/users/me/messages/{message_id}?format=full", SCOPES_MAIL)
         payload = data.get("payload", {})
-        headers = {h["name"].lower(): h["value"] for h in payload.get("headers", [])}
-        received = ""
-        if data.get("internalDate"):
-            received = datetime.fromtimestamp(
-                int(data["internalDate"]) / 1000, tz=timezone.utc
-            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        headers = self._headers(payload)
+        received = self._received(data)
         content, is_html = _extract_rich(payload)
         if not content:
             content, is_html = html.unescape(data.get("snippet", "")), False
@@ -288,6 +299,24 @@ class GoogleClient:
     def delete_message(self, message_id: str) -> None:
         """Move a message to Trash (recoverable; needs gmail.modify)."""
         self._post(f"{GMAIL}/users/me/messages/{message_id}/trash", None, SCOPES_MAIL)
+
+    def move_message(self, message_id: str, folder_id: str, *,
+                     from_folder: str | None = None) -> None:
+        """Move a message between folders. Gmail folders are labels, so a move
+        adds the destination label and drops the source one (gmail.modify)."""
+        body: dict = {"addLabelIds": [folder_id]}
+        if from_folder and from_folder != folder_id:
+            body["removeLabelIds"] = [from_folder]
+        self._post(f"{GMAIL}/users/me/messages/{message_id}/modify", body,
+                   SCOPES_MAIL)
+
+    def set_flag(self, message_id: str, flagged: bool = True) -> None:
+        """Star/unstar a message — Gmail's equivalent of Outlook's follow-up
+        flag (gmail.modify)."""
+        body = ({"addLabelIds": ["STARRED"]} if flagged
+                else {"removeLabelIds": ["STARRED"]})
+        self._post(f"{GMAIL}/users/me/messages/{message_id}/modify", body,
+                   SCOPES_MAIL)
 
     # -- compose / reply --------------------------------------------------
     @staticmethod
@@ -346,6 +375,17 @@ class GoogleClient:
                                 attachments=attachments, importance=importance)
         self._post(f"{GMAIL}/users/me/messages/send", {"raw": raw}, SCOPES_MAIL)
 
+    def save_draft(self, *, to, subject: str, body: str, cc=None, bcc=None,
+                   html: bool = False, attachments=None, source: str = "me",
+                   address: str | None = None) -> None:
+        """Save an unfinished message into Gmail's Drafts so it can be resumed
+        here or in any other client. ``source``/``address`` accepted for API
+        parity with the Graph client."""
+        raw = self._raw_message(to, subject, body, cc=cc, bcc=bcc, html=html,
+                                attachments=attachments)
+        self._post(f"{GMAIL}/users/me/drafts", {"message": {"raw": raw}},
+                   SCOPES_MAIL)
+
     def reply_mail(self, message_id: str, body: str, *, reply_all: bool = False,
                    html: bool = False, attachments=None,
                    read_receipt: bool = False) -> None:
@@ -361,8 +401,7 @@ class GoogleClient:
             f"&metadataHeaders=Message-ID&metadataHeaders=References",
             SCOPES_MAIL,
         )
-        hdrs = {h["name"].lower(): h["value"]
-                for h in meta.get("payload", {}).get("headers", [])}
+        hdrs = self._headers(meta.get("payload", {}))
         subject = hdrs.get("subject", "")
         if not subject.lower().startswith("re:"):
             subject = f"Re: {subject}"
@@ -562,6 +601,12 @@ class GoogleClient:
             "online_url": e.get("hangoutLink", ""),
         }
 
+    @staticmethod
+    def _event_slot(iso: str, all_day: bool) -> dict:
+        """A Google start/end slot: all-day events use a bare ``date``; timed
+        events use the full ``dateTime`` (shared by create/update)."""
+        return {"date": iso[:10]} if all_day else {"dateTime": iso}
+
     def create_event(self, *, subject: str, start_iso: str, end_iso: str,
                      location: str = "", body: str = "", attendees=None,
                      all_day: bool = False, source: str = "me",
@@ -573,10 +618,9 @@ class GoogleClient:
         timed events use the full ``dateTime``. ``online=True`` requests a Google
         Meet link — Google fills ``hangoutLink`` (and ``conferenceData``) on the
         returned event (``conferenceDataVersion=1`` is required for that)."""
-        def slot(iso: str) -> dict:
-            return {"date": iso[:10]} if all_day else {"dateTime": iso}
-
-        event = {"summary": subject, "start": slot(start_iso), "end": slot(end_iso)}
+        event = {"summary": subject,
+                 "start": self._event_slot(start_iso, all_day),
+                 "end": self._event_slot(end_iso, all_day)}
         if location:
             event["location"] = location
         if body:
@@ -597,12 +641,10 @@ class GoogleClient:
                      address: str | None = None, html: bool = False) -> dict:
         """Edit an existing event in its calendar (PATCH). Read-only calendars
         (holidays/birthdays) return a Google 403, surfaced as a toast."""
-        def slot(iso: str) -> dict:
-            return {"date": iso[:10]} if all_day else {"dateTime": iso}
-
         cal, raw = self._unwrap_event_id(event_id)
-        event: dict = {"summary": subject, "start": slot(start_iso),
-                       "end": slot(end_iso)}
+        event: dict = {"summary": subject,
+                       "start": self._event_slot(start_iso, all_day),
+                       "end": self._event_slot(end_iso, all_day)}
         # PATCH: omit empty body/location so they're left unchanged on the server.
         if location:
             event["location"] = location
@@ -652,6 +694,18 @@ class GoogleClient:
             "can_respond": is_attendee and not is_organizer,
         })
         return base
+
+    def find_event_by_uid(self, uid: str) -> str:
+        """The primary-calendar event id matching an iMIP UID, or ``""``.
+        Google stages emailed invites on the calendar keyed by their iCalUID,
+        so the Mail view can reconcile an RSVP with that copy."""
+        if not uid:
+            return ""
+        params = urllib.parse.urlencode({"iCalUID": uid, "maxResults": "1"})
+        data = self._get(f"{CALENDAR}/calendars/primary/events?{params}",
+                         SCOPES_CALENDAR)
+        items = data.get("items", [])
+        return items[0].get("id", "") if items else ""
 
     def respond_event(self, event_id: str, action: str,
                       comment: str = "", send: bool = True) -> None:

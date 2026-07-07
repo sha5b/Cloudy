@@ -634,6 +634,8 @@ class CloudyWindow(Adw.ApplicationWindow):
             client.send_mail(to=recipients, subject=subj, body=bod, cc=cc, bcc=bcc,
                              html=True, attachments=attachments, importance=importance,
                              read_receipt=read_receipt)
+            from .widgets.source_nav import invalidate_cached
+            invalidate_cached(self.get_application(), account.id, "messages")
 
         ComposeWindow(self, account, from_label=account.display_name, send_fn=send,
                       to=to, subject=subject, body=body).present()
@@ -654,9 +656,12 @@ class CloudyWindow(Adw.ApplicationWindow):
 
         def create(**fields):
             from .widgets.clients import build_account_client
+            from .widgets.source_nav import invalidate_cached
 
             client = build_account_client(self.get_application(), account)
-            return client.create_event(**fields)
+            result = client.create_event(**fields)
+            invalidate_cached(self.get_application(), account.id, "events")
+            return result
 
         EventWindow(self, on_calendar=account.display_name, create_fn=create,
                     initial=initial, title=_("Add event")).present()

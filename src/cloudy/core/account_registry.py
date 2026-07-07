@@ -69,11 +69,13 @@ class Account:
 
     @classmethod
     def from_dict(cls, data: dict) -> "Account":
+        # Tolerate schema drift / partial writes: a persisted entry missing one
+        # of these keys must not prevent the whole app from starting.
         return cls(
-            id=data["id"],
-            display_name=data["display_name"],
-            provider=data["provider"],
-            module_id=data["module_id"],
+            id=data.get("id", ""),
+            display_name=data.get("display_name", ""),
+            provider=data.get("provider", ""),
+            module_id=data.get("module_id", ""),
             signed_in=data.get("signed_in", False),
             full_sync=data.get("full_sync", False),
             mount_location=data.get("mount_location", ""),
@@ -105,7 +107,8 @@ class AccountRegistry(GObject.Object):
             data = []
         with self._lock:
             self._accounts = {
-                d["id"]: Account.from_dict(d) for d in data if "id" in d
+                d["id"]: Account.from_dict(d)
+                for d in data if isinstance(d, dict) and d.get("id")
             }
 
     def _save(self) -> None:

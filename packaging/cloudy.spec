@@ -13,7 +13,7 @@
 %global appid io.github.sha5b.Cloudy
 
 Name:           cloudy
-Version:        0.2.8
+Version:        0.2.9
 Release:        1%{?dist}
 Summary:        Use OneDrive, SharePoint and unified mail on your desktop
 
@@ -115,6 +115,15 @@ meson test -C %{_vpath_builddir} --print-errorlogs
 %{_datadir}/%{name}/
 
 %changelog
+* Tue Jul 07 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.2.9-1
+- Fix stale calendar/dashboard data: every event and mail write now invalidates the caches.
+- Fix Graph TimeZoneNotSupportedException ('CEST'): resolve the IANA zone from /etc/localtime.
+- Fix detail/compose windows never finishing loading (async callback guard dropped toplevels).
+- Meeting invites accepted from mail now sync to your calendar; cancellations can remove the event.
+- Mail organization: right-click to mark unread, flag, move to folder; Save draft + resume drafts.
+- Harden Gmail/Graph parsers, .ics unfolding, and account-store loading against malformed input.
+- Split the Graph client into per-domain modules; dedupe date parsing and list navigation helpers.
+
 * Mon Jun 29 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.2.8-1
 - Per-account API client cache; Mail/Chat lists refresh in place instead of rebuilding.
 - Microsoft 365 share links resolve local paths to the correct drive/item.

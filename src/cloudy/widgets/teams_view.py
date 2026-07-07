@@ -508,7 +508,7 @@ class TeamsView(Adw.Bin):
         if not posts:
             self._conv_box.append(status_page(
                 "user-available-symbolic", _("No posts yet"),
-                _("Be the first to post in %s.") % self._channel_name))
+                _("Be the first to post in %s.") % esc(self._channel_name)))
             GLib.idle_add(self._scroll_conv_to_bottom)
             return
         for post in posts:

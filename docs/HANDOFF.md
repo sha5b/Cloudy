@@ -7,7 +7,7 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
 
 Cloudy is a **GTK4 / Libadwaita (Python / PyGObject)** super-app for **Microsoft 365 (OneDrive + Teams/SharePoint, Mail, Calendar)** and **Google (Gmail, Calendar, Drive)** on Fedora 44 (GNOME 50). It orchestrates proven backends (rclone for mounts; Microsoft Graph / Google REST for mail/calendar) rather than reimplementing them. Read `docs/ARCHITECTURE.md`, `docs/AUTH.md`, `docs/SECRETS.md`, `docs/ROADMAP.md` for depth.
 
-## Current status (v0.2.8, 2026-06-29)
+## Current status (v0.2.9, 2026-07-07)
 
 Working and shipped (RPM + Flatpak; `make release` reinstalls the user Flatpak so the running app == release):
 - **Sign-in** (Microsoft via MSAL, Google via loopback+PKCE), tokens in libsecret.
@@ -17,7 +17,7 @@ Working and shipped (RPM + Flatpak; `make release` reinstalls the user Flatpak s
 - **Chat** (MS Teams chats; Google Chat Workspace-only) and **Teams** (channels + OneNote) capabilities, work/school MS only — hidden for personal accounts.
 - **Activity** tab (first/default): aggregates recent mail + upcoming/unanswered invites + recent chats + Teams reacted/mentioned.
 - **Dashboard** (Pinned / Upcoming / Recent mail / Recent file changes, + Activity feed for work MS accounts), **Command palette** (Ctrl+K), **persistent offline cache**, **notifications** with DND/quiet-hours/relevance-tiers/per-source mute/digest batching, Nautilus D-Bus emblems + extension, secrets, rclone auto-provision.
-- 0.2.4 added RSVP + Activity; 0.2.5 added fuller mail headers, pop-out message window, accurate chat presence; 0.2.8 added per-account client cache, in-place Mail/Chat list updates, M365 share-link path resolution, RFC 5545 iCalendar parsing, pinned/checksum rclone provisioning, and Graph calendar/OneNote fixes.
+- 0.2.4 added RSVP + Activity; 0.2.5 added fuller mail headers, pop-out message window, accurate chat presence; 0.2.8 added per-account client cache, in-place Mail/Chat list updates, M365 share-link path resolution, RFC 5545 iCalendar parsing, pinned/checksum rclone provisioning, and Graph calendar/OneNote fixes; 0.2.9 added invite→calendar sync (mail RSVP updates your own calendar, cancellations removable), mail organization (right-click mark-unread/flag/move-to-folder, drafts save + resume), cache invalidation on every write (fixes stale event times), the /etc/localtime IANA timezone fix (CEST 400), the run_async toplevel-window fix (modals stuck on spinner), parser hardening, and the GraphClient per-domain split (graph_http/files/mail/calendar/chat/teams).
 
 **Verification convention** (applies to nearly every change below): GUI cannot be driven from a headless/agent shell (Wayland handoff kills the wrapper shell, exit 144). So changes are verified by `make build` + `make test` (4–5 meson validators + the `tests/unit/` logic suite, 104 tests) + `make lint` (py_compile) + a **headless import/instantiate smoke test** (`gi.require_version` then import/instantiate each widget module — `window.py`/`application.py` can't be imported standalone, their `Gtk.Template` needs the compiled gresource), then the user runs `make run`/`make flatpak-run` to eyeball. "Not yet eyeballed" boilerplate is omitted per-entry below.
 

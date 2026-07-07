@@ -483,20 +483,6 @@ class CloudyPreferences(Adw.PreferencesDialog):
     def _on_offline_sync_toggled(self, _switch, _param) -> None:
         self._rebuild_accounts()  # refresh the per-account sync toggles' state
 
-    def _refresh_sync_row_sensitivity(self) -> None:
-        full = self._setting_str("default-sync-type") == "full"
-        master = False
-        try:
-            master = self._settings.get_boolean("offline-sync-enabled")
-        except Exception:  # noqa: BLE001
-            pass
-        for row, account in self._sync_rows:
-            row.set_sensitive(full and master and account.signed_in)
-            if not master:
-                row.set_active(False)
-            elif full:
-                row.set_active(bool(getattr(account, "full_sync", False)))
-
     def _on_autostart_changed(self, switch, _param) -> None:
         enabled = switch.get_active()
         self._settings.set_boolean("autostart", enabled)

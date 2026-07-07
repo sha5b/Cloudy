@@ -11,6 +11,52 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-07-07
+
+### Added
+- **Mail organization**: right-click a message for Mark as unread/read, Flag for
+  follow-up, Move to folder and Move to Trash — on both Microsoft 365 and Gmail
+  (new `move_message` / `set_flag` client methods).
+- **Drafts**: a Save draft button in the composer (`save_draft` on both
+  clients), and opening a message in the Drafts folder resumes it in the
+  composer; sending deletes the draft.
+- **Invite → calendar sync**: answering a meeting invite from Mail now also
+  sets the response on the copy Exchange/Google staged on your calendar (looked
+  up by iMIP UID via the new `find_event_by_uid`), or creates the event locally
+  for external invites. Cancellation mails get a "Remove from calendar" button.
+
+### Fixed
+- **Stale calendar/dashboard data** (the "edited event still shows the old
+  time" bug): every event and mail write now invalidates the
+  stale-while-revalidate caches (`invalidate_cached` helper), the Dashboard
+  passes `on_changed` to the event editor, and the background poller drops
+  caches when it detects new mail/events.
+- **Graph `TimeZoneNotSupportedException: 'CEST'`**: the local timezone for
+  `Prefer: outlook.timezone` and event slots is now resolved from the
+  `/etc/localtime` symlink to a real IANA name, falling back to `UTC` — never
+  an abbreviation.
+- **Detail/compose windows loading forever**: the `run_async` liveness guard
+  dropped results for toplevel windows (a window never has a parent); it now
+  checks `get_root()` instead.
+- **"Tried to remove non-child" warning flood**: `patch_listbox` no longer
+  removes brand-new rows that were never added.
+- **Crash-proofing**: one malformed Gmail header or Graph list item no longer
+  breaks the whole folder/month render; `.ics` files opened via the system
+  handler now go through the full RFC 5545 parser (folded lines no longer
+  truncate titles/descriptions); a corrupt persisted account entry no longer
+  prevents startup; a garbled `SEQUENCE:` no longer aborts invite parsing.
+- **Shared-calendar RSVP** routed to the wrong mailbox (malformed `/me` path).
+- Channel names are escaped before Pango markup in Teams empty states.
+
+### Changed
+- **GraphClient split by domain**: `graph.py` (1,847 lines) is now an assembly
+  over `graph_http` / `graph_files` / `graph_mail` / `graph_calendar` /
+  `graph_chat` / `graph_teams` mixins — same public API, verbatim bodies.
+- Consolidated ISO-8601 parsing (`format.parse_iso_utc`), list keyboard
+  navigation (`data_rows`/`move_selection`), sender formatting and the event
+  slot builders into shared helpers; removed dead code
+  (`_refresh_sync_row_sensitivity`, `OneDriveFiles.unmount_drive`).
+
 ## [0.2.8] - 2026-06-29
 
 ### Added

@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from gettext import gettext as _
 
-from gi.repository import Adw, Gdk, Gtk, Pango
+from gi.repository import Adw, Gdk, GLib, Gtk, Pango
 
 from .format import esc, sender_name, short_time
 from .source_nav import (
@@ -21,7 +21,10 @@ from .source_nav import (
     SourceTabs,
     action_row,
     clear_listbox,
+    data_rows,
     friendly_error,
+    invalidate_cached,
+    move_selection,
     is_pinned,
     is_scope_error,
     message_row,
@@ -108,6 +111,10 @@ class MailView(Adw.Bin):
         dbl = Gtk.GestureClick(button=Gdk.BUTTON_PRIMARY)
         dbl.connect("pressed", self._on_list_double)
         self._list.add_controller(dbl)
+        # Right-click a message → context menu (unread / flag / move / trash).
+        ctx = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
+        ctx.connect("pressed", self._on_list_context)
+        self._list.add_controller(ctx)
         list_scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER,
                                          vexpand=True)
         list_scroll.set_child(self._list)
@@ -880,28 +887,10 @@ class MailView(Adw.Bin):
                 if getattr(r, "_mid", None) is not None]
 
     def _message_rows(self) -> list:
-        rows = []
-        child = self._list.get_first_child()
-        while child is not None:
-            if getattr(child, "_mid", None) is not None:
-                rows.append(child)
-            child = child.get_next_sibling()
-        return rows
+        return data_rows(self._list, "_mid")
 
     def _nav(self, delta: int, *, extend: bool = False) -> None:
-        rows = self._message_rows()
-        if not rows:
-            return
-        sel = [r for r in self._list.get_selected_rows() if r in rows]
-        if not sel:
-            target = rows[0]
-        else:
-            cur = rows.index(sel[-1])
-            target = rows[max(0, min(len(rows) - 1, cur + delta))]
-        if not extend:
-            self._list.unselect_all()
-        self._list.select_row(target)
-        target.grab_focus()  # scrolls the row into view
+        move_selection(self._list, self._message_rows(), delta, extend=extend)
 
     def refresh_live(self) -> None:
         """Re-fetch the current folder from the server. Called by the notifier
@@ -912,9 +901,69 @@ class MailView(Adw.Bin):
             return
         self._load_async()
 
+    def _in_drafts_folder(self) -> bool:
+        """True when the active folder is Drafts (Graph well-known alias, or
+        Gmail's DRAFT label)."""
+        if str(self._folder_id).upper() == "DRAFT":
+            return True
+        current = next((f for f in self._folder_items
+                        if f.get("id") == self._folder_id), None)
+        return (current or {}).get("well_known") == "drafts"
+
+    def _open_draft(self, mid) -> None:
+        """Open a draft back into the composer; sending deletes the draft."""
+        self._window.add_toast(_("Opening draft…"))
+
+        def work():
+            from .clients import build_account_client
+
+            client = build_account_client(self._window.get_application(), self._account)
+            return client.get_message(mid)
+
+        def done(msg, error):
+            if error:
+                self._window.add_toast(
+                    _("Couldn't open draft: %s") % friendly_error(error))
+                return False
+            from .compose_view import ComposeWindow
+            from .message_view import _to_text
+
+            source, address = self._send_context()
+
+            def send(to, subject, body, *, cc=None, bcc=None, attachments=None,
+                     importance="normal", read_receipt=False):
+                from .clients import build_account_client
+
+                client = build_account_client(
+                    self._window.get_application(), self._account)
+                client.send_mail(to=to, subject=subject, body=body, source=source,
+                                 address=address, cc=cc, bcc=bcc, html=True,
+                                 attachments=attachments, importance=importance,
+                                 read_receipt=read_receipt)
+                try:
+                    client.delete_message(mid)  # the sent copy supersedes it
+                except Exception:  # noqa: BLE001 - a leftover draft is harmless
+                    pass
+                self._invalidate_messages()
+
+            body = msg.get("body", "") or ""
+            ComposeWindow(self._window, self._account,
+                          from_label=self._from_label(), send_fn=send,
+                          to=msg.get("to", ""), subject=msg.get("subject", ""),
+                          body=_to_text(body) if msg.get("body_html") else body,
+                          title=_("Draft"),
+                          draft_fn=self._make_draft_fn()).present()
+            return False
+
+        run_async(work, done)
+
     def open_message(self, mid) -> None:
         """Open a message in the reading pane (also used to deep-link from the
-        dashboard). Selects its list row when that row is present."""
+        dashboard). Selects its list row when that row is present. A message in
+        Drafts opens back into the composer instead."""
+        if self._in_drafts_folder():
+            self._open_draft(mid)
+            return
         if mid == self._open_mid:
             self._split.set_show_content(True)  # already open; just reveal it
             return
@@ -992,11 +1041,18 @@ class MailView(Adw.Bin):
         return False
 
     def _on_invite_rsvp(self, action: str) -> None:
-        """Answer the open message's meeting invite by emailing a METHOD:REPLY
-        VCALENDAR back to the organizer (iMIP). ``action`` is accept |
-        tentativelyAccept | decline."""
+        """Answer the open message's meeting invite: email a METHOD:REPLY
+        VCALENDAR back to the organizer (iMIP), then mirror the answer onto the
+        user's own calendar so an accepted invite actually shows up there.
+        ``action`` is accept | tentativelyAccept | decline — or
+        ``removeCancelled`` for the cancellation card's remove button."""
         invite = (self._open_msg or {}).get("invite")
-        if not invite or not invite.get("organizer_email"):
+        if not invite:
+            return
+        if action == "removeCancelled":
+            self._remove_cancelled(invite)
+            return
+        if not invite.get("organizer_email"):
             self._window.add_toast(_("This invite has no organizer to reply to."))
             return
         self._window.add_toast(_("Sending response…"))
@@ -1019,16 +1075,79 @@ class MailView(Adw.Bin):
                 attachments=[{"name": "invite.ics",
                               "content_type": "text/calendar; method=REPLY; charset=UTF-8",
                               "data": reply.encode("utf-8")}])
-            return action
+            return action, self._sync_invite_to_calendar(client, invite, action)
 
         run_async(work, self._on_invite_replied)
 
-    def _on_invite_replied(self, action, error) -> bool:
+    def _sync_invite_to_calendar(self, client, invite, action) -> bool:
+        """Mirror a mail RSVP onto the user's own calendar (worker thread).
+        Exchange/Google usually auto-stage an emailed invite as a tentative
+        event — find that copy by its iMIP UID and set the response there
+        *without* re-notifying the organizer (the iMIP reply just did). When the
+        provider didn't stage it (an external invite), create the event locally
+        on accept/tentative. Best-effort: the reply already went out."""
+        from ..core import ics
+
+        try:
+            eid = client.find_event_by_uid(invite.get("uid", ""))
+            if eid:
+                client.respond_event(eid, action, send=False)
+            elif action == "decline":
+                return True  # nothing staged, nothing to remove
+            else:
+                start = ics.ical_to_iso(invite.get("dtstart", ""))
+                end = ics.ical_to_iso(invite.get("dtend", "")) or start
+                if not start:
+                    return False
+                client.create_event(
+                    subject=invite.get("summary") or _("Meeting"),
+                    start_iso=start, end_iso=end,
+                    location=invite.get("location", ""),
+                    body=invite.get("description", ""),
+                    all_day=bool(invite.get("all_day")))
+            invalidate_cached(self._window.get_application(),
+                              self._account.id, "events")
+            return True
+        except Exception:  # noqa: BLE001 - calendar mirror is best-effort
+            return False
+
+    def _remove_cancelled(self, invite) -> None:
+        """Take a cancelled meeting off the user's calendar (looked up by its
+        iMIP UID)."""
+        self._window.add_toast(_("Removing from calendar…"))
+
+        def work():
+            from .clients import build_account_client
+
+            client = build_account_client(self._window.get_application(), self._account)
+            eid = client.find_event_by_uid(invite.get("uid", ""))
+            if not eid:
+                return False
+            client.delete_event(eid)
+            invalidate_cached(self._window.get_application(),
+                              self._account.id, "events")
+            return True
+
+        def done(removed, error):
+            if error:
+                self._window.add_toast(
+                    _("Couldn't remove it: %s") % friendly_error(error))
+            elif removed:
+                self._window.add_toast(_("Removed from calendar."))
+            else:
+                self._window.add_toast(_("That meeting isn't on your calendar."))
+            return False
+
+        run_async(work, done)
+
+    def _on_invite_replied(self, result, error) -> bool:
         if error:
             self._window.add_toast(_("Couldn't send response: %s") % friendly_error(error))
             return False
+        action, synced = result
         # Reflect the new answer in the open reader without a full reload.
-        self._window.add_toast(_("Response sent."))
+        self._window.add_toast(_("Response sent — calendar updated.") if synced
+                               else _("Response sent."))
         if self._open_msg and self._open_msg.get("invite"):
             partstat = {"accept": "ACCEPTED", "tentativelyAccept": "TENTATIVE",
                         "decline": "DECLINED"}.get(action, "")
@@ -1059,6 +1178,21 @@ class MailView(Adw.Bin):
             return address
         return self._account.display_name
 
+    def _make_draft_fn(self):
+        """A ``draft_fn`` for the composer, saving into the provider's Drafts."""
+        source, address = self._send_context()
+
+        def save_draft(to, subject, body, *, cc=None, bcc=None, attachments=None):
+            from .clients import build_account_client
+
+            client = build_account_client(self._window.get_application(), self._account)
+            client.save_draft(to=to, subject=subject, body=body, source=source,
+                              address=address, cc=cc, bcc=bcc, html=True,
+                              attachments=attachments)
+            self._invalidate_messages()
+
+        return save_draft
+
     def _on_compose_clicked(self, _btn) -> None:
         from .compose_view import ComposeWindow
 
@@ -1073,9 +1207,11 @@ class MailView(Adw.Bin):
                              source=source, address=address, cc=cc, bcc=bcc,
                              html=True, attachments=attachments, importance=importance,
                              read_receipt=read_receipt)
+            self._invalidate_messages()
 
         ComposeWindow(self._window, self._account, from_label=self._from_label(),
-                      send_fn=send, body=self._signature_block()).present()
+                      send_fn=send, body=self._signature_block(),
+                      draft_fn=self._make_draft_fn()).present()
 
     def _on_reply_clicked(self, _btn) -> None:
         self._open_reply(reply_all=False)
@@ -1101,12 +1237,14 @@ class MailView(Adw.Bin):
             client = build_account_client(self._window.get_application(), self._account)
             client.reply_mail(mid, body, reply_all=reply_all, html=True,
                               attachments=attachments, read_receipt=read_receipt)
+            self._invalidate_messages()
 
         ComposeWindow(
             self._window, self._account, from_label=self._account.display_name,
             send_fn=send, to=meta.get("from", ""), subject=subject,
             body=self._signature_block(),
             title=_("Reply all") if reply_all else _("Reply"),
+            draft_fn=self._make_draft_fn(),
         ).present()
 
     def _on_forward_clicked(self, _btn) -> None:
@@ -1145,10 +1283,11 @@ class MailView(Adw.Bin):
                              address=address, cc=cc, bcc=bcc, html=True,
                              attachments=fwd_atts, importance=importance,
                              read_receipt=read_receipt)
+            self._invalidate_messages()
 
         ComposeWindow(self._window, self._account, from_label=self._from_label(),
                       send_fn=send, subject=subject, body=body,
-                      title=_("Forward")).present()
+                      title=_("Forward"), draft_fn=self._make_draft_fn()).present()
 
     @staticmethod
     def _forward_quote(msg: dict) -> str:
@@ -1174,18 +1313,44 @@ class MailView(Adw.Bin):
         sig = (getattr(self._account, "signature", "") or "").strip()
         return ("\n\n" + sig + "\n") if sig else ""
 
-    # -- write-back: mark read / delete -----------------------------------
-    def _mark_read(self, mid) -> None:
+    def _invalidate_messages(self) -> None:
+        """Drop this account's cached mail lists + the Dashboard aggregate after
+        a send/reply/forward, so the Sent folder (and unread counts) revalidate
+        instead of serving the pre-send cache as fresh. Thread-safe — the send
+        wrappers call this from their worker thread."""
+        invalidate_cached(self._window.get_application(),
+                          self._account.id, "messages")
+
+    # -- write-back: read state / flag / move / delete ---------------------
+    def _sync_cached_row(self, mid) -> None:
+        """After mutating a message dict in place, refresh its row, re-persist
+        the folder cache (same dict identity) and drop the Dashboard aggregate
+        (its unread counts changed)."""
         cached = self._messages_by_id.get(mid)
         if cached is not None:
-            if cached.get("is_read", True):
-                return  # already read; no write needed
-            cached["is_read"] = True  # also updates the cached list (same dict)
             self._refresh_row(mid, cached)
+        cache = self._window.get_application().cache
+        entry = cache.get(self._cache_key())
+        if entry is not None:
+            cache.set(self._cache_key(), entry[0])
+        cache.invalidate(prefix="dashboard:")
+
+    def _mark_read(self, mid) -> None:
+        cached = self._messages_by_id.get(mid)
+        if cached is not None and cached.get("is_read", True):
+            return  # already read; no write needed
+        self._set_read(mid, True)
+
+    def _set_read(self, mid, read: bool) -> None:
+        cached = self._messages_by_id.get(mid)
+        if cached is not None:
+            cached["is_read"] = read  # also updates the cached list (same dict)
+            self._sync_cached_row(mid)
             # Reflect the read in the sidebar/tab unread badge right away. The
             # badge counts the personal inbox only, so don't decrement it for a
             # shared mailbox / non-inbox folder (the next poll re-syncs anyway).
-            if self._source == "me" and self._folder_id in (self._inbox_id, "unread"):
+            if (read and self._source == "me"
+                    and self._folder_id in (self._inbox_id, "unread")):
                 notifier = getattr(self._window.get_application(), "notifier", None)
                 if notifier is not None and hasattr(notifier, "mark_mail_read"):
                     notifier.mark_mail_read(self._account.id, mid)
@@ -1194,10 +1359,121 @@ class MailView(Adw.Bin):
             from .clients import build_account_client
 
             client = build_account_client(self._window.get_application(), self._account)
-            client.mark_read(mid, True)
+            client.mark_read(mid, read)
 
         # Best-effort (e.g. Gmail not re-consented): ignore the outcome.
         run_async(work, lambda _r, _e: False)
+
+    def _set_flag(self, mid, flagged: bool) -> None:
+        """Flag/star a message for follow-up (optimistic row update)."""
+        cached = self._messages_by_id.get(mid)
+        if cached is not None:
+            cached["starred"] = flagged
+            self._sync_cached_row(mid)
+
+        def work():
+            from .clients import build_account_client
+
+            client = build_account_client(self._window.get_application(), self._account)
+            client.set_flag(mid, flagged)
+
+        run_async(work, lambda _r, error: self._flag_failed(mid, error)
+                  if error else False)
+
+    def _flag_failed(self, mid, error) -> bool:
+        cached = self._messages_by_id.get(mid)
+        if cached is not None:  # roll the optimistic flip back
+            cached["starred"] = not cached.get("starred")
+            self._sync_cached_row(mid)
+        self._window.add_toast(_("Couldn't update the flag: %s") % friendly_error(error))
+        return False
+
+    # -- context menu -------------------------------------------------------
+    def _on_list_context(self, _gesture, _n_press, _x, y) -> None:
+        row = self._list.get_row_at_y(int(y))
+        mid = getattr(row, "_mid", None)
+        if mid is None or str(mid).startswith("group:"):
+            return  # group threads are read-only
+        self._list.unselect_all()
+        self._list.select_row(row)
+        msg = self._messages_by_id.get(mid, {})
+        pop = Gtk.Popover(has_arrow=False)
+        pop.set_parent(row)
+        pop.connect("closed", lambda p: GLib.idle_add(p.unparent))
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                      margin_top=4, margin_bottom=4)
+
+        def item(label, callback):
+            btn = Gtk.Button(label=label)
+            btn.add_css_class("flat")
+            btn.get_child().set_halign(Gtk.Align.START)
+            btn.connect("clicked",
+                        lambda _b: (pop.popdown(), callback()) and None)
+            box.append(btn)
+
+        read = msg.get("is_read", True)
+        item(_("Mark as unread") if read else _("Mark as read"),
+             lambda: self._set_read(mid, not read))
+        starred = bool(msg.get("starred"))
+        item(_("Remove flag") if starred else _("Flag for follow-up"),
+             lambda: self._set_flag(mid, not starred))
+        item(_("Move to folder…"), lambda: self._move_dialog([mid]))
+        item(_("Move to Trash"), lambda: self._on_delete_clicked(None))
+        pop.set_child(box)
+        pop.popup()
+
+    # -- move to folder -----------------------------------------------------
+    def _move_dialog(self, mids) -> None:
+        folders = [f for f in self._folder_items
+                   if f.get("id") not in ("unread", self._folder_id)]
+        if not folders:
+            self._window.add_toast(_("There's no other folder to move to."))
+            return
+        dialog = Adw.AlertDialog(
+            heading=_("Move to folder"),
+            body=_("Choose a destination for %d message(s).") % len(mids))
+        dd = Gtk.DropDown(model=Gtk.StringList.new([f["name"] for f in folders]))
+        dialog.set_extra_child(dd)
+        dialog.add_response("cancel", _("Cancel"))
+        dialog.add_response("move", _("Move"))
+        dialog.set_response_appearance("move", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("move")
+
+        def on_response(_d, response):
+            idx = dd.get_selected()
+            if response == "move" and 0 <= idx < len(folders):
+                self._move_messages(list(mids), folders[idx].get("id", ""))
+
+        dialog.connect("response", on_response)
+        dialog.present(self._window)
+
+    def _move_messages(self, mids, dest) -> None:
+        """Optimistically drop the rows, then move on the server."""
+        src = self._fetch_folder()
+        for mid in mids:
+            row = self._rows_by_id.pop(mid, None)
+            self._messages_by_id.pop(mid, None)
+            if row is not None:
+                self._list.remove(row)
+            self._drop_from_cache(mid)
+        if self._open_mid in mids:
+            self._open_mid = None
+        self._window.add_toast(
+            _("Moved %d messages") % len(mids) if len(mids) > 1 else _("Message moved"))
+
+        def work():
+            from .clients import build_account_client
+
+            client = build_account_client(self._window.get_application(), self._account)
+            for mid in mids:
+                client.move_message(mid, dest, from_folder=src)
+
+        run_async(work, lambda _r, error: self._move_failed(error) if error else False)
+
+    def _move_failed(self, error) -> bool:
+        self._window.add_toast(_("Couldn't move: %s") % friendly_error(error))
+        self._load_async()  # the optimistic removal was wrong; restore from server
+        return False
 
     def _on_delete_clicked(self, _btn=None) -> None:
         # Delete the whole selection (multi-select), or the open message if
@@ -1249,6 +1525,7 @@ class MailView(Adw.Bin):
         if cached is not None:
             cache.set(self._cache_key(),
                       [m for m in cached[0] if m.get("id") != mid])
+        cache.invalidate(prefix="dashboard:")  # unread counts changed
         return False
 
     def _delete_failed(self, error) -> bool:

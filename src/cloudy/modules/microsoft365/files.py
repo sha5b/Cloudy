@@ -44,9 +44,6 @@ class OneDriveFiles:
         remote = self.mounts._safe_name(drive.name)
         return self.mounts.mount(name=drive.name, remote=remote, drive_id=drive.id)
 
-    def unmount_drive(self, drive) -> None:
-        self.mounts.unmount(self.mounts.mountpoint_for(drive.name))
-
     def is_mounted(self, drive) -> bool:
         return self.mounts.is_mounted(self.mounts.mountpoint_for(drive.name))
 

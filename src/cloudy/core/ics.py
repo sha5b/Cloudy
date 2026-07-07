@@ -137,7 +137,10 @@ def parse_invite(text: str) -> dict | None:
         elif name == "UID":
             ev["uid"] = value.strip()
         elif name == "SEQUENCE":
-            ev["sequence"] = int(value.strip() or 0)
+            try:
+                ev["sequence"] = int(value.strip() or 0)
+            except ValueError:
+                pass  # a garbled SEQUENCE must not abort the whole invite
         elif name == "SUMMARY":
             ev["summary"] = value.replace("\n", " ").strip()
         elif name == "LOCATION":
@@ -175,6 +178,25 @@ def parse_invite(text: str) -> dict | None:
         if match:
             ev["join_url"] = match.group(0)
     return ev
+
+
+def ical_to_iso(value: str) -> str:
+    """A basic-format iCalendar date/date-time (``20260623`` /
+    ``20260623T140000[Z]``) as an ISO-8601 string the calendar clients accept,
+    or ``""`` when unparsable. A trailing ``Z`` stays UTC; a naive value is
+    taken as local wall-clock; a bare date becomes local midnight (Google
+    requires an offset on dateTime values, so naive results are made aware)."""
+    txt = (value or "").strip()
+    try:
+        if "T" not in txt:
+            return datetime.strptime(txt, "%Y%m%d").astimezone().isoformat()
+        utc = txt.endswith("Z")
+        dt = datetime.strptime(txt.rstrip("Z"), "%Y%m%dT%H%M%S")
+    except ValueError:
+        return ""
+    if utc:
+        return dt.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+    return dt.astimezone().isoformat()
 
 
 def find_attendee(invite: dict, email: str) -> dict | None:

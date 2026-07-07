@@ -21,6 +21,8 @@ from gettext import ngettext
 from gi.repository import Gio, GLib
 
 from .interfaces import capabilities_of
+# Display/parse helpers shared with the views (format.py is GTK-free).
+from ..widgets.format import parse_iso_utc, sender_name
 
 # How often to poll, and how far ahead an event must be to trigger a reminder.
 _POLL_SECONDS = 120
@@ -33,40 +35,11 @@ _MAX_MAIL_PER_TICK = 4  # don't flood on a busy inbox
 _DIGEST_SECONDS = 600
 
 
-def _short_sender(value: str) -> str:
-    """A display name from a 'Name <addr>' string (best-effort)."""
-    value = (value or "").strip()
-    if "<" in value:
-        name = value.split("<", 1)[0].strip().strip('"')
-        return name or value
-    return value
-
-
-def _parse_dt(value: str) -> datetime | None:
-    """Parse an event start into an aware UTC datetime (Graph times are UTC)."""
-    if not value:
-        return None
-    txt = value.strip()
-    if "T" not in txt:  # a bare date (all-day) → no minute-level reminder
-        return None
-    try:
-        dt = datetime.fromisoformat(txt.replace("Z", "+00:00"))
-    except ValueError:
-        # Graph sometimes returns 7-digit fractional seconds; trim and retry,
-        # preserving any trailing timezone offset.
-        head, _, tail = txt.partition(".")
-        tz = ""
-        for marker in ("+", "-"):
-            if marker in tail:
-                tz = marker + tail.split(marker, 1)[1]
-                break
-        try:
-            dt = datetime.fromisoformat(head + tz)
-        except ValueError:
-            return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+# One parser/formatter for the whole app: format.parse_iso_utc handles Graph's
+# 7-digit fractional seconds and bare dates (returns None — no minute-level
+# reminder for all-day events); sender_name normalizes 'Name <addr>'.
+_parse_dt = parse_iso_utc
+_short_sender = sender_name
 
 
 class NotificationManager:
@@ -362,12 +335,15 @@ class NotificationManager:
         self._trim_set(seen, self._MAX_SEEN_MAIL)
         # Live-update the open mail list and Activity feed (like the badge, this
         # happens even when the banner is suppressed by DND/quiet hours — nothing
-        # is interruptive).
-        if fresh and win is not None:
-            if hasattr(win, "refresh_account_mail"):
-                win.refresh_account_mail(account.id)
-            if hasattr(win, "refresh_account_activity"):
-                win.refresh_account_activity(account.id)
+        # is interruptive). Also drop the cached lists so a view opened *later*
+        # (or the Dashboard) refetches instead of serving the pre-mail cache.
+        if fresh:
+            self._invalidate(f"{account.id}:messages:")
+            if win is not None:
+                if hasattr(win, "refresh_account_mail"):
+                    win.refresh_account_mail(account.id)
+                if hasattr(win, "refresh_account_activity"):
+                    win.refresh_account_activity(account.id)
         immediate = []
         for msg in fresh:
             # Important mail interrupts (tier 1); ordinary mail is ambient (tier 2).
@@ -379,6 +355,14 @@ class NotificationManager:
         for msg, tier in immediate[:_MAX_MAIL_PER_TICK]:  # but cap live banners
             self._notify_mail(account, msg, tier)
         return False
+
+    def _invalidate(self, prefix: str) -> None:
+        """Drop cached lists the poll just proved stale (plus the Dashboard
+        aggregate, which folds all accounts)."""
+        cache = getattr(self._app, "cache", None)
+        if cache is not None:
+            cache.invalidate(prefix=prefix)
+            cache.invalidate(prefix="dashboard:")
 
     def _type_icon(self, symbolic_name: str) -> Gio.Icon:
         """A per-kind notification icon (mail / calendar / chat) with the app
@@ -431,6 +415,7 @@ class NotificationManager:
         if first_time:
             self._primed.add(f"cal:{account.id}")
         elif new_ids:
+            self._invalidate(f"{account.id}:events:")
             win = self._app.props.active_window
             if win is not None:
                 if hasattr(win, "refresh_account_calendar"):
