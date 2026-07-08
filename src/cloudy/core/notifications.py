@@ -422,6 +422,14 @@ class NotificationManager:
                     win.refresh_account_calendar(account.id)
                 if hasattr(win, "refresh_account_activity"):
                     win.refresh_account_activity(account.id)
+            # Keep the GNOME Shell / Evolution calendar mirror in sync even when
+            # the Cloudy window is closed or on another tab.
+            try:
+                from ..core.eds_publish import publish_account_current_month_async
+
+                publish_account_current_month_async(self._app, account)
+            except Exception:  # noqa: BLE001 - notifications must not break on EDS
+                pass
         for ev in events:
             if ev.get("all_day"):
                 continue

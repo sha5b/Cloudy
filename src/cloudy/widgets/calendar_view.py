@@ -465,8 +465,9 @@ class CalendarView(Adw.Bin):
             self._window.get_application().cache.set(key, events)
             # Mirror your own calendar into the GNOME Shell calendar (EDS),
             # best-effort and off-thread (no-op unless the setting is on).
-            if key.startswith(f"{self._account.id}:events:me:") and events:
-                self._publish_to_eds(events)
+            if key.startswith(f"{self._account.id}:events:me:"):
+                month = key.split(":")[-1]
+                self._publish_to_eds(events, month)
         if key != self._cache_key():
             return False  # a stale response for a source/month we left
         if error:
@@ -615,7 +616,7 @@ class CalendarView(Adw.Bin):
         self._load_async()
         return False
 
-    def _publish_to_eds(self, events) -> None:
+    def _publish_to_eds(self, events, month: str) -> None:
         import threading
 
         app = self._window.get_application()
@@ -625,7 +626,7 @@ class CalendarView(Adw.Bin):
             try:
                 from ..core.eds_publish import publish_events
 
-                publish_events(app, account, events)
+                publish_events(app, account, events, month=month)
             except Exception:  # noqa: BLE001 - EDS mirroring never affects the UI
                 pass
 

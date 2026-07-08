@@ -429,6 +429,12 @@ class CloudyWindow(Adw.ApplicationWindow):
         app.evict_account_client(account.id)
         account.signed_in = False
         self._registry.update(account)
+        try:
+            from .core.eds_publish import remove_account_events_async
+
+            remove_account_events_async(app, account.id)
+        except Exception:  # noqa: BLE001 - EDS cleanup is best-effort
+            pass
         self.add_toast(_("Signed out. Sign in again to refresh permissions."))
         self._show_account(account)
 
@@ -442,6 +448,12 @@ class CloudyWindow(Adw.ApplicationWindow):
                 pass
         app.evict_account_client(account.id)
         self._registry.remove(account.id)
+        try:
+            from .core.eds_publish import remove_account_events_async
+
+            remove_account_events_async(app, account.id)
+        except Exception:  # noqa: BLE001 - EDS cleanup is best-effort
+            pass
         self.content_nav.pop_to_tag("welcome")
         self.add_toast(_("Removed %s.") % account.display_name)
 

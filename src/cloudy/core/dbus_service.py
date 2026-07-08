@@ -15,6 +15,8 @@ Status values returned by StatusForPath:
 
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -62,6 +64,8 @@ class SyncStatusService:
     is optional and used for CreateShareLink.
     """
 
+    _ACTIVE_MOUNTS_TTL_S = 5.0
+
     def __init__(
         self,
         connection: Gio.DBusConnection,
@@ -72,6 +76,7 @@ class SyncStatusService:
         self._mount_root = Path(mount_root)
         self._share_link_fn = share_link_fn
         self._reg_id = 0
+        self._active_mounts_cache: tuple[set[str], float] | None = None
 
     def publish(self) -> None:
         node = Gio.DBusNodeInfo.new_for_xml(INTROSPECTION_XML)
@@ -86,34 +91,49 @@ class SyncStatusService:
 
     # -- status logic -----------------------------------------------------
     def status_for(self, path: str) -> str:
+        # Pure string/prefix check — never resolve() or stat the path. A hung
+        # FUSE mount can block os.path.realpath for an unbounded time, and this
+        # runs on the app's main loop.
         try:
-            p = Path(path).resolve()
-            root = self._mount_root.resolve()
+            p = os.path.abspath(os.path.normpath(path))
+            root = os.path.abspath(os.path.normpath(str(self._mount_root)))
         except OSError:
             return "ignored"
-        if root not in p.parents and p != root:
+        if not (p == root or p.startswith(root + os.sep)):
             return "ignored"
         # A managed mount sits at root/<drive> or root/<account>/<drive> (drives
         # are namespaced per account). Walk up to root; if any ancestor is an
         # active mountpoint, the path lives on a mounted Cloudy drive.
         #
-        # We read the kernel mount table (MountManager.active_mounts parses
-        # /proc/self/mountinfo) rather than os.path.ismount(): ismount *stats*
-        # the path, which BLOCKS indefinitely on a hung/slow FUSE network mount
-        # — and this runs on the app's main loop for every Nautilus emblem/menu
-        # query, so a stalled mount would freeze both the app and the file
-        # manager. The mount table never touches the filesystem, so it can't
-        # hang. (Same reasoning as mounts.py::active_mounts.)
-        from ..modules.microsoft365.mounts import MountManager
-
-        active = MountManager.active_mounts()
+        # We read the kernel mount table (cached briefly) rather than
+        # os.path.ismount(): ismount *stats* the path, which BLOCKS indefinitely
+        # on a hung/slow FUSE network mount — and this runs on the app's main
+        # loop for every Nautilus emblem/menu query, so a stalled mount would
+        # freeze both the app and the file manager. The mount table never touches
+        # the filesystem, so it can't hang.
+        active = self._active_mounts()
         node = p
         while True:
-            if str(node) in active:
+            if node in active:
                 return "synced"
             if node == root:
                 return "offline"
-            node = node.parent
+            parent = os.path.dirname(node)
+            if parent == node:
+                return "offline"
+            node = parent
+
+    def _active_mounts(self) -> set[str]:
+        """Cached, stall-proof view of the kernel mount table."""
+        now = time.monotonic()
+        cache = self._active_mounts_cache
+        if cache is not None and (now - cache[1]) < self._ACTIVE_MOUNTS_TTL_S:
+            return cache[0]
+        from ..modules.microsoft365.mounts import MountManager
+
+        active = MountManager.active_mounts()
+        self._active_mounts_cache = (active, now)
+        return active
 
     def _managed_roots(self) -> list:
         """The directories Cloudy manages (mount root + sync root). The host
@@ -148,14 +168,10 @@ class SyncStatusService:
             invocation.return_value(
                 GLib.Variant("(as)", (self._managed_roots(),)))
         elif method == "SyncPath":
-            (path,) = params.unpack()
             # TODO(stage 5): trigger sync/hydration of this path.
-            self.emit_status_changed(path, self.status_for(path))
             invocation.return_value(None)
         elif method == "FreeUpSpace":
-            (path,) = params.unpack()
             # TODO(stage 5): dehydrate (drop local cache) for this path.
-            self.emit_status_changed(path, self.status_for(path))
             invocation.return_value(None)
         elif method == "CreateShareLink":
             path, editable = params.unpack()

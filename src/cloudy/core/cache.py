@@ -67,6 +67,15 @@ class MemoryCache:
         if self._path is not None:
             self._maybe_flush()
 
+    def items(self):
+        """Return a snapshot of (key, value) pairs currently in the cache.
+
+        Values are the cached payloads (not the internal timestamp tuples).
+        Safe to call from any thread.
+        """
+        with self._lock:
+            return [(k, v[1]) for k, v in self._store.items()]
+
     # -- disk persistence -------------------------------------------------
     def _load(self) -> None:
         """Seed the cache from disk; loaded entries are backdated so they read

@@ -132,6 +132,7 @@ class CloudyPreferences(Adw.PreferencesDialog):
             subtitle=_("Mirror your calendar into the top-bar calendar (Evolution)."))
         self._settings.bind("eds-publish-enabled", eds, "active",
                             Gio.SettingsBindFlags.DEFAULT)
+        eds.connect("notify::active", self._on_eds_toggled)
         integ.add(eds)
 
         nautilus = Adw.SwitchRow(
@@ -482,6 +483,16 @@ class CloudyPreferences(Adw.PreferencesDialog):
 
     def _on_offline_sync_toggled(self, _switch, _param) -> None:
         self._rebuild_accounts()  # refresh the per-account sync toggles' state
+
+    def _on_eds_toggled(self, switch, _param) -> None:
+        """When the user enables the EDS mirror, backfill from cached events."""
+        if switch.get_active() and self._app is not None:
+            try:
+                from .core.eds_publish import publish_all_cached_events
+
+                publish_all_cached_events(self._app)
+            except Exception:  # noqa: BLE001 - preferences must not break on EDS
+                pass
 
     def _on_autostart_changed(self, switch, _param) -> None:
         enabled = switch.get_active()

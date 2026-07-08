@@ -39,14 +39,25 @@ BUS_NAME = "io.github.sha5b.Cloudy"
 OBJECT_PATH = "/io/github/sha5b/Cloudy/Sync"
 INTERFACE = "io.github.sha5b.Cloudy.Sync"
 
-_DBUS_TIMEOUT_MS = 2000
+_DBUS_TIMEOUT_MS = 1500
 # How long to trust the cached "managed roots" before asking the app again.
 # These paths almost never change, so a long TTL keeps the file manager fast.
 _ROOTS_TTL_S = 30.0
+# If creating the D-Bus proxy fails (app not running / bus stalled), remember
+# that for a short while so every menu rebuild doesn't retry synchronously.
+_PROXY_FAILURE_TTL_S = 10.0
 
 
 def _proxy():
-    """Return a cached D-Bus proxy to the Cloudy sync service, or None."""
+    """Return a cached D-Bus proxy to the Cloudy sync service, or None.
+
+    Creation is bounded by a timeout so a stalled session bus can't freeze
+    Nautilus on every menu query.
+    """
+    now = time.monotonic()
+    failed_since = getattr(_proxy, "_failed_at", 0)
+    if now - failed_since < _PROXY_FAILURE_TTL_S:
+        return None
     if not hasattr(_proxy, "_p"):
         try:
             _proxy._p = Gio.DBusProxy.new_for_bus_sync(
@@ -56,6 +67,7 @@ def _proxy():
             )
         except GLib.Error:
             _proxy._p = None
+            _proxy._failed_at = now
     return _proxy._p
 
 
@@ -76,6 +88,36 @@ def _call(method, variant, reply_type=None):
         return result
     except GLib.Error:
         return None
+
+
+def _call_async(method, variant, reply_type=None, callback=None):
+    """Fire a D-Bus call without blocking Nautilus's UI thread.
+
+    ``callback(result, error)`` is invoked from the GLib main loop when the call
+    finishes. If the proxy is unavailable the callback is invoked immediately
+    with (None, None).
+    """
+    proxy = _proxy()
+    if proxy is None:
+        if callback is not None:
+            callback(None, None)
+        return
+
+    def _on_done(_proxy, res):
+        result = None
+        err = None
+        try:
+            result = _proxy.call_finish(res)
+            if reply_type is not None and result is not None \
+                    and result.get_type_string() != reply_type:
+                result = None
+        except GLib.Error as exc:
+            err = exc
+        if callback is not None:
+            callback(result, err)
+
+    proxy.call(method, variant, Gio.DBusCallFlags.NONE, _DBUS_TIMEOUT_MS,
+               None, _on_done)
 
 
 def _path_of(file):
@@ -163,23 +205,30 @@ class CloudyMenuProvider(GObject.GObject, Nautilus.MenuProvider):
     # -- helpers ----------------------------------------------------------
     def _on_copy_link(self, _menu, files):
         path = _path_of(files[0])
-        result = _call(
-            "CreateShareLink", GLib.Variant("(sb)", (path, False)), "(s)"
+
+        def _on_result(result, _error):
+            if result is None:
+                return
+            (url,) = result.unpack()
+            if url:
+                clipboard = self._clipboard()
+                if clipboard is not None:
+                    clipboard.set_text(url)
+
+        _call_async(
+            "CreateShareLink", GLib.Variant("(sb)", (path, False)), "(s)", _on_result
         )
-        if result is None:
-            return
-        (url,) = result.unpack()
-        if url:
-            clipboard = self._clipboard()
-            if clipboard is not None:
-                clipboard.set_text(url)
 
     def _on_free_space(self, _menu, files):
         for f in files:
-            _call("FreeUpSpace", GLib.Variant("(s)", (_path_of(f),)), None)
+            _call_async(
+                "FreeUpSpace", GLib.Variant("(s)", (_path_of(f),)), None, None
+            )
 
     def _on_sync_folder(self, _menu, folder):
-        _call("SyncPath", GLib.Variant("(s)", (_path_of(folder),)), None)
+        _call_async(
+            "SyncPath", GLib.Variant("(s)", (_path_of(folder),)), None, None
+        )
 
     @staticmethod
     def _clipboard():

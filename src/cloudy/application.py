@@ -36,6 +36,8 @@ class CloudyApplication(Adw.Application):
 
         # Core services, constructed once and shared with the window/modules.
         self.settings = Gio.Settings.new(application_id)
+        self.settings.connect("changed::eds-publish-enabled",
+                              self._on_eds_publish_enabled_changed)
         self.secrets = SecretStore()
         self.registry = AccountRegistry(self.settings)
         self.engine = PluginEngine(self.settings)
@@ -173,6 +175,19 @@ class CloudyApplication(Adw.Application):
         if service is not None:
             service.unpublish()
         Adw.Application.do_dbus_unregister(self, connection, object_path)
+
+    def _on_eds_publish_enabled_changed(self, settings, _key) -> None:
+        """When the EDS mirror is disabled, wipe the Cloudy calendar so stale
+        events don't linger in GNOME Calendar. Re-enabling is handled by the
+        preferences backfill path."""
+        if settings.get_boolean("eds-publish-enabled"):
+            return
+        try:
+            from .core.eds_publish import clear_all_events_async
+
+            clear_all_events_async(self)
+        except Exception:  # noqa: BLE001 - EDS cleanup is best-effort
+            pass
 
     def do_startup(self):
         Adw.Application.do_startup(self)
