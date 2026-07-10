@@ -1236,7 +1236,14 @@ class ChatView(Adw.Bin):
 
     @staticmethod
     def _has_content(msg) -> bool:
-        return bool((msg.get("text", "") or "").strip()) or bool(msg.get("attachments"))
+        # A forwarded/replied message can have no body text and no file
+        # attachments of its own (the quoted content lives in `forward`/
+        # `reply_to`), so count those too — otherwise it's filtered out as
+        # "empty" and the message disappears from the thread.
+        return (bool((msg.get("text", "") or "").strip())
+                or bool(msg.get("attachments"))
+                or bool(msg.get("forward"))
+                or bool(msg.get("reply_to")))
 
     # -- older-message pagination -----------------------------------------
     def _sync_older_row(self) -> None:
