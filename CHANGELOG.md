@@ -48,6 +48,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bubble in place but left the thread signature stale, so the next background
   poll did a full rebuild that reloaded images and yanked the scroll. The
   in-place update now keeps the signature in step, so the view stays put.
+- **A sent file not appearing until you refreshed**: the optimistic "sending"
+  bubble only echoed in-memory images and was then reused as-is on confirm, so a
+  file attachment never rendered. A confirmed message with an attachment now
+  rebuilds its bubble in place, showing the file immediately.
+- **A deleted message coming back until you refreshed**: Graph's soft-delete is
+  eventually consistent, so the poll briefly re-added it. Locally-deleted
+  messages are now hidden until the server stops returning them.
+- **Clicking a forward from a chat you're not in stranding you on an error
+  page**: it now bounces back to the previous chat with a toast instead.
 - **SharePoint/OneDrive Office uploads never reaching the server**: OneDrive for
   Business rewrites `.docx`/`.pptx`/`.xlsx` server-side, so rclone's size/hash
   verify failed, deleted its copy and retried forever. OneDrive mounts now pass

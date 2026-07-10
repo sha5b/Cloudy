@@ -108,6 +108,7 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
           <li>Forwarded chat messages now show their content instead of just an attachment</li>
           <li>The chat no longer jumps around when you react to a message</li>
           <li>Click a forwarded message to jump to the original message it came from</li>
+          <li>Sent files now appear immediately, and deleted messages stay gone, without needing a refresh</li>
         </ul>
       </description>
     </release>

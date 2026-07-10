@@ -129,6 +129,9 @@ meson test -C %{_vpath_builddir} --print-errorlogs
 - Render forwarded chat messages instead of collapsing them to a bare attachment.
 - Stop the chat from jumping when reacting to a message (kept the thread signature in step).
 - Click a forwarded message to jump to its original (opening the source chat if needed).
+- Sent files now render immediately (rebuild the optimistic bubble on confirm) instead of needing a refresh.
+- Deleted messages stay deleted through the eventual-consistency window instead of reappearing.
+- A forward from a chat you're not in bounces back with a toast instead of stranding on an error page.
 
 * Tue Jul 07 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.2.9-1
 - Fix stale calendar/dashboard data: every event and mail write now invalidates the caches.

@@ -134,6 +134,8 @@ class ChatView(Adw.Bin):
         self._autoscroll = True
         self._anchor_bottom = None  # distance-from-bottom to preserve on prepend
         self._pending_scroll_mid = None  # message to land on after a forward jump
+        self._forward_return_to = None   # chat to bounce back to if a jump 403s
+        self._deleted_ids = set()   # locally-deleted msgs to hide until server catches up
         self._adjusting = False     # guard: ignore our own programmatic scrolls
         self._scroll_anim = None    # active "jump to latest" animation, if any
         self._rendered_sigs = []    # per-message fingerprints of the live thread
@@ -721,7 +723,8 @@ class ChatView(Adw.Bin):
         if error or chat_id != self._chat_id or not result:
             return False  # transient failure / switched away — try again next tick
         messages, next_token = result
-        kept = [m for m in messages if self._has_content(m)]
+        kept = [m for m in messages
+                if self._has_content(m) and m.get("id") not in self._deleted_ids]
         if self._thread_signature(kept) == self._thread_sig:
             return False  # nothing changed — leave the thread (and scroll) alone
         self._msg_next_token = next_token
@@ -987,6 +990,7 @@ class ChatView(Adw.Bin):
     def open_chat(self, chat_id, name: str = "") -> None:
         if chat_id != self._chat_id:
             self._image_cache = {}  # drop the previous chat's decoded thumbnails
+            self._deleted_ids = set()  # locally-deleted marks are per-conversation
         self._chat_id = chat_id
         self._chat_name = name
         self._msg_next_token = None
@@ -1000,6 +1004,7 @@ class ChatView(Adw.Bin):
         self._autoscroll = True  # a freshly-opened chat lands on the newest message
         self._anchor_bottom = None
         self._pending_scroll_mid = None  # set by a forward-quote jump
+        self._forward_return_to = None   # chat to bounce back to if the jump 403s
         for btn in (self._entry, self._attach_btn, self._emoji_btn,
                     self._bold_btn, self._italic_btn):
             btn.set_sensitive(True)
@@ -1074,10 +1079,20 @@ class ChatView(Adw.Bin):
         if chat_id != self._chat_id:
             return False  # switched away
         if error:
+            # A forward jump into a chat we're not a member of 403s — bounce back
+            # to where we were instead of stranding on the error page.
+            ret = getattr(self, "_forward_return_to", None)
+            if ret and ret != chat_id:
+                self._forward_return_to = None
+                self._window.add_toast(
+                    _("Can't open that chat — you may not be a member."))
+                self.open_chat(ret)
+                return False
             self._clear_thread()
             self._thread.append(self._placeholder(
                 "dialog-error-symbolic", _("Couldn't open chat"), error))
             return False
+        self._forward_return_to = None  # opened fine; no bounce needed
         messages, next_token = result
         self._msg_next_token = next_token
         self._cache().set(self._msg_key(chat_id), messages)
@@ -1109,8 +1124,10 @@ class ChatView(Adw.Bin):
         if chat_id != self._chat_id:
             return
         # Skip empty/system rows so a bare timestamp never shows as its own
-        # "message" — the time belongs inside a real bubble.
-        messages = [m for m in messages if self._has_content(m)]
+        # "message" — the time belongs inside a real bubble. Also hide messages
+        # we just deleted locally (the server may still echo them briefly).
+        messages = [m for m in messages
+                    if self._has_content(m) and m.get("id") not in self._deleted_ids]
         new_sig = self._thread_signature(messages)
         if new_sig == self._thread_sig and self._bubble_widgets:
             return  # nothing visible changed — leave the thread (and scroll) alone
@@ -1142,12 +1159,28 @@ class ChatView(Adw.Bin):
                 # icon Sending→Sent and register it under the real id. No new
                 # bubble, no teardown — the thread stays perfectly still.
                 opt = self._optimistic
-                if (opt is not None and msg.get("is_mine")
-                        and (msg.get("text", "") or "").strip()
-                        == (opt["text"] or "").strip()):
+                opt_match = (opt is not None and msg.get("is_mine")
+                             and (msg.get("text", "") or "").strip()
+                             == (opt["text"] or "").strip())
+                if opt_match and not msg.get("attachments"):
+                    # Pure-text echo: adopt the exact widget in place (no rebuild,
+                    # no flicker), just flip Sending→Sent.
                     widget = opt["widget"]
                     self._set_status(widget, "sent")
                     self._optimistic = None
+                elif opt_match:
+                    # The echo couldn't render the confirmed file/attachment (only
+                    # in-memory images are echoed), so rebuild the bubble in place
+                    # — otherwise the file only appears after a manual refresh.
+                    old = opt["widget"]
+                    self._optimistic = None
+                    widget = self._bubble(msg)
+                    if old.get_parent() is self._thread:
+                        prev = old.get_prev_sibling()
+                        self._thread.remove(old)
+                        self._thread.insert_child_after(widget, prev)
+                    else:
+                        self._thread.append(widget)
                 else:
                     widget = self._bubble(msg)
                     self._thread.append(widget)
@@ -1565,10 +1598,14 @@ class ChatView(Adw.Bin):
         if not mid:
             return
         if cid and cid != self._chat_id:
-            # open_chat resets _pending_scroll_mid; set it *after* so the load
-            # completion knows to scroll there.
+            # open_chat resets these; set them *after* so the load completion
+            # knows to scroll there and, if the chat is inaccessible (a forward
+            # from a conversation we're not in → Graph 403), bounce back here
+            # instead of stranding the user on the error page.
+            prev = self._chat_id
             self.open_chat(cid)
             self._pending_scroll_mid = mid
+            self._forward_return_to = prev
         else:
             self._scroll_to_message(mid)
 
@@ -2749,6 +2786,11 @@ class ChatView(Adw.Bin):
         if bubble is not None and bubble.get_parent() is self._thread:
             self._thread.remove(bubble)
         self._bubble_widgets.pop(mid, None)
+        # Graph's soft-delete is eventually consistent: for a few seconds the
+        # poll still returns this message as live and would re-add its bubble.
+        # Remember it as locally-deleted so every render filters it out until the
+        # server stops returning it — otherwise the deletion "needs a refresh".
+        self._deleted_ids.add(mid)
         # Keep the render bookkeeping in step so a poll/reload doesn't rebuild
         # the deleted bubble back in from a stale (pre-consistency) response.
         self._rendered_sigs = [s for s in self._rendered_sigs if s[0] != mid]
@@ -2765,6 +2807,7 @@ class ChatView(Adw.Bin):
     def _on_deleted(self, chat_id, mid, error) -> bool:
         if error:
             self._window.add_toast(_("Couldn't delete: %s") % friendly_error(error))
+            self._deleted_ids.discard(mid)  # un-hide it; the delete didn't happen
             if chat_id == self._chat_id:
                 self._load_messages(chat_id)  # restore the optimistically-pulled bubble
             return False
