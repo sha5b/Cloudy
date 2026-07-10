@@ -42,7 +42,8 @@ class OneDriveFiles:
         integration); here we orchestrate the mount + bookmark.
         """
         remote = self.mounts._safe_name(drive.name)
-        return self.mounts.mount(name=drive.name, remote=remote, drive_id=drive.id)
+        return self.mounts.mount(name=drive.name, remote=remote, drive_id=drive.id,
+                                 onedrive=True)
 
     def is_mounted(self, drive) -> bool:
         return self.mounts.is_mounted(self.mounts.mountpoint_for(drive.name))

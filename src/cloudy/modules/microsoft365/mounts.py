@@ -81,6 +81,34 @@ def sync_root() -> Path:
     return _data_dir() / "synced"
 
 
+def log_root() -> Path:
+    """Where per-mount rclone daemon logs live (``…/cloudy/logs``).
+
+    The mount runs with ``--daemon``, which detaches from any terminal, so
+    without an explicit ``--log-file`` all output (crucially, *upload failures*
+    — SharePoint throttling, name/size rejections, mid-session token expiry) is
+    discarded. Logging each mount to its own file is what turns a silent
+    "my file never reached the server" into something diagnosable."""
+    return _data_dir() / "logs"
+
+
+def rclone_cache_dir() -> Path:
+    """rclone's VFS cache/metadata dir (its default ``<cache>/rclone``).
+
+    We deliberately DON'T override rclone's cache location: moving it would
+    strand any files still waiting to upload in the old cache (data loss). We
+    only *read* it — rclone writes one small JSON per opened/written file under
+    ``vfsMeta/<remote>/…`` with a ``Dirty`` flag; ``Dirty: true`` means "written
+    locally, not yet on the server", which is how ``upload_status`` reports
+    pending uploads without a control socket (``--rc`` can't coexist with
+    ``--daemon`` — it binds before the fork, so the child hits 'address already
+    in use'). In Flatpak the daemon runs on the host, so this is the *host*
+    cache dir (the manifest shares it read-only); degrade gracefully if unread."""
+    if _in_flatpak():
+        return Path.home() / ".cache" / "rclone"
+    return Path(GLib.get_user_cache_dir()) / "rclone"
+
+
 # -- remembered mounts (auto-remount on startup) -------------------------
 # A FUSE mount is a live ``rclone mount --daemon`` process; it dies on reboot.
 # To bring drives back automatically we persist *which* drives the user mounted
@@ -351,7 +379,72 @@ class MountManager:
         return [*_host_prefix(), self._rclone_binary() or RCLONE.binary, *args]
 
     # -- rclone command construction (testable without running it) -------
-    def rclone_mount_argv(self, remote: str, mountpoint: Path) -> list[str]:
+    def _mount_key(self, mountpoint: Path) -> str:
+        """Stable per-mount slug (account-folder + drive) for log/socket names,
+        so drives that share a name across accounts never collide."""
+        return self._safe_name(f"{mountpoint.parent.name}-{mountpoint.name}")
+
+    def log_file_for(self, mountpoint: Path) -> Path:
+        """Per-mount daemon log path."""
+        return log_root() / f"rclone-{self._mount_key(mountpoint)}.log"
+
+    def _rotate_log(self, log_file: Path, max_bytes: int = 5 * 1024 * 1024) -> None:
+        """Keep one previous log around and cap growth: if the current log is
+        over ``max_bytes``, move it aside to ``<name>.1`` before the daemon
+        reopens it (rclone has no built-in rotation and would append forever)."""
+        try:
+            if log_file.exists() and log_file.stat().st_size > max_bytes:
+                log_file.replace(log_file.with_suffix(log_file.suffix + ".1"))
+        except OSError:
+            pass
+
+    # -- config + live sync status --------------------------------------
+    def config_dump(self) -> dict:
+        """All rclone remotes as ``{name: {type, drive_id, …}}`` (``config
+        dump``). Used to reconstruct a lost mount record from an orphaned
+        bookmark. Best-effort — ``{}`` if rclone is missing or errors."""
+        if not self._rclone_binary():
+            return {}
+        try:
+            out = subprocess.run(self._rclone_argv("config", "dump"),
+                                 capture_output=True, text=True, timeout=30)
+            return json.loads(out.stdout or "{}")
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return {}
+
+    def upload_status(self, remote: str) -> dict:
+        """How many written files are still waiting to reach the server.
+
+        Reads rclone's VFS metadata (one small JSON per opened/written file
+        under ``<cache-dir>/vfsMeta/<remote>/``) and counts entries flagged
+        ``Dirty`` — i.e. present in the local cache but not yet uploaded. This
+        needs no control socket (``--rc`` can't coexist with ``--daemon``) and
+        never touches the FUSE path. Returns ``{"pending": int}``; ``pending`` is
+        0 when everything has landed (or nothing's been written). Bounded scan
+        so a huge cache can't stall the poll."""
+        meta = rclone_cache_dir() / "vfsMeta" / self._safe_name(remote)
+        if not meta.is_dir():
+            return {"pending": 0}
+        pending = 0
+        scanned = 0
+        try:
+            for jf in meta.rglob("*"):
+                if not jf.is_file():
+                    continue
+                scanned += 1
+                if scanned > 5000:  # safety bound; real dirty sets are tiny
+                    break
+                try:
+                    if json.loads(jf.read_text()).get("Dirty") is True:
+                        pending += 1
+                except (OSError, ValueError):
+                    continue
+        except OSError:
+            return {"pending": 0}
+        return {"pending": pending}
+
+    def rclone_mount_argv(self, remote: str, mountpoint: Path,
+                          onedrive: bool = False) -> list[str]:
         # Tuned for: open-to-load, stay-cached, and auto-refresh on server change.
         #   --vfs-cache-mode full  : download a file when opened, keep it on disk
         #                            (random-access reads work — needed by most
@@ -361,17 +454,41 @@ class MountManager:
         #                            server show locally within ~15s.
         #   --dir-cache-time 5m    : snappy listings; polling invalidates on change.
         #   --vfs-cache-max-age 72h: keep opened files cached (instant re-open).
+        #   --vfs-write-back 5s    : push a written/copied file to the server 5s
+        #                            after it's closed. Explicit (not relying on
+        #                            the default) so the upload window is known.
         #   --vfs-read-chunk-size  : start serving large files fast, grow chunks.
-        return self._rclone_argv(
+        #   --log-file/--log-level : capture uploads *and failures* to a per-mount
+        #                            log; the --daemon fork otherwise discards all
+        #                            output, making a failed upload invisible.
+        # (rclone's default --cache-dir is kept on purpose — see rclone_cache_dir.)
+        log_file = self.log_file_for(mountpoint)
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        self._rotate_log(log_file)
+        argv = self._rclone_argv(
             "mount", f"{remote}:", str(mountpoint),
             "--vfs-cache-mode", cache_mode(),
             "--dir-cache-time", "5m",
             "--poll-interval", "15s",
             "--vfs-cache-max-age", "72h",
+            "--vfs-write-back", "5s",
             "--vfs-read-chunk-size", "16M",
             "--vfs-read-chunk-size-limit", "512M",
-            "--daemon",
+            "--log-file", str(log_file),
+            "--log-level", "INFO",
         )
+        if onedrive:
+            # SharePoint / OneDrive-for-Business *rewrites* Office documents
+            # (.docx/.pptx/.xlsx) server-side, so the stored file ends up a
+            # different size/hash than what we uploaded. rclone's post-upload
+            # verification then reports "corrupted on transfer: sizes differ",
+            # deletes its copy, and retries forever — the file NEVER lands on
+            # the server (plain files are unaffected). Disabling the size/hash
+            # re-check is rclone's documented workaround for SharePoint; the
+            # upload itself is fine, only the paranoid verify is wrong here.
+            argv += ["--ignore-size", "--ignore-checksum"]
+        argv.append("--daemon")
+        return argv
 
     # -- two-way sync (rclone bisync) ------------------------------------
     def synced_dir_for(self, name: str) -> Path:
@@ -487,7 +604,8 @@ class MountManager:
 
     # -- mount / unmount --------------------------------------------------
     def mount(self, *, name: str, remote: str, backend: Backend | None = None,
-              drive_id: str = "", base: Path | None = None) -> MountInfo:
+              drive_id: str = "", base: Path | None = None,
+              onedrive: bool = False) -> MountInfo:
         backend = backend or self.preferred_backend()
         if backend is None:
             raise RuntimeError(
@@ -500,18 +618,25 @@ class MountManager:
         if not self.is_mounted(mountpoint):
             if backend is RCLONE:
                 # `rclone mount --daemon` forks and the parent exits 0 *before*
-                # the FUSE mount is actually up, so a 0 return tells us nothing.
-                # Capture the parent's stderr (config/auth errors surface here),
-                # then poll the mount table until the mount really appears.
-                proc = subprocess.run(self.rclone_mount_argv(remote, mountpoint),
-                                      capture_output=True, text=True)
-                err = (proc.stderr or proc.stdout or "").strip()
+                # the FUSE mount is actually up, so a 0 return tells us nothing;
+                # poll the mount table until it really appears.
+                #
+                # MUST NOT capture_output here: with --daemon + --log-file the
+                # forked daemon inherits the stdout/stderr pipes and holds them
+                # open, so subprocess.run() would block reading them *forever*
+                # (hung mount worker). Errors go to the per-mount --log-file
+                # instead; DEVNULL lets the parent return the instant it forks.
+                log_file = self.log_file_for(mountpoint)
+                proc = subprocess.run(
+                    self.rclone_mount_argv(remote, mountpoint, onedrive=onedrive),
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 if proc.returncode != 0:
-                    raise RuntimeError("rclone mount failed: %s" % (err or "unknown error"))
+                    raise RuntimeError(
+                        "rclone mount failed (exit %d); see %s"
+                        % (proc.returncode, log_file))
                 if not self._await_mount(mountpoint):
                     raise RuntimeError(
-                        "rclone mount didn't come up%s"
-                        % (": " + err if err else " (timed out)"))
+                        "rclone mount didn't come up (timed out); see %s" % log_file)
             elif backend is ONEDRIVER:
                 subprocess.run([ONEDRIVER.path() or ONEDRIVER.binary, str(mountpoint)], check=True)
 
@@ -545,7 +670,7 @@ class MountManager:
             }
         self.create_remote(remote, backend, opts)
         return self.mount(name=drive.name, remote=remote,
-                          drive_id=drive.id, base=base)
+                          drive_id=drive.id, base=base, onedrive=not google)
 
     def unmount(self, mountpoint: Path) -> None:
         if self.is_mounted(mountpoint):
@@ -582,6 +707,23 @@ class MountManager:
         uri = "file://" + quote(str(mountpoint))
         kept = [l for l in path.read_text().splitlines() if l.split(" ", 1)[0] != uri]
         path.write_text("\n".join(kept) + ("\n" if kept else ""))
+
+    def bookmark_paths(self) -> list[Path]:
+        """Local filesystem paths of every GTK bookmark (``file://`` only).
+
+        Used to find Cloudy sidebar bookmarks that outlived their mount so
+        reconciliation can adopt or clear them."""
+        path = _bookmarks_file()
+        if not path.exists():
+            return []
+        from urllib.parse import unquote, urlparse
+
+        out: list[Path] = []
+        for line in path.read_text().splitlines():
+            uri = line.split(" ", 1)[0].strip()
+            if uri.startswith("file://"):
+                out.append(Path(unquote(urlparse(uri).path)))
+        return out
 
 
 def remount_saved(registry, secrets, log=lambda _m: None) -> int:
@@ -635,3 +777,101 @@ def remount_saved(registry, secrets, log=lambda _m: None) -> int:
         except Exception as exc:  # noqa: BLE001 - one bad drive must not block others
             log(f"failed to remount {drive_name!r}: {exc}")
     return remounted
+
+
+def _reconstruct_record(account, folder: str, dump: dict) -> dict | None:
+    """Rebuild a mount record for a drive whose bookmark survived but whose
+    ``mounts.json`` entry was lost, from the rclone remote config (which already
+    holds the token, ``drive_id`` and ``drive_type``). ``folder`` is the
+    mountpoint's final path component == the rclone remote name."""
+    cfg = dump.get(folder)
+    if cfg is None:
+        return None
+    if cfg.get("type") == "drive":  # google
+        if cfg.get("shared_with_me") == "true":
+            kind, drive_id = "google_shared_with_me", ""
+        elif cfg.get("team_drive"):
+            kind, drive_id = "google_shared_drive", cfg.get("team_drive", "")
+        else:
+            kind, drive_id = "google_mydrive", ""
+    else:  # onedrive / sharepoint
+        kind = cfg.get("drive_type", "documentLibrary")
+        drive_id = cfg.get("drive_id", "")
+    return {
+        "account_id": account.id,
+        "drive_name": folder,
+        "drive_id": drive_id,
+        "drive_kind": kind,
+        "mountpoint": str(mount_base_for(account) / MountManager._safe_name(folder)),
+    }
+
+
+def _remember(rec: dict) -> None:
+    """Add or replace a mount record (dedup by ``account_id`` + ``drive_name``)."""
+    key = _record_key(rec["account_id"], rec["drive_name"])
+    records = [r for r in load_mount_records()
+               if _record_key(r.get("account_id", ""), r.get("drive_name", "")) != key]
+    records.append(rec)
+    _save_mount_records(records)
+
+
+def reconcile_mounts(registry, log=lambda _m: None) -> dict:
+    """Heal drift between Nautilus sidebar bookmarks, remembered mounts, and the
+    rclone remote config.
+
+    This fixes the silent-data-loss class of bug where a sidebar bookmark
+    outlives its mount: opening it in Nautilus shows a *bare local stub* folder,
+    so files dropped there write to disk and never upload. For every Cloudy
+    bookmark whose drive is NOT currently mounted:
+
+      * if its rclone remote still exists and the mountpoint maps to a known
+        account → **adopt** it (write a mount record so the auto-remount brings
+        it back — the remote already holds the token/drive_id, so no re-auth);
+      * otherwise → **remove** the stale bookmark.
+
+    A live-but-unremembered mount is recorded so it survives the next restart.
+    Best-effort; never raises. Returns ``{"adopted", "recorded", "removed"}``.
+    Run once at startup (before ``remount_saved``), not on the health watchdog.
+    """
+    mgr = MountManager()
+    counts = {"adopted": 0, "recorded": 0, "removed": 0}
+    bases: dict[str, object] = {}
+    for account in registry.accounts():
+        try:
+            bases[str(mount_base_for(account))] = account
+        except Exception:  # noqa: BLE001 - never let one account block the sweep
+            continue
+    dump = mgr.config_dump() if mgr.preferred_backend() else {}
+    root = str(mount_root())
+    recorded_mps = {r.get("mountpoint", "") for r in load_mount_records()}
+
+    for p in mgr.bookmark_paths():
+        sp = str(p)
+        account = bases.get(str(p.parent))
+        # Only touch Cloudy-managed bookmarks: under a known account base, or
+        # (renamed/removed account) anywhere under the mount root. Everything
+        # else in the sidebar (Documents, Music, …) is left untouched.
+        if account is None and not sp.startswith(root + os.sep):
+            continue
+        folder = p.name
+        if mgr.is_mounted(p):
+            if account is not None and sp not in recorded_mps:
+                rec = _reconstruct_record(account, folder, dump)
+                if rec:
+                    _remember(rec)
+                    recorded_mps.add(sp)
+                    counts["recorded"] += 1
+                    log(f"recorded already-mounted {folder!r}")
+            continue
+        if account is not None and folder in dump:
+            rec = _reconstruct_record(account, folder, dump)
+            if rec:
+                _remember(rec)
+                recorded_mps.add(sp)
+                counts["adopted"] += 1
+                log(f"adopted orphaned bookmark {folder!r} (will remount)")
+                continue
+        mgr.remove_bookmark(p)
+        counts["removed"] += 1
+        log(f"removed stale bookmark {sp} (no live mount / no remote)")
+    return counts

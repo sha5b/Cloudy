@@ -13,7 +13,7 @@
 %global appid io.github.sha5b.Cloudy
 
 Name:           cloudy
-Version:        0.2.9
+Version:        0.3.0
 Release:        1%{?dist}
 Summary:        Use OneDrive, SharePoint and unified mail on your desktop
 
@@ -115,6 +115,15 @@ meson test -C %{_vpath_builddir} --print-errorlogs
 %{_datadir}/%{name}/
 
 %changelog
+* Fri Jul 10 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.3.0-1
+- Group chats: add several people to a new chat, or add people to a 1:1 (starts a group).
+- New chat composer autocompletes and accepts multiple recipients.
+- Fix SharePoint/OneDrive Office uploads never reaching the server (--ignore-size/--ignore-checksum).
+- Files view shows live per-drive sync status; rclone mounts now log to ~/.local/share/cloudy/logs.
+- Fix GNOME Calendar times shifted by the local offset (Windows zone names now map to the local zone).
+- Background calendar sync mirrors edits/deletes to GNOME, not just newly-added events.
+- Reconcile forgotten mounts and stale Nautilus bookmarks at startup so writes can't vanish.
+
 * Tue Jul 07 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.2.9-1
 - Fix stale calendar/dashboard data: every event and mail write now invalidates the caches.
 - Fix Graph TimeZoneNotSupportedException ('CEST'): resolve the IANA zone from /etc/localtime.

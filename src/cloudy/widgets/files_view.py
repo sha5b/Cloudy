@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from gettext import gettext as _
 
-from gi.repository import Adw, Gtk
+from gi.repository import Adw, GLib, Gtk
 
 from ..modules.microsoft365.graph import Drive
 from ..modules.microsoft365.mounts import (
@@ -34,6 +34,7 @@ class FilesView(Adw.Bin):
         self._libraries: list[dict] = []   # [{drive, icon, subtitle}]
         self._rows: dict = {}              # drive name -> [row, button]
         self._open_name = None             # which library is shown in the pane
+        self._status_poll_id = 0           # GLib timer id for the sync-status poll
 
         # -- left pane: libraries + mount buttons ------------------------
         self._list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE,
@@ -67,6 +68,8 @@ class FilesView(Adw.Bin):
         # Returning to the Files tab re-checks mount state, so drives the startup
         # restore or health watchdog reconnected show as Mounted without a reload.
         self.connect("map", lambda *_: self.refresh_mount_states())
+        # Stop the sync-status poll when the tab isn't visible (nothing to show).
+        self.connect("unmap", lambda *_: self._cancel_status_poll())
 
     # -- list helpers -----------------------------------------------------
     def _set_message(self, text: str) -> None:
@@ -238,6 +241,57 @@ class FilesView(Adw.Bin):
         watchdog reconnected while the user was elsewhere."""
         for lib in self._libraries:
             self._apply_button(lib)
+        self._refresh_upload_status()
+
+    # -- live sync status (via each mount's --rc socket) -----------------
+    def _cancel_status_poll(self) -> None:
+        if self._status_poll_id:
+            GLib.source_remove(self._status_poll_id)
+            self._status_poll_id = 0
+
+    def _refresh_upload_status(self) -> None:
+        """Show per-drive sync state (Uploading N… / Synced) for mounted drives.
+        Reads rclone's VFS cache metadata off-thread (never touches FUSE), then
+        re-polls every few seconds while anything is still uploading and stops
+        once everything has landed on the server."""
+        mounted = [lib for lib in self._libraries if self._is_mounted(lib["drive"])]
+        if not mounted:
+            self._cancel_status_poll()
+            return
+        names = [lib["drive"].name for lib in mounted]
+
+        def work():
+            return {name: self._mounts.upload_status(name) for name in names}
+
+        run_async(work, self._on_upload_status)
+
+    def _on_upload_status(self, statuses, error) -> bool:
+        from .format import esc
+
+        if error or not statuses:
+            return False
+        busy = False
+        for name, st in statuses.items():
+            entry = self._rows.get(name)
+            if not entry:
+                continue
+            row = entry[0]
+            pending = (st or {}).get("pending", 0)
+            if pending:
+                busy = True
+                row.set_subtitle(esc(_("↑ Uploading %d…") % pending))
+            else:
+                row.set_subtitle(esc(_("Synced · click to browse")))
+        self._cancel_status_poll()
+        if busy:  # keep watching until the queue drains
+            self._status_poll_id = GLib.timeout_add_seconds(
+                3, self._on_status_tick)
+        return False
+
+    def _on_status_tick(self) -> bool:
+        self._status_poll_id = 0
+        self._refresh_upload_status()
+        return False  # one-shot; _on_upload_status reschedules if still busy
 
     # -- selection --------------------------------------------------------
     def _on_row_activated(self, _list, row) -> None:

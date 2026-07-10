@@ -11,6 +11,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-10
+
+### Added
+- **Group chats**: the New chat composer now autocompletes and accepts several
+  recipients (pick one, keep typing the next) and starts a group chat when you
+  add 2+ people. In an existing 1:1, an **Add people** button starts a fresh
+  group chat with the existing person plus whoever you add — Graph can't add a
+  member to a 1:1, so this mirrors Teams' behaviour.
+- **Live file-sync status**: Files view rows show `↑ Uploading N…` / `Synced` /
+  `⚠ N didn't upload`, read from each rclone mount's VFS stats over an `--rc`
+  socket and polled while a queue drains.
+- **rclone daemon logging**: every mount logs to
+  `~/.local/share/cloudy/logs/rclone-<account>-<drive>.log` (rotated at 5 MB),
+  so upload problems are no longer invisible.
+
+### Fixed
+- **SharePoint/OneDrive Office uploads never reaching the server**: OneDrive for
+  Business rewrites `.docx`/`.pptx`/`.xlsx` server-side, so rclone's size/hash
+  verify failed, deleted its copy and retried forever. OneDrive mounts now pass
+  `--ignore-size --ignore-checksum` (Google keeps its integrity checks).
+- **GNOME Calendar showing event times shifted by the local offset** (e.g. a
+  15:00 event displayed as 17:00): Graph often returns a Windows zone name the
+  mirror couldn't parse and wrongly treated the wall-clock as UTC. It now falls
+  back to the system's local zone. The mirror rebuilds on upgrade, correcting
+  events already written with the wrong time.
+- **GNOME Calendar keeping stale data after edits/deletes**: the background sync
+  now re-mirrors the whole current month on each poll, not only when a brand-new
+  event appears, so changes made elsewhere (phone/Outlook) reach GNOME.
+- **Mounts silently forgotten / bookmarks outliving their mount**: a startup
+  reconciliation pass adopts live-but-unremembered mounts and removes stale
+  Nautilus bookmarks whose drive is no longer mounted (which otherwise swallowed
+  writes into a local stub that never uploaded).
+
 ## [0.2.9] - 2026-07-07
 
 ### Added

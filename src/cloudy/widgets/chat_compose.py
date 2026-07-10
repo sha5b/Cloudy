@@ -13,6 +13,7 @@ and returns the new chat id; the window closes on success and calls
 
 from __future__ import annotations
 
+import re
 from email.utils import getaddresses
 from gettext import gettext as _
 
@@ -68,7 +69,11 @@ class ChatComposeWindow(EditorWindow):
         box.append(widget)
         return box
 
-    # -- contacts autocomplete (single recipient) ------------------------
+    # -- contacts autocomplete (several recipients) ----------------------
+    # The To field accepts several comma/semicolon-separated recipients, so both
+    # matching and selection operate on the *last* segment only — otherwise the
+    # already-typed recipients swallow the search key (nothing pops up for the
+    # 2nd person) and picking a match would replace everyone typed so far.
     def _setup_completion(self) -> None:
         self._store = Gtk.ListStore(str, str)  # (label, lowercase search key)
         completion = Gtk.EntryCompletion(model=self._store)
@@ -82,14 +87,23 @@ class ChatComposeWindow(EditorWindow):
         completion.connect("match-selected", self._on_match_selected)
         self._to.set_completion(completion)
 
+    def _last_token(self) -> str:
+        """The text after the last comma/semicolon — what the user is typing now."""
+        return re.split(r"[,;]", self._to.get_text())[-1].strip().lower()
+
     def _match(self, _completion, _key, tree_iter) -> bool:
-        token = self._to.get_text().strip().lower()
+        token = self._last_token()
         if not token:
             return False
         return token in self._store.get_value(tree_iter, 1)
 
     def _on_match_selected(self, _completion, model, tree_iter) -> bool:
-        self._to.set_text(model.get_value(tree_iter, 0))
+        label = model.get_value(tree_iter, 0)
+        text = self._to.get_text()
+        # Replace only the segment being typed; keep earlier recipients and leave
+        # a trailing ", " so the next name can be typed straight away.
+        head = re.match(r"^(.*[,;])\s*[^,;]*$", text)
+        self._to.set_text(f"{head.group(1)} {label}, " if head else f"{label}, ")
         self._to.set_position(-1)
         return True
 

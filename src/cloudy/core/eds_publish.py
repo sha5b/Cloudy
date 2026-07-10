@@ -30,8 +30,9 @@ _PRODID = "-//Shahab Nedaei//Cloudy//EN"
 
 # Bumped whenever the mirror format changes (timezone handling, UID format,
 # source parent, etc.) so stale/wrong events are wiped and rebuilt instead of
-# left behind.
-_EDS_INDEX_VERSION = 2
+# left behind. v3: fall back to the local zone (not UTC) for unresolvable
+# Windows zone names, fixing events written with a local-offset shift.
+_EDS_INDEX_VERSION = 3
 
 
 def _log(msg: str) -> None:
@@ -165,9 +166,32 @@ def _resolve_tz(tz_name: str | None) -> ZoneInfo | timezone | None:
         return ZoneInfo(tz_name)
     except Exception:  # noqa: BLE001
         pass
-    # Windows-style "Romance Standard Time" etc. are not handled here; EDS
-    # itself won't accept them either. Fall back to UTC to avoid crashing.
-    return None
+    # Graph often echoes a *Windows* zone name ("W. Europe Standard Time") that
+    # ZoneInfo can't parse. But the wall-clock we got back was converted to the
+    # zone we asked for in the Prefer header — the system's local zone — so that
+    # is the correct interpretation. Falling back to UTC here would shift every
+    # event by the local offset (a 15:00 event showing as 17:00 in GNOME).
+    return _local_zone()
+
+
+def _local_zone() -> ZoneInfo | timezone:
+    """The system's local IANA zone as a ZoneInfo (DST-correct per date), or UTC
+    if it can't be determined. Mirrors graph_calendar's local-tz detection: the
+    reliable source on Linux is the /etc/localtime symlink into the zoneinfo db."""
+    key = os.environ.get("TZ", "")
+    if "/" not in key:
+        try:
+            target = os.path.realpath("/etc/localtime")
+            if "/zoneinfo/" in target:
+                key = target.split("/zoneinfo/", 1)[1]
+        except OSError:
+            key = ""
+    if "/" in key:
+        try:
+            return ZoneInfo(key)
+        except Exception:  # noqa: BLE001
+            pass
+    return timezone.utc
 
 
 def _esc(text: str) -> str:
@@ -417,7 +441,10 @@ def publish_all_cached_events(app) -> None:
 # Throttle background full-month EDS sync so a busy notification poll doesn't
 # hammer the calendar API. Keyed by account id; value is monotonic timestamp.
 _eds_publish_throttle: dict[str, float] = {}
-_EDS_BACKGROUND_INTERVAL_S = 300  # 5 minutes
+# Re-mirror the current month roughly once per notification poll so edits/deletes
+# made elsewhere stop showing stale in GNOME quickly. publish_events diffs and
+# only writes what actually changed, so the cost is one calendarView fetch.
+_EDS_BACKGROUND_INTERVAL_S = 110  # just under the 120 s notification poll
 
 
 def publish_account_current_month_async(app, account) -> None:

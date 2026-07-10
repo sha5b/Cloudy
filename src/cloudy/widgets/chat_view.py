@@ -606,9 +606,17 @@ class ChatView(Adw.Bin):
         title = name or (chat or {}).get("name", "") or _("Conversation")
         self._header_title.set_title(title)
         self._update_star(chat_id, title)
-        is_group = bool(chat) and chat.get("kind") == "group"
-        self._members_btn.set_visible(
-            is_group and self._account.provider == "microsoft")
+        kind = (chat or {}).get("kind", "")
+        is_group = kind == "group"
+        is_ms = self._account.provider == "microsoft"
+        # Group chats get the full roster (rename / add / remove). A 1:1 gets the
+        # same button as an "add people" affordance: Teams can't add to a 1:1 in
+        # place, so adding someone starts a fresh group chat with both people.
+        self._members_btn.set_visible(bool(chat) and is_ms
+                                      and kind in ("group", "oneOnOne"))
+        self._members_btn.set_tooltip_text(
+            _("People in this chat") if is_group
+            else _("Add people (starts a group chat)"))
         subtitle = ""
         if chat is not None:
             if is_group:
@@ -721,35 +729,51 @@ class ChatView(Adw.Bin):
         pop.set_parent(button)
         pop.connect("closed", lambda p: p.unparent() if p.get_parent() else None)
         self._members_pop = pop
+        chat = next((c for c in self._all_chats if c["id"] == self._chat_id), None)
+        is_group = bool(chat) and chat.get("kind") == "group"
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
                       margin_top=10, margin_bottom=10, margin_start=10, margin_end=10)
         box.set_size_request(280, -1)
 
-        # Rename the group.
-        rename_row = Gtk.Box(spacing=6)
-        topic = Gtk.Entry(hexpand=True, placeholder_text=_("Group name"),
-                          text=self._header_title.get_title())
-        rename_btn = Gtk.Button(icon_name="document-edit-symbolic",
-                                tooltip_text=_("Rename"))
-        rename_btn.connect("clicked", lambda *_a: self._rename_chat(topic.get_text()))
-        rename_row.append(topic)
-        rename_row.append(rename_btn)
-        box.append(rename_row)
-        box.append(Gtk.Separator())
+        if is_group:
+            # Rename the group (1:1 chats have no topic).
+            rename_row = Gtk.Box(spacing=6)
+            topic = Gtk.Entry(hexpand=True, placeholder_text=_("Group name"),
+                              text=self._header_title.get_title())
+            rename_btn = Gtk.Button(icon_name="document-edit-symbolic",
+                                    tooltip_text=_("Rename"))
+            rename_btn.connect("clicked",
+                               lambda *_a: self._rename_chat(topic.get_text()))
+            rename_row.append(topic)
+            rename_row.append(rename_btn)
+            box.append(rename_row)
+            box.append(Gtk.Separator())
 
-        # Current members, each with presence + a remove button.
+        # Current members. Remove buttons only make sense in a group; a 1:1 just
+        # lists the other person for context above the "add people" field.
         roster = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         roster.add_css_class("boxed-list")
         for m in self._chat_members:
-            roster.append(self._member_row(m))
+            roster.append(self._member_row(m, removable=is_group))
         scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER,
                                     max_content_height=240, propagate_natural_height=True)
         scroll.set_child(roster)
         box.append(scroll)
 
-        # Add someone.
+        if not is_group:
+            hint = Gtk.Label(
+                label=_("Adding someone starts a new group chat."),
+                wrap=True, xalign=0)
+            hint.add_css_class("dim-label")
+            hint.add_css_class("caption")
+            box.append(hint)
+
+        # Add someone (adds to the group, or promotes a 1:1 into a new group).
         add_row = Gtk.Box(spacing=6, margin_top=4)
-        add_entry = Gtk.Entry(hexpand=True, placeholder_text=_("Add by email…"))
+        add_entry = Gtk.Entry(
+            hexpand=True,
+            placeholder_text=(_("Add by email…") if is_group
+                              else _("Add people by email…")))
         add_entry.connect("activate", lambda e: self._add_member(e.get_text()))
         add_btn = Gtk.Button(icon_name="list-add-symbolic", tooltip_text=_("Add"))
         add_btn.connect("clicked", lambda *_a: self._add_member(add_entry.get_text()))
@@ -760,7 +784,7 @@ class ChatView(Adw.Bin):
         pop.set_child(box)
         pop.popup()
 
-    def _member_row(self, m) -> Gtk.Widget:
+    def _member_row(self, m, removable: bool = True) -> Gtk.Widget:
         row = Adw.ActionRow(title=esc(m.get("name", "") or m.get("email", "")))
         avail = (self._presence.get(m.get("id")) or {}).get("availability", "")
         dot = self._presence_dot(avail)
@@ -769,11 +793,12 @@ class ChatView(Adw.Bin):
             row.add_prefix(dot)
         if m.get("email"):
             row.set_subtitle(esc(m["email"]))
-        remove = Gtk.Button(icon_name="list-remove-symbolic", valign=Gtk.Align.CENTER,
-                            tooltip_text=_("Remove"))
-        remove.add_css_class("flat")
-        remove.connect("clicked", lambda *_a: self._remove_member(m))
-        row.add_suffix(remove)
+        if removable:
+            remove = Gtk.Button(icon_name="list-remove-symbolic",
+                                valign=Gtk.Align.CENTER, tooltip_text=_("Remove"))
+            remove.add_css_class("flat")
+            remove.connect("clicked", lambda *_a: self._remove_member(m))
+            row.add_suffix(remove)
         return row
 
     def _rename_chat(self, topic: str) -> None:
@@ -798,6 +823,12 @@ class ChatView(Adw.Bin):
         chat_id = self._chat_id
         if not email or chat_id is None:
             return
+        chat = next((c for c in self._all_chats if c["id"] == chat_id), None)
+        if chat is not None and chat.get("kind") == "oneOnOne":
+            # Graph can't add a member to a 1:1 — Teams instead starts a new
+            # group chat with the existing person plus the new one. Do the same.
+            self._promote_to_group(chat, email)
+            return
 
         def work():
             from .clients import build_account_client
@@ -809,6 +840,36 @@ class ChatView(Adw.Bin):
         run_async(work, lambda _r, err: self._on_group_changed(chat_id, err))
         if self._members_pop is not None:
             self._members_pop.popdown()
+
+    def _promote_to_group(self, chat, email: str) -> None:
+        """Turn the open 1:1 into a fresh group chat with the existing
+        participant(s) + ``email`` (Teams' "add people to a 1:1" behaviour)."""
+        # member_ids are the *other* participants' AAD ids (self excluded);
+        # start_group_chat accepts AAD ids and UPNs/emails interchangeably.
+        recipients = list(dict.fromkeys(
+            [*(chat.get("member_ids") or []), email]))
+        if self._members_pop is not None:
+            self._members_pop.popdown()
+        self._window.add_toast(_("Starting a group chat…"))
+
+        def work():
+            from .clients import build_account_client
+
+            client = build_account_client(self._window.get_application(), self._account)
+            return client.start_group_chat(recipients)
+
+        run_async(work, self._on_promoted)
+
+    def _on_promoted(self, chat_id, error) -> bool:
+        if error:
+            self._window.add_toast(
+                _("Couldn't start the group chat: %s") % friendly_error(error))
+            return False
+        self._cache().invalidate(prefix=f"{self._account.id}:chats")
+        self._load_chats()
+        if chat_id:
+            self.open_chat(chat_id)
+        return False
 
     def _remove_member(self, member) -> None:
         chat_id, mid = self._chat_id, member.get("membership_id")

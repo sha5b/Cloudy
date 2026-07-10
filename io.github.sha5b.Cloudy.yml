@@ -33,6 +33,11 @@ finish-args:
   - --filesystem=~/.config/gtk-3.0:create
   # So the app can install its host Nautilus extension on first run.
   - --filesystem=~/.local/share/nautilus-python/extensions:create
+  # Read-only peek at rclone's VFS cache metadata (host-side daemon writes it):
+  # lets the Files view show per-drive "Uploading N… / Synced" from the Dirty
+  # flags. Read-only — we never write here and never override rclone's cache dir
+  # (moving it would strand files still waiting to upload).
+  - --filesystem=~/.cache/rclone:ro
   # Secrets use the Secret Service portal (per-app keyring) — no broad hole.
 
 cleanup:

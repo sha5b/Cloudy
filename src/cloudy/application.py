@@ -319,9 +319,20 @@ class CloudyApplication(Adw.Application):
         """
         def worker():
             try:
-                from .modules.microsoft365.mounts import remount_saved
+                from .modules.microsoft365.mounts import (
+                    reconcile_mounts, remount_saved)
 
                 log = (lambda m: print(f"[mounts] {m}")) if verbose else (lambda _m: None)
+                # Startup only: reconcile stale sidebar bookmarks against the
+                # rclone remotes — adopt orphaned drives (so they remount) and
+                # clear dead-stub bookmarks that would silently swallow uploads.
+                # Skipped on the periodic watchdog (nothing new drifts mid-run).
+                if verbose:
+                    c = reconcile_mounts(self.registry, log=log)
+                    if any(c.values()):
+                        print("[mounts] reconciled bookmarks: "
+                              f"{c['adopted']} adopted, {c['recorded']} recorded, "
+                              f"{c['removed']} stale removed")
                 n = remount_saved(self.registry, self.secrets, log=log)
                 if n:  # always report an actual (re)mount, even when quiet
                     print(f"[mounts] auto-(re)mounted {n} drive(s)")

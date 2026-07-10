@@ -91,6 +91,19 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
   </screenshots>
 
   <releases>
+    <release version="0.3.0" date="2026-07-10">
+      <description>
+        <p>Group chats, reliable file uploads, and a correct GNOME calendar.</p>
+        <ul>
+          <li>Start a group chat by adding several people to a new chat, or add people to an existing one-to-one chat</li>
+          <li>Files uploaded to SharePoint/OneDrive Office documents now reach the server reliably instead of silently retrying forever</li>
+          <li>The Files view shows live per-drive sync status: Uploading, Synced, or didn't upload</li>
+          <li>Fixed GNOME Calendar showing event times shifted by a couple of hours; existing wrong events are corrected on upgrade</li>
+          <li>Calendar changes made elsewhere (phone or Outlook) now update GNOME Calendar in the background</li>
+          <li>Forgotten mounts and stale file-manager bookmarks are reconciled at startup so writes can't vanish into a local stub</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.9" date="2026-07-07">
       <description>
         <p>Meeting invites land on your calendar, mail gets organized, and stale data is gone.</p>

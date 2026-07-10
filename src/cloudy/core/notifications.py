@@ -291,6 +291,19 @@ class NotificationManager:
                 self._poll_mail(account)
             if "calendar" in caps:
                 self._poll_calendar(account)
+                # Keep the GNOME Shell / Evolution (EDS) calendar mirror current
+                # for *edits* and *deletes*, not just newly-appearing event ids:
+                # re-mirror the whole current month on a steady cadence. This is
+                # what makes an event changed elsewhere (phone/Outlook) stop
+                # showing stale in GNOME. Self-throttled and a no-op when the EDS
+                # setting is off.
+                try:
+                    from ..core.eds_publish import (
+                        publish_account_current_month_async)
+
+                    publish_account_current_month_async(self._app, account)
+                except Exception:  # noqa: BLE001 - EDS must never break polling
+                    pass
             if "chat" in caps:
                 self._poll_chat(account)
         return True  # keep the timer alive
