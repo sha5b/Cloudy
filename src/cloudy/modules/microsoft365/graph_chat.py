@@ -9,6 +9,7 @@ import base64
 import concurrent.futures
 import html
 import json
+import os
 import re
 import urllib.parse
 
@@ -201,7 +202,17 @@ class GraphChatMixin:
         body = m.get("body") or {}
         content = body.get("content", "")
         is_html = body.get("contentType") == "html"
-        reply_to, attachments = split_attachments(m)
+        reply_to, forward, attachments = split_attachments(m)
+        # Diagnostic: when a forwarded/embedded message isn't recognized it
+        # collapses to a bare "attachment" chip. Set CLOUDY_DEBUG_CHAT=1 to dump
+        # the raw attachment shapes so the parser can be taught the exact schema.
+        if os.environ.get("CLOUDY_DEBUG_CHAT") and forward is None \
+                and m.get("attachments"):
+            try:
+                print("[chat-debug] attachments:",
+                      json.dumps(m.get("attachments"), indent=2)[:2000])
+            except Exception:  # noqa: BLE001 - debug only
+                pass
         # Strip the reply placeholder so the quoted text doesn't pollute the body
         # (we render the quote separately from ``reply_to``).
         if is_html:
@@ -240,6 +251,7 @@ class GraphChatMixin:
             "reactions": [{"emoji": e, "count": c} for e, c in reactions.items()],
             "web_url": m.get("webUrl", "") or "",
             "reply_to": reply_to,
+            "forward": forward,
         }
 
     def send_chat_message(self, chat_id: str, text: str) -> dict:

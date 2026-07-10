@@ -20,7 +20,12 @@ from gettext import gettext as _
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 
 
-from .chat_avatar import build_avatar, refresh_presence
+from .chat_avatar import (
+    build_avatar,
+    presence_dot,
+    presence_label,
+    refresh_presence,
+)
 from .format import esc, relative_time
 from .imaging import shrink_image_bytes, texture_from_png_bytes, thumbnail_texture
 from .source_nav import (
@@ -626,7 +631,7 @@ class ChatView(Adw.Bin):
                 ids = chat.get("member_ids") or []
                 if len(ids) == 1:
                     avail = (self._presence.get(ids[0]) or {}).get("availability", "")
-                    subtitle = self._PRESENCE.get(avail, ("", ""))[1]
+                    subtitle = presence_label(avail)
         self._header_title.set_subtitle(subtitle)
 
     def _update_star(self, chat_id, title: str) -> None:
@@ -787,7 +792,7 @@ class ChatView(Adw.Bin):
     def _member_row(self, m, removable: bool = True) -> Gtk.Widget:
         row = Adw.ActionRow(title=esc(m.get("name", "") or m.get("email", "")))
         avail = (self._presence.get(m.get("id")) or {}).get("availability", "")
-        dot = self._presence_dot(avail)
+        dot = presence_dot(avail)
         if dot is not None:
             dot.set_valign(Gtk.Align.CENTER)
             row.add_prefix(dot)
@@ -1490,6 +1495,38 @@ class ChatView(Adw.Bin):
             box.add_controller(tap)
         return box
 
+    def _forward_quote(self, forward) -> Gtk.Widget:
+        """A quote of a forwarded message: a "↪ Forwarded" header with the
+        original sender, then a snippet of the original text. Reuses the reply
+        quote's accent-bar styling."""
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        box.add_css_class("cloudy-reply-quote")
+        bar = Gtk.Box()
+        bar.add_css_class("cloudy-reply-bar")
+        box.append(bar)
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0,
+                        hexpand=True)
+        who = (forward.get("from") or "").strip()
+        header = _("Forwarded from %s") % who if who else _("Forwarded message")
+        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        icon = Gtk.Image.new_from_icon_name("mail-forward-symbolic")
+        icon.set_pixel_size(12)
+        icon.add_css_class("dim-label")
+        hbox.append(icon)
+        hlbl = Gtk.Label(label=header, xalign=0, ellipsize=Pango.EllipsizeMode.END)
+        hlbl.add_css_class("caption-heading")
+        hbox.append(hlbl)
+        inner.append(hbox)
+        snippet = (forward.get("text") or _("(no preview)")).replace("\n", " ").strip()
+        slbl = Gtk.Label(label=snippet[:200], xalign=0, wrap=True,
+                         wrap_mode=Pango.WrapMode.WORD_CHAR,
+                         ellipsize=Pango.EllipsizeMode.END, lines=3)
+        slbl.add_css_class("caption")
+        slbl.add_css_class("dim-label")
+        inner.append(slbl)
+        box.append(inner)
+        return box
+
     def _scroll_to_message(self, mid) -> None:
         """Scroll the thread to a specific message and flash it. If it isn't
         loaded yet (it's older than what's on screen), nudge the user to load
@@ -1540,6 +1577,12 @@ class ChatView(Adw.Bin):
         reply = msg.get("reply_to")
         if reply and (reply.get("text") or reply.get("from")):
             bubble.append(self._reply_quote(reply))
+
+        # A forwarded message renders its embedded original as a labelled quote,
+        # so it's readable instead of collapsing to a bare "attachment" chip.
+        forward = msg.get("forward")
+        if forward and (forward.get("text") or forward.get("from")):
+            bubble.append(self._forward_quote(forward))
 
         text = (msg.get("text", "") or "").strip()
         markup = (msg.get("markup", "") or "").strip()

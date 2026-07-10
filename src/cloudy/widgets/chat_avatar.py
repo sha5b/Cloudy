@@ -29,6 +29,14 @@ def color_index(chat: dict) -> int:
     return sum(key.encode("utf-8")) % AVATAR_COLORS
 
 
+def presence_label(availability: str) -> str:
+    """Human-readable presence label ("Available", "Busy", …), or "" when
+    unknown — used for the 1:1 chat header subtitle."""
+    if not availability:
+        return ""
+    return _PRESENCE.get(availability, ("offline", availability))[1]
+
+
 def presence_dot(availability: str) -> Gtk.Widget | None:
     if not availability:
         return None

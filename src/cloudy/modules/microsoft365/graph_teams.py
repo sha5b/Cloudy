@@ -95,7 +95,7 @@ class GraphTeamsMixin:
         body = m.get("body") or {}
         content = body.get("content", "")
         is_html = body.get("contentType") == "html"
-        reply_to, attachments = split_attachments(m)
+        reply_to, forward, attachments = split_attachments(m)
         if is_html:
             content = strip_reply_placeholder(content)
         text = strip_html(content) if is_html else content
@@ -131,6 +131,7 @@ class GraphTeamsMixin:
             "reactions": [{"emoji": e, "count": c} for e, c in reactions.items()],
             "web_url": m.get("webUrl", "") or "",
             "reply_to": reply_to,
+            "forward": forward,
             "replies": [],
         }
 

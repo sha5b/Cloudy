@@ -18,7 +18,7 @@ import shutil
 from gettext import gettext as _
 from pathlib import Path
 
-from gi.repository import Adw, Gio, GLib, GObject, Gtk, Pango
+from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango
 
 from .file_browser_utils import (
     gdk_rect,
@@ -30,6 +30,31 @@ from .file_browser_utils import (
 )
 from .format import esc
 from .source_nav import run_async
+
+
+def _restore_from_trash(orig_paths) -> int:
+    """Best-effort restore of freshly-trashed items back to their original
+    locations, matching by the freedesktop ``trash::orig-path`` attribute.
+    Returns the number restored (0 if none matched — e.g. the item lives in a
+    per-filesystem trash the ``trash://`` backend doesn't aggregate). Runs on a
+    worker thread; raises only on an unexpected enumerator failure."""
+    want = {os.path.normpath(p) for p in orig_paths}
+    trash = Gio.File.new_for_uri("trash:///")
+    attrs = "standard::name,trash::orig-path"
+    enumerator = trash.enumerate_children(attrs, Gio.FileQueryInfoFlags.NONE, None)
+    restored = 0
+    for info in enumerator:
+        orig = info.get_attribute_byte_string("trash::orig-path")
+        if not orig or os.path.normpath(orig) not in want:
+            continue
+        item = trash.get_child(info.get_name())
+        dest = Gio.File.new_for_path(orig)
+        try:
+            item.move(dest, Gio.FileCopyFlags.NOFOLLOW_SYMLINKS, None, None, None)
+            restored += 1
+        except GLib.Error:
+            pass  # one bad restore shouldn't abort the rest
+    return restored
 
 
 class FileBrowserPane(Adw.Bin):
@@ -137,6 +162,12 @@ class FileBrowserPane(Adw.Bin):
         toolbar.add_top_bar(self._search_bar)
         toolbar.set_content(self._stack)
         self.set_child(toolbar)
+
+        # Drop files from other apps (or Nautilus) into the current folder —
+        # copying into a mount is how you upload. Accepts a GdkFileList.
+        drop = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
+        drop.connect("drop", self._on_drop)
+        self._stack.add_controller(drop)
 
         # Delete trashes the current selection (Nautilus-style).
         keys = Gtk.EventControllerKey()
@@ -438,6 +469,7 @@ class FileBrowserPane(Adw.Bin):
         child._entry = entry  # type: ignore[attr-defined]
         child.set_tooltip_text(entry["name"])
         self._attach_menu(child, entry)
+        self._attach_drag(child, entry)
         return child
 
     def _list_row(self, entry: dict, depth: int = 0) -> Gtk.ListBoxRow:
@@ -476,6 +508,7 @@ class FileBrowserPane(Adw.Bin):
         click.connect("pressed", self._on_list_pressed, entry)
         row.add_controller(click)
         self._attach_menu(row, entry)
+        self._attach_drag(row, entry)
         return row
 
     @staticmethod
@@ -603,6 +636,60 @@ class FileBrowserPane(Adw.Bin):
         except Exception as exc:  # noqa: BLE001
             self._window.add_toast(_("Couldn't open: %s") % exc)
 
+    # -- drag and drop ----------------------------------------------------
+    def _attach_drag(self, widget, entry: dict) -> None:
+        """Let a row/tile be dragged out to other apps (Nautilus, mail, browser)
+        as a real file. Dragging an item that's part of the current multi-select
+        drags the whole selection."""
+        source = Gtk.DragSource(actions=Gdk.DragAction.COPY)
+        source.connect("prepare", self._on_drag_prepare, entry)
+        widget.add_controller(source)
+
+    def _on_drag_prepare(self, _source, _x, _y, entry):
+        # Drag the whole selection if this item is in it; otherwise just this one.
+        selected = self._selection()
+        paths = [e["path"] for e in selected] if entry in selected else []
+        if entry["path"] not in paths:
+            paths = [entry["path"]]
+        files = [Gio.File.new_for_path(p) for p in paths if p]
+        if not files:
+            return None
+        return Gdk.ContentProvider.new_for_value(
+            GObject.Value(Gdk.FileList, Gdk.FileList.new_from_list(files)))
+
+    def _on_drop(self, _target, value, _x, _y) -> bool:
+        """Copy files dropped from another app into the current folder."""
+        cur = self._cur()
+        if cur is None:
+            return False
+        dest_dir = str(cur)
+        try:
+            files = value.get_files()
+        except AttributeError:
+            return False
+        srcs = []
+        for f in files:
+            p = f.get_path()
+            # Skip items already sitting in this folder (a drop onto itself).
+            if p and os.path.dirname(os.path.normpath(p)) != os.path.normpath(dest_dir):
+                srcs.append(p)
+        if not srcs:
+            return False
+        targets = [os.path.join(dest_dir, os.path.basename(s.rstrip("/")))
+                   for s in srcs]
+
+        def work():
+            for src, target in zip(srcs, targets):
+                if os.path.isdir(src):
+                    shutil.copytree(src, target)
+                else:
+                    shutil.copy2(src, target)
+
+        self._window.add_toast(_("Copying here…"))
+        run_async(work, lambda _r, err: self._after_transfer(
+            err, False, srcs, targets, reload=True))
+        return True
+
     # -- file operations (off-thread; trash is recoverable) --------------
     def _set_actions(self, enabled: bool) -> None:
         for btn in (self._new_folder_btn, self._upload_btn, self._open_ext_btn,
@@ -619,6 +706,16 @@ class FileBrowserPane(Adw.Bin):
             self._window.add_toast(err_msg % error)
         else:
             self._window.add_toast(ok_msg)
+            self._load()
+        return False
+
+    def _reload_with_undo(self, error, ok_msg: str, err_msg: str, undo) -> bool:
+        """Like ``_toast_then_reload`` but, on success, shows a toast whose
+        Undo button reverses the operation via ``undo()``."""
+        if error:
+            self._window.add_toast(err_msg % error)
+        else:
+            self._window.add_undo_toast(ok_msg, undo)
             self._load()
         return False
 
@@ -655,9 +752,15 @@ class FileBrowserPane(Adw.Bin):
             except OSError:
                 self._window.add_toast(_("Invalid destination."))
                 return
+
+            def undo():
+                run_async(lambda: os.rename(dest, src),
+                          lambda _r, err: self._toast_then_reload(
+                              err, _("Rename undone."), _("Couldn't undo: %s")))
+
             run_async(lambda: os.rename(src, dest),
-                      lambda _r, err: self._toast_then_reload(
-                          err, _("Renamed."), _("Couldn't rename: %s")))
+                      lambda _r, err: self._reload_with_undo(
+                          err, _("Renamed."), _("Couldn't rename: %s"), undo))
 
         dialog.connect("response", on_response)
         dialog.present(self._window)
@@ -685,8 +788,16 @@ class FileBrowserPane(Adw.Bin):
                 for path in paths:
                     Gio.File.new_for_path(path).trash(None)
 
-            run_async(work, lambda _r, err: self._toast_then_reload(
-                err, _("Moved to Trash."), _("Couldn't delete: %s")))
+            def undo():
+                self._window.add_toast(_("Restoring…"))
+                run_async(lambda: _restore_from_trash(paths),
+                          lambda restored, err: self._toast_then_reload(
+                              err or (None if restored else _("nothing to restore")),
+                              _("Restored from Trash."),
+                              _("Couldn't undo: %s")))
+
+            run_async(work, lambda _r, err: self._reload_with_undo(
+                err, _("Moved to Trash."), _("Couldn't delete: %s"), undo))
 
         dialog.connect("response", on_response)
         dialog.present(self._window)
@@ -714,11 +825,11 @@ class FileBrowserPane(Adw.Bin):
             if not dest_dir:
                 return
             srcs = [e["path"] for e in entries]
+            targets = [os.path.join(dest_dir, os.path.basename(s.rstrip("/")))
+                       for s in srcs]
 
             def work():
-                for src in srcs:
-                    base = os.path.basename(src.rstrip("/"))
-                    target = os.path.join(dest_dir, base)
+                for src, target in zip(srcs, targets):
                     if move:
                         shutil.move(src, target)
                     elif os.path.isdir(src):
@@ -727,18 +838,39 @@ class FileBrowserPane(Adw.Bin):
                         shutil.copy2(src, target)
 
             self._window.add_toast(_("Moving…") if move else _("Copying…"))
-            run_async(work, lambda _r, err: self._after_transfer(err, move))
+            run_async(work, lambda _r, err: self._after_transfer(
+                err, move, srcs, targets))
 
         dialog.select_folder(self._window, None, on_pick)
 
-    def _after_transfer(self, error, move: bool) -> bool:
+    def _after_transfer(self, error, move: bool, srcs=None, targets=None,
+                        reload: bool = False) -> bool:
         if error:
             self._window.add_toast(
                 (_("Move failed: %s") if move else _("Copy failed: %s")) % error)
             return False
-        self._window.add_toast(_("Moved.") if move else _("Copied."))
-        if move:
-            self._load()  # sources are gone from this folder; refresh
+
+        def undo():
+            # Move back to where it came from; a copy is undone by removing the
+            # new copies (the originals are untouched).
+            def work():
+                for src, target in zip(srcs or [], targets or []):
+                    if move:
+                        shutil.move(target, src)
+                    elif os.path.isdir(target):
+                        shutil.rmtree(target, ignore_errors=True)
+                    else:
+                        try:
+                            os.remove(target)
+                        except OSError:
+                            pass
+            run_async(work, lambda _r, err: self._toast_then_reload(
+                err, _("Move undone.") if move else _("Copy undone."),
+                _("Couldn't undo: %s")))
+
+        self._window.add_undo_toast(_("Moved.") if move else _("Copied."), undo)
+        if move or reload:
+            self._load()  # sources gone (move) or new copies landed here (drop)
         return False
 
     def _on_new_folder(self, _btn) -> None:

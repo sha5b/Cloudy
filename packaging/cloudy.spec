@@ -124,6 +124,9 @@ meson test -C %{_vpath_builddir} --print-errorlogs
 - Background calendar sync mirrors edits/deletes to GNOME, not just newly-added events.
 - Reconcile forgotten mounts and stale Nautilus bookmarks at startup so writes can't vanish.
 - Fix Nautilus "Copy share link" copying nothing: create a real OneDrive/SharePoint link over D-Bus.
+- Add Undo (Trash/Rename/Move/Copy) and drag-and-drop to the in-app file browser.
+- Fix chats intermittently failing to render and a crash opening a 1:1 chat (stale presence refs).
+- Render forwarded chat messages instead of collapsing them to a bare attachment.
 
 * Tue Jul 07 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.2.9-1
 - Fix stale calendar/dashboard data: every event and mail write now invalidates the caches.

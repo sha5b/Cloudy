@@ -102,6 +102,10 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
           <li>Calendar changes made elsewhere (phone or Outlook) now update GNOME Calendar in the background</li>
           <li>Forgotten mounts and stale file-manager bookmarks are reconciled at startup so writes can't vanish into a local stub</li>
           <li>The Nautilus "Copy share link" action now copies a real OneDrive/SharePoint link instead of doing nothing</li>
+          <li>Undo button on file actions (Trash, Rename, Move, Copy) to take them back</li>
+          <li>Drag and drop files in the in-app file browser — drag out to other apps, or drop in to upload</li>
+          <li>Fixed chats intermittently failing to open and a crash on one-to-one chats</li>
+          <li>Forwarded chat messages now show their content instead of just an attachment</li>
         </ul>
       </description>
     </release>

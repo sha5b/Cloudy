@@ -681,3 +681,16 @@ class CloudyWindow(Adw.ApplicationWindow):
     # -- helpers ----------------------------------------------------------
     def add_toast(self, message: str) -> None:
         self.toast_overlay.add_toast(Adw.Toast(title=message))
+
+    def add_undo_toast(self, message: str, on_undo, *, label=None,
+                       timeout: int = 6) -> None:
+        """Show a toast with an action button (default "Undo") that calls
+        ``on_undo()`` when pressed. Used for reversible file operations so a
+        delete/move/rename can be taken back. ``timeout`` seconds before it
+        auto-dismisses (0 = until dismissed)."""
+        from gettext import gettext as _
+
+        toast = Adw.Toast(title=message, timeout=timeout)
+        toast.set_button_label(label or _("Undo"))
+        toast.connect("button-clicked", lambda _t: on_undo())
+        self.toast_overlay.add_toast(toast)

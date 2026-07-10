@@ -25,8 +25,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **rclone daemon logging**: every mount logs to
   `~/.local/share/cloudy/logs/rclone-<account>-<drive>.log` (rotated at 5 MB),
   so upload problems are no longer invisible.
+- **Undo for file operations**: Move to Trash, Rename, Move and Copy (and
+  drag-drop copies) now show an **Undo** button in the toast that reverses the
+  action (trash-restore is best-effort on network mounts).
+- **Drag and drop in the file browser**: drag files out to other apps
+  (Nautilus, mail, browser) as real files, and drop files in to copy them into
+  the current folder (i.e. upload into a mount).
 
 ### Fixed
+- **Chat intermittently failing to render / crashing on a 1:1 chat**: two stale
+  references (`self._PRESENCE`, `self._presence_dot`) left behind when presence
+  logic moved into `chat_avatar` crashed the header/roster; both now use the
+  shared helpers.
+- **Forwarded chat messages showing only an "attachment"**: a forwarded Teams
+  message carries its content in an attachment (not the body), so it now renders
+  as a "Forwarded from …" quote instead of a bare file chip.
 - **SharePoint/OneDrive Office uploads never reaching the server**: OneDrive for
   Business rewrites `.docx`/`.pptx`/`.xlsx` server-side, so rclone's size/hash
   verify failed, deleted its copy and retried forever. OneDrive mounts now pass
