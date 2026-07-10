@@ -175,13 +175,27 @@ class SyncStatusService:
             invocation.return_value(None)
         elif method == "CreateShareLink":
             path, editable = params.unpack()
-            url = ""
-            if self._share_link_fn is not None:
+            if self._share_link_fn is None:
+                invocation.return_value(GLib.Variant("(s)", ("",)))
+                return
+            # Creating a share link is two Graph round-trips (resolve item +
+            # createLink). Run it on a worker thread and reply asynchronously so
+            # the app's main loop never blocks on the network; the reply is
+            # marshalled back via idle_add.
+            import threading
+
+            fn = self._share_link_fn
+
+            def work():
                 try:
-                    url = self._share_link_fn(path, editable) or ""
+                    url = fn(path, editable) or ""
                 except Exception:  # noqa: BLE001 - report empty rather than crash the bus
                     url = ""
-            invocation.return_value(GLib.Variant("(s)", (url,)))
+                GLib.idle_add(
+                    lambda: invocation.return_value(GLib.Variant("(s)", (url,)))
+                    and False)
+
+            threading.Thread(target=work, daemon=True).start()
         else:
             invocation.return_error_literal(
                 Gio.dbus_error_quark(),

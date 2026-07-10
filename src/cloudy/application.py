@@ -164,11 +164,46 @@ class CloudyApplication(Adw.Application):
             from .core.dbus_service import SyncStatusService
             from .modules.microsoft365.mounts import mount_root
 
-            self._sync_service = SyncStatusService(connection, mount_root())
+            self._sync_service = SyncStatusService(
+                connection, mount_root(), share_link_fn=self._create_share_link)
             self._sync_service.publish()
         except Exception as exc:  # noqa: BLE001 - never block startup on the bus
             print(f"[dbus] sync service not published: {exc}")
         return True
+
+    def _create_share_link(self, path: str, editable: bool) -> str:
+        """Map a local mount path to its owning account and create a real Graph
+        sharing link (a SharePoint/OneDrive web URL) for the Nautilus "Copy share
+        link" action. Called off the main loop by the D-Bus service, so the
+        network round-trips here don't block the UI. Returns "" on any failure
+        (unknown path, no matching account, Graph error) so the extension copies
+        nothing rather than a bogus value."""
+        import os
+
+        from .modules.microsoft365.mounts import load_mount_records
+
+        target = os.path.normpath(os.path.expanduser(path))
+        account_id = ""
+        for rec in load_mount_records():
+            mp = rec.get("mountpoint")
+            if not mp:
+                continue
+            mp = os.path.normpath(mp)
+            if target == mp or target.startswith(mp + os.sep):
+                account_id = rec.get("account_id", "")
+                break
+
+        account = self.registry.get(account_id) if account_id else None
+        if account is None:  # unknown path → can't attribute it to an account
+            return ""
+        if account.provider != "microsoft":
+            return ""  # share links are a Microsoft 365 (OneDrive/SharePoint) feature
+
+        from .modules.microsoft365.files import OneDriveFiles
+        from .widgets.graph_helper import build_graph_client
+
+        graph = build_graph_client(self, account)
+        return OneDriveFiles(graph).create_share_link(path, editable=editable) or ""
 
     def do_dbus_unregister(self, connection, object_path):
         service = getattr(self, "_sync_service", None)

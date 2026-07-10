@@ -43,6 +43,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reconciliation pass adopts live-but-unremembered mounts and removes stale
   Nautilus bookmarks whose drive is no longer mounted (which otherwise swallowed
   writes into a local stub that never uploaded).
+- **Nautilus "Copy share link" copied nothing (you pasted a local path)**: the
+  app never wired the share-link handler to the D-Bus service, so it always
+  returned an empty string. It now resolves the file's owning account and
+  creates a real OneDrive/SharePoint sharing link (Graph `createLink`), off the
+  main thread, and the extension waits long enough for the network round-trip.
 
 ## [0.2.9] - 2026-07-07
 

@@ -123,6 +123,7 @@ meson test -C %{_vpath_builddir} --print-errorlogs
 - Fix GNOME Calendar times shifted by the local offset (Windows zone names now map to the local zone).
 - Background calendar sync mirrors edits/deletes to GNOME, not just newly-added events.
 - Reconcile forgotten mounts and stale Nautilus bookmarks at startup so writes can't vanish.
+- Fix Nautilus "Copy share link" copying nothing: create a real OneDrive/SharePoint link over D-Bus.
 
 * Tue Jul 07 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.2.9-1
 - Fix stale calendar/dashboard data: every event and mail write now invalidates the caches.

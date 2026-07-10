@@ -40,6 +40,9 @@ OBJECT_PATH = "/io/github/sha5b/Cloudy/Sync"
 INTERFACE = "io.github.sha5b.Cloudy.Sync"
 
 _DBUS_TIMEOUT_MS = 1500
+# Creating a share link hits the network (Graph resolve + createLink), so it
+# needs a far longer budget than the fast, local status/roots queries.
+_SHARE_LINK_TIMEOUT_MS = 20000
 # How long to trust the cached "managed roots" before asking the app again.
 # These paths almost never change, so a long TTL keeps the file manager fast.
 _ROOTS_TTL_S = 30.0
@@ -90,7 +93,8 @@ def _call(method, variant, reply_type=None):
         return None
 
 
-def _call_async(method, variant, reply_type=None, callback=None):
+def _call_async(method, variant, reply_type=None, callback=None,
+                timeout_ms=_DBUS_TIMEOUT_MS):
     """Fire a D-Bus call without blocking Nautilus's UI thread.
 
     ``callback(result, error)`` is invoked from the GLib main loop when the call
@@ -116,7 +120,7 @@ def _call_async(method, variant, reply_type=None, callback=None):
         if callback is not None:
             callback(result, err)
 
-    proxy.call(method, variant, Gio.DBusCallFlags.NONE, _DBUS_TIMEOUT_MS,
+    proxy.call(method, variant, Gio.DBusCallFlags.NONE, timeout_ms,
                None, _on_done)
 
 
@@ -175,8 +179,8 @@ class CloudyMenuProvider(GObject.GObject, Nautilus.MenuProvider):
 
         copy_link = Nautilus.MenuItem(
             name="Cloudy::copy_share_link",
-            label="Copy OneDrive Share Link",
-            tip="Create and copy a sharing link via Cloudy",
+            label="Copy Share Link (Cloudy)",
+            tip="Create and copy a OneDrive/SharePoint sharing link via Cloudy",
         )
         copy_link.connect("activate", self._on_copy_link, managed)
 
@@ -216,7 +220,8 @@ class CloudyMenuProvider(GObject.GObject, Nautilus.MenuProvider):
                     clipboard.set_text(url)
 
         _call_async(
-            "CreateShareLink", GLib.Variant("(sb)", (path, False)), "(s)", _on_result
+            "CreateShareLink", GLib.Variant("(sb)", (path, False)), "(s)", _on_result,
+            timeout_ms=_SHARE_LINK_TIMEOUT_MS,
         )
 
     def _on_free_space(self, _menu, files):
