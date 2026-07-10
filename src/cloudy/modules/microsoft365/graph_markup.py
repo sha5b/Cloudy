@@ -59,7 +59,7 @@ def parse_forwarded_message(att: dict) -> dict:
     is why an unparsed forward shows as a bare attachment. ``displayName`` is
     sometimes null in the reference, so an empty sender is expected."""
     raw = att.get("content") or ""
-    text, sender_name, ref_id = "", "", str(att.get("id") or "")
+    text, sender_name, ref_id, chat_id = "", "", str(att.get("id") or ""), ""
     try:
         data = json.loads(raw) if raw else {}
     except (ValueError, TypeError):
@@ -67,9 +67,12 @@ def parse_forwarded_message(att: dict) -> dict:
     if isinstance(data, dict):
         text = strip_html(data.get("originalMessageContent") or "")
         ref_id = str(data.get("originalMessageId") or ref_id)
+        chat_id = str(data.get("originalConversationId") or "")
         user = (data.get("originalMessageSender") or {}).get("user") or {}
         sender_name = html.unescape(user.get("displayName") or "")
-    return {"id": ref_id, "from": sender_name, "text": text}
+    # ``chat_id`` is the conversation the message was forwarded *from*, so the
+    # UI can jump to the original message in its own chat.
+    return {"id": ref_id, "from": sender_name, "text": text, "chat_id": chat_id}
 
 
 def split_attachments(m: dict):

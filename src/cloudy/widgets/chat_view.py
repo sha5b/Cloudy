@@ -133,6 +133,7 @@ class ChatView(Adw.Bin):
         # the same "value-changed" handler.
         self._autoscroll = True
         self._anchor_bottom = None  # distance-from-bottom to preserve on prepend
+        self._pending_scroll_mid = None  # message to land on after a forward jump
         self._adjusting = False     # guard: ignore our own programmatic scrolls
         self._scroll_anim = None    # active "jump to latest" animation, if any
         self._rendered_sigs = []    # per-message fingerprints of the live thread
@@ -998,6 +999,7 @@ class ChatView(Adw.Bin):
         self._thread_sig = None
         self._autoscroll = True  # a freshly-opened chat lands on the newest message
         self._anchor_bottom = None
+        self._pending_scroll_mid = None  # set by a forward-quote jump
         for btn in (self._entry, self._attach_btn, self._emoji_btn,
                     self._bold_btn, self._italic_btn):
             btn.set_sensitive(True)
@@ -1080,7 +1082,18 @@ class ChatView(Adw.Bin):
         self._msg_next_token = next_token
         self._cache().set(self._msg_key(chat_id), messages)
         self._render_thread(chat_id, messages)
+        # A forward-quote jump asked to land on a specific message; do it once the
+        # thread has laid out (a beat after render so coordinates are valid).
+        if getattr(self, "_pending_scroll_mid", None):
+            GLib.timeout_add(200, self._flush_pending_scroll, chat_id)
         return False
+
+    def _flush_pending_scroll(self, chat_id) -> bool:
+        mid = getattr(self, "_pending_scroll_mid", None)
+        self._pending_scroll_mid = None
+        if mid and chat_id == self._chat_id:
+            self._scroll_to_message(mid)
+        return False  # one-shot
 
     def _clear_thread(self) -> None:
         self._bubble_widgets = {}
@@ -1532,7 +1545,32 @@ class ChatView(Adw.Bin):
         slbl.add_css_class("dim-label")
         inner.append(slbl)
         box.append(inner)
+        # Click the quote to jump to the original message in the chat it was
+        # forwarded from (opening that chat first if it's a different one).
+        if forward.get("id"):
+            box.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
+            tap = Gtk.GestureClick(button=Gdk.BUTTON_PRIMARY)
+            tap.connect("pressed", lambda g, *_a: g.set_state(
+                Gtk.EventSequenceState.CLAIMED))
+            tap.connect("released", lambda *_a: self._open_forward_source(forward))
+            box.add_controller(tap)
         return box
+
+    def _open_forward_source(self, forward) -> None:
+        """Jump to the message a forward came from. If it lives in another chat,
+        open that chat first, then scroll to (and flash) the original message
+        once its messages load."""
+        mid = forward.get("id")
+        cid = forward.get("chat_id")
+        if not mid:
+            return
+        if cid and cid != self._chat_id:
+            # open_chat resets _pending_scroll_mid; set it *after* so the load
+            # completion knows to scroll there.
+            self.open_chat(cid)
+            self._pending_scroll_mid = mid
+        else:
+            self._scroll_to_message(mid)
 
     def _scroll_to_message(self, mid) -> None:
         """Scroll the thread to a specific message and flash it. If it isn't

@@ -128,6 +128,7 @@ meson test -C %{_vpath_builddir} --print-errorlogs
 - Fix chats intermittently failing to render and a crash opening a 1:1 chat (stale presence refs).
 - Render forwarded chat messages instead of collapsing them to a bare attachment.
 - Stop the chat from jumping when reacting to a message (kept the thread signature in step).
+- Click a forwarded message to jump to its original (opening the source chat if needed).
 
 * Tue Jul 07 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.2.9-1
 - Fix stale calendar/dashboard data: every event and mail write now invalidates the caches.

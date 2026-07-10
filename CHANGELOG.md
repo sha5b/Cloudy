@@ -31,6 +31,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Drag and drop in the file browser**: drag files out to other apps
   (Nautilus, mail, browser) as real files, and drop files in to copy them into
   the current folder (i.e. upload into a mount).
+- **Jump to a forwarded message's original**: clicking a "Forwarded from …"
+  quote scrolls to the original message, opening the chat it was forwarded from
+  first when that's a different conversation.
 
 ### Fixed
 - **Chat intermittently failing to render / crashing on a 1:1 chat**: two stale
