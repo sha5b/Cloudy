@@ -127,6 +127,7 @@ meson test -C %{_vpath_builddir} --print-errorlogs
 - Add Undo (Trash/Rename/Move/Copy) and drag-and-drop to the in-app file browser.
 - Fix chats intermittently failing to render and a crash opening a 1:1 chat (stale presence refs).
 - Render forwarded chat messages instead of collapsing them to a bare attachment.
+- Stop the chat from jumping when reacting to a message (kept the thread signature in step).
 
 * Tue Jul 07 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.2.9-1
 - Fix stale calendar/dashboard data: every event and mail write now invalidates the caches.

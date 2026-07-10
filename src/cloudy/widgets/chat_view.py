@@ -1581,7 +1581,7 @@ class ChatView(Adw.Bin):
         # A forwarded message renders its embedded original as a labelled quote,
         # so it's readable instead of collapsing to a bare "attachment" chip.
         forward = msg.get("forward")
-        if forward and (forward.get("text") or forward.get("from")):
+        if forward:
             bubble.append(self._forward_quote(forward))
 
         text = (msg.get("text", "") or "").strip()
@@ -2663,6 +2663,15 @@ class ChatView(Adw.Bin):
         self._bubble_widgets[mid] = new
         self._thread.remove(old)
         self._thread.insert_child_after(new, prev)  # prev=None → prepend
+        # Keep the render bookkeeping in step with this in-place swap, so the
+        # next adaptive poll (which returns the same reaction/edit from the
+        # server) sees an unchanged signature and skips the full rebuild — a
+        # rebuild would reload every image and yank the scroll position. Mirrors
+        # what _delete_msg does after removing a bubble in place.
+        new_sig = self._msg_sig(msg)
+        self._rendered_sigs = [new_sig if s and s[0] == mid else s
+                               for s in self._rendered_sigs]
+        self._thread_sig = tuple(self._rendered_sigs)
 
     def _on_react_done(self, chat_id, error) -> bool:
         if error:

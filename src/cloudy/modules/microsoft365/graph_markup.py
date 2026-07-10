@@ -49,75 +49,54 @@ def parse_message_reference(att: dict) -> dict:
     return {"id": ref_id, "text": preview, "from": sender}
 
 
-def parse_embedded_message(att: dict) -> dict | None:
-    """Best-effort parse of a *forwarded* (embedded) chat message attachment into
-    a quote dict ``{id, from, text}``.
+def parse_forwarded_message(att: dict) -> dict:
+    """Parse a Teams ``forwardedMessageReference`` attachment into a quote dict
+    ``{id, from, text}``.
 
-    Teams represents a forwarded message as an attachment whose JSON ``content``
-    carries the original message's preview/body + sender — but with a
-    ``contentType`` *other* than the reply ``messageReference`` (so it would
-    otherwise fall through to a bare, unhelpful file chip). Returns ``None`` when
-    the attachment doesn't look like an embedded message, so the caller can treat
-    it as a normal file."""
+    Teams puts a forwarded message's original content in the attachment's JSON
+    ``content`` under ``originalMessageContent`` (HTML) + ``originalMessageSender``
+    — the message ``body`` itself is just an ``<attachment>`` placeholder, which
+    is why an unparsed forward shows as a bare attachment. ``displayName`` is
+    sometimes null in the reference, so an empty sender is expected."""
     raw = att.get("content") or ""
-    if not raw:
-        return None
+    text, sender_name, ref_id = "", "", str(att.get("id") or "")
     try:
-        data = json.loads(raw)
+        data = json.loads(raw) if raw else {}
     except (ValueError, TypeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    # Preview text under any of the shapes Teams has used for embedded messages.
-    preview = (data.get("messagePreview") or data.get("previewText")
-               or data.get("messageContent") or data.get("text") or "")
-    if not preview:
-        body = data.get("messageBody") or data.get("body")
-        if isinstance(body, dict):
-            preview = body.get("content", "")
-        elif isinstance(body, str):
-            preview = body
-    preview = strip_html(preview)
-    sender = data.get("messageSender") or data.get("from") or {}
-    sender_name = ""
-    if isinstance(sender, dict):
-        user = sender.get("user") or sender
+        data = {}
+    if isinstance(data, dict):
+        text = strip_html(data.get("originalMessageContent") or "")
+        ref_id = str(data.get("originalMessageId") or ref_id)
+        user = (data.get("originalMessageSender") or {}).get("user") or {}
         sender_name = html.unescape(user.get("displayName") or "")
-    if not preview and not sender_name:
-        return None  # nothing message-like — let it render as a file
-    return {
-        "id": str(data.get("messageId") or att.get("id") or ""),
-        "from": sender_name,
-        "text": preview,
-    }
+    return {"id": ref_id, "from": sender_name, "text": text}
 
 
 def split_attachments(m: dict):
     """Split a message's attachments into ``(reply_to, forward, file_attachments)``.
 
-    ``reply_to`` is a reply quote (the ``messageReference`` attachment), ``forward``
-    is a *forwarded* message quote (an embedded message under a different
-    contentType), and the rest are file attachments."""
+    ``reply_to`` is a reply quote (``messageReference``), ``forward`` is a
+    forwarded-message quote (``forwardedMessageReference``), and the rest are
+    file attachments (files/images carried as ``reference`` etc.). A forwarded
+    message that also carried a file surfaces as *both* a forward quote and a
+    file chip, so the file still renders."""
     reply_to = None
     forward = None
     attachments = []
     for a in (m.get("attachments") or []):
-        if (a.get("contentType") or "") == "messageReference":
+        ctype = a.get("contentType") or ""
+        if ctype == "messageReference":
             if reply_to is None:
                 reply_to = parse_message_reference(a)
             continue
-        # A forwarded message: an embedded message-reference-like attachment that
-        # isn't the reply type and carries no downloadable file URL.
-        if not a.get("contentUrl"):
-            embedded = parse_embedded_message(a)
-            if embedded is not None:
-                if forward is None:
-                    forward = embedded
-                continue
+        if ctype == "forwardedMessageReference":
+            if forward is None:
+                forward = parse_forwarded_message(a)
+            continue
         attachments.append({
             "name": a.get("name") or "attachment",
             "url": a.get("contentUrl", ""),
-            "content_type": a.get("contentType", ""),
+            "content_type": ctype,
         })
     return reply_to, forward, attachments
 

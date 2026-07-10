@@ -38,8 +38,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   logic moved into `chat_avatar` crashed the header/roster; both now use the
   shared helpers.
 - **Forwarded chat messages showing only an "attachment"**: a forwarded Teams
-  message carries its content in an attachment (not the body), so it now renders
-  as a "Forwarded from …" quote instead of a bare file chip.
+  message carries its content in a `forwardedMessageReference` attachment (not the
+  body), so it now renders as a "Forwarded from …" quote instead of a bare file
+  chip. A file forwarded alongside still shows as its own chip.
+- **Chat scrolling jumping when you react to a message**: reacting swapped the
+  bubble in place but left the thread signature stale, so the next background
+  poll did a full rebuild that reloaded images and yanked the scroll. The
+  in-place update now keeps the signature in step, so the view stays put.
 - **SharePoint/OneDrive Office uploads never reaching the server**: OneDrive for
   Business rewrites `.docx`/`.pptx`/`.xlsx` server-side, so rclone's size/hash
   verify failed, deleted its copy and retried forever. OneDrive mounts now pass

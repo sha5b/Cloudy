@@ -106,6 +106,7 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
           <li>Drag and drop files in the in-app file browser — drag out to other apps, or drop in to upload</li>
           <li>Fixed chats intermittently failing to open and a crash on one-to-one chats</li>
           <li>Forwarded chat messages now show their content instead of just an attachment</li>
+          <li>The chat no longer jumps around when you react to a message</li>
         </ul>
       </description>
     </release>
