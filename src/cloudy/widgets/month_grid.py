@@ -92,6 +92,12 @@ class MonthGrid(Gtk.Box):
         first, last = weeks[0][0], weeks[-1][-1]
         return first.isoformat(), last.isoformat()
 
+    def displayed_month(self) -> str:
+        """``YYYY-MM`` of the month the grid is showing. NOT the same as
+        ``visible_range()[0][:7]`` — the grid's first cell usually belongs to
+        the previous month."""
+        return f"{self._year:04d}-{self._month:02d}"
+
     # -- navigation -------------------------------------------------------
     def _shift(self, delta: int) -> None:
         m = self._month - 1 + delta

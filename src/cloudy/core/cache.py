@@ -92,11 +92,16 @@ class MemoryCache:
                 self._store[key] = (stale_ts, value)
 
     def _maybe_flush(self) -> None:
+        # Throttle disk writes; a steady-state session flushes at most ~every
+        # 5s. The check-and-claim happens under the lock so two threads can't
+        # both decide to flush and interleave writes to the same tmp file
+        # (which produced a corrupt snapshot and a stuck _dirty flag).
         with self._lock:
             self._dirty = True
-        # Throttle disk writes; a steady-state session flushes at most ~every 5s.
-        if time.time() - self._last_flush >= 5.0:
-            self.flush()
+            if time.time() - self._last_flush < 5.0:
+                return
+            self._last_flush = time.time()  # claim this window before writing
+        self.flush()
 
     def _trim_locked(self) -> None:
         """Drop oldest entries when the store exceeds its cap."""

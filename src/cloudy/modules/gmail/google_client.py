@@ -189,16 +189,23 @@ class GoogleClient:
         if page_token:
             url += f"&pageToken={urllib.parse.quote(page_token)}"
         listing = self._get(url, SCOPES_MAIL)
-        out = []
-        for ref in listing.get("messages", []):
-            if not ref.get("id"):
-                continue
-            msg = self._get(
-                f"{GMAIL}/users/me/messages/{ref['id']}"
+        refs = [r["id"] for r in listing.get("messages", []) if r.get("id")]
+
+        def fetch(mid):
+            return self._get(
+                f"{GMAIL}/users/me/messages/{mid}"
                 f"?format=metadata&metadataHeaders=Subject&metadataHeaders=From",
                 SCOPES_MAIL,
             )
-            out.append(self._message_from_json(msg))
+
+        # Gmail has no batch listing endpoint, so each row is its own GET —
+        # fetched in parallel (like the calendar sweep below); serially this
+        # was N sequential round-trips per page and one slow response stalled
+        # the whole folder.
+        out = []
+        if refs:
+            with ThreadPoolExecutor(max_workers=min(8, len(refs))) as pool:
+                out = [self._message_from_json(m) for m in pool.map(fetch, refs)]
         return out, listing.get("nextPageToken")
 
     @staticmethod
@@ -259,7 +266,44 @@ class GoogleClient:
             "body": content,
             "body_html": is_html,
             "attachments": self._collect_attachments(payload),
+            "inline_images": self._inline_images(message_id, payload, content),
         }
+
+    def _inline_images(self, message_id: str, payload: dict,
+                       content: str) -> list[dict]:
+        """Inline parts referenced by ``cid:`` in the HTML body, in the same
+        shape the Graph client returns: ``[{content_id, content_type,
+        content_bytes(base64)}]``. Without this, Gmail messages with pasted
+        images rendered with the images stripped (an image-only mail showed a
+        blank page)."""
+        if "cid:" not in (content or "").lower():
+            return []
+        refs: list[tuple] = []  # (cid, attachment_id, content_type)
+
+        def walk(part) -> None:
+            body = part.get("body", {}) or {}
+            headers = self._headers(part)
+            cid = (headers.get("content-id")
+                   or headers.get("x-attachment-id") or "").strip()
+            if cid and body.get("attachmentId"):
+                refs.append((cid.strip("<>"), body["attachmentId"],
+                             part.get("mimeType", "") or "image/png"))
+            for sub in part.get("parts", []) or []:
+                walk(sub)
+
+        walk(payload or {})
+        out = []
+        for cid, att_id, ctype in refs[:8]:  # bounded so huge mails stay fast
+            try:
+                raw = self.fetch_mail_attachment(message_id, att_id)
+            except Exception:  # noqa: BLE001 - a missing image must not sink the body
+                continue
+            out.append({
+                "content_id": cid,
+                "content_type": ctype,
+                "content_bytes": base64.b64encode(raw).decode(),
+            })
+        return out
 
     @staticmethod
     def _collect_attachments(payload) -> list[dict]:
@@ -627,12 +671,14 @@ class GoogleClient:
             event["description"] = body
         if attendees:
             event["attendees"] = [{"email": a} for a in attendees if a]
-        url = f"{CALENDAR}/calendars/primary/events"
+        # sendUpdates=all: Google defaults to NONE, so attendees were never
+        # emailed the invitation (Graph auto-sends; this restores parity).
+        url = f"{CALENDAR}/calendars/primary/events?sendUpdates=all"
         if online:
             event["conferenceData"] = {"createRequest": {
                 "requestId": uuid.uuid4().hex,
                 "conferenceSolutionKey": {"type": "hangoutsMeet"}}}
-            url += "?conferenceDataVersion=1"
+            url += "&conferenceDataVersion=1"
         return self._post(url, event, SCOPES_CALENDAR)
 
     def update_event(self, event_id: str, *, subject: str, start_iso: str,
@@ -655,7 +701,8 @@ class GoogleClient:
         if attendees is not None:
             event["attendees"] = [{"email": a} for a in attendees if a]
         return self._patch(
-            f"{CALENDAR}/calendars/{self._cal_path(cal)}/events/{raw}",
+            f"{CALENDAR}/calendars/{self._cal_path(cal)}/events/{raw}"
+            "?sendUpdates=all",  # notify attendees of the change (default: none)
             event, SCOPES_CALENDAR)
 
     def delete_event(self, event_id: str) -> None:

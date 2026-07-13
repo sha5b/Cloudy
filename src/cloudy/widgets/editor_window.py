@@ -27,6 +27,13 @@ class EditorWindow(Adw.Window):
         # minimize/maximize. As an independent toplevel the user can park or
         # expand it (the decoration layout below requests min/max/close).
         super().__init__(modal=False)
+        # Register with the application so an open editor keeps the process
+        # alive: without this, closing the main window (background mode off)
+        # dropped the app's use count to zero and killed an in-progress
+        # compose/event edit with no warning.
+        app = parent.get_application() if hasattr(parent, "get_application") else None
+        if app is not None:
+            self.set_application(app)
         self.set_title(title)
         self.set_default_size(default_width, default_height)
 

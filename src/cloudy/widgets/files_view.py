@@ -268,7 +268,10 @@ class FilesView(Adw.Bin):
     def _on_upload_status(self, statuses, error) -> bool:
         from .format import esc
 
-        if error or not statuses:
+        # A result can land after unmap cancelled the timer (the fetch was
+        # already in flight); re-arming from here would keep the poll — and its
+        # per-drive mount-table checks — running while the tab is hidden.
+        if error or not statuses or not self.get_mapped():
             return False
         busy = False
         for name, st in statuses.items():
@@ -329,7 +332,8 @@ class FilesView(Adw.Bin):
                 tok = self._mounts.authorize(backend)
                 secrets.store(self._account.id, token_kind, tok)
             return self._mounts.mount_drive(
-                provider=self._account.provider, drive=drive, token=tok, base=base)
+                provider=self._account.provider, drive=drive, token=tok,
+                base=base, account_id=self._account.id)
 
         run_async(work, lambda info, error: self._on_mounted(lib, info, error))
 

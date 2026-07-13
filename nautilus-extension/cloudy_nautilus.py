@@ -217,7 +217,11 @@ class CloudyMenuProvider(GObject.GObject, Nautilus.MenuProvider):
             if url:
                 clipboard = self._clipboard()
                 if clipboard is not None:
-                    clipboard.set_text(url)
+                    # GTK4's Gdk.Clipboard has no set_text() in the Python
+                    # bindings (it's skipped in the GIR) — calling it raised
+                    # AttributeError and the menu item silently did nothing.
+                    # The PyGObject override set() accepts a plain string.
+                    clipboard.set(url)
 
         _call_async(
             "CreateShareLink", GLib.Variant("(sb)", (path, False)), "(s)", _on_result,

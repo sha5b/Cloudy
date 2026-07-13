@@ -215,8 +215,11 @@ class CalendarView(Adw.Bin):
 
     # -- cache + agenda list ---------------------------------------------
     def _cache_key(self) -> str:
-        first, _last = self._grid.visible_range()
-        month = first[:7]  # YYYY-MM of the visible grid
+        # The DISPLAYED month, not visible_range()[0][:7]: the grid's first
+        # cell usually falls in the previous month, and that mislabeled key
+        # made the EDS publisher write July's events into a "June" bucket
+        # that then fought the background publisher's real June bucket.
+        month = self._grid.displayed_month()
         if self._source == "teams" and self._context:
             return f"{self._account.id}:events:group:{self._context}:{month}"
         if self._source == "shared" and self._context:

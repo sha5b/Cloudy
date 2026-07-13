@@ -277,6 +277,13 @@ def publish_events(app, account, events, month: str | None = None) -> None:
         month = _month_of(events[0])
     if month is None:
         month = "unknown"
+    # Keep only THIS month's events in this bucket: callers pass spans that
+    # spill into adjacent months (the calendar's 6-week grid), and letting the
+    # spill-over into this bucket while the background publisher owns those
+    # events in their own month's bucket made the two deletion-diffs fight —
+    # events churned/vanished from GNOME's calendar.
+    if month != "unknown":
+        events = [ev for ev in events if _month_of(ev) == month]
 
     desired: dict[str, dict] = {}
     for ev in events:

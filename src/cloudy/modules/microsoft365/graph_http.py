@@ -10,6 +10,7 @@ redirect handler that keeps bearer tokens off cross-host redirects.
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -76,6 +77,32 @@ class GraphHttp:
         self._token_provider = token_provider
 
     # -- low-level --------------------------------------------------------
+    @staticmethod
+    def _open_retry(req, *, timeout: int = 30, attempts: int = 3):
+        """urlopen with a bounded retry on Graph throttling (429, honoring
+        Retry-After) and, for GETs, transient 503/504. All Graph calls run on
+        worker threads, so a short sleep is fine. Non-idempotent verbs retry
+        only 429 — a throttled request was rejected, never processed — so a
+        retry can't double-send anything."""
+        for attempt in range(attempts):
+            try:
+                return urllib.request.urlopen(req, timeout=timeout)
+            except urllib.error.HTTPError as exc:
+                method = (req.get_method() or "GET").upper()
+                retriable = exc.code == 429 or (
+                    exc.code in (503, 504) and method == "GET")
+                if not retriable or attempt == attempts - 1:
+                    raise
+                try:
+                    delay = float(exc.headers.get("Retry-After", "") or 1.5)
+                except (TypeError, ValueError):
+                    delay = 1.5
+                try:
+                    exc.read()  # drain so the connection can be reused
+                except OSError:
+                    pass
+                time.sleep(min(max(delay, 0.5), 10.0))
+
     def _get(self, path: str, scopes: Sequence[str], headers: dict | None = None) -> dict:
         token = self._token_provider(scopes)
         if not token:
@@ -86,7 +113,7 @@ class GraphHttp:
             hdrs.update(headers)
         req = urllib.request.Request(url, headers=hdrs)
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with self._open_retry(req, timeout=30) as resp:
                 return json.loads(resp.read().decode())
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode(errors="replace")
@@ -128,7 +155,7 @@ class GraphHttp:
             headers["Content-Type"] = "application/json"
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with self._open_retry(req, timeout=30) as resp:
                 raw = resp.read().decode()
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as exc:
@@ -144,7 +171,7 @@ class GraphHttp:
             headers={"Authorization": f"Bearer {token}"},
         )
         try:
-            with urllib.request.urlopen(req, timeout=30):
+            with self._open_retry(req, timeout=30):
                 return
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode(errors="replace")
@@ -192,7 +219,7 @@ class GraphHttp:
             headers={"Authorization": f"Bearer {token}",
                      "Content-Type": content_type or "application/octet-stream"})
         try:
-            with urllib.request.urlopen(req, timeout=300) as resp:
+            with self._open_retry(req, timeout=300) as resp:
                 raw = resp.read().decode()
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as exc:
@@ -209,7 +236,7 @@ class GraphHttp:
             headers={"Authorization": f"Bearer {token}",
                      "Content-Type": "text/html"})
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with self._open_retry(req, timeout=30) as resp:
                 raw = resp.read().decode()
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as exc:

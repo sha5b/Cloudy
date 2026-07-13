@@ -516,7 +516,12 @@ def _write_autostart(enabled: bool) -> None:
             path.parent.mkdir(parents=True, exist_ok=True)
             # If the app's installed desktop entry is available, copy and adapt
             # it so the autostart file stays consistent with packaging.
-            installed = Path(GLib.get_user_data_dir()).parent / "applications" / "io.github.sha5b.Cloudy.desktop"
+            # user_data_dir/applications (~/.local/share/applications) — the
+            # old ".parent /" variant pointed at a directory that never exists,
+            # so the copy branch was dead and Flatpak installs fell through to
+            # a bare "Exec=cloudy" that isn't on the host PATH.
+            installed = (Path(GLib.get_user_data_dir()) / "applications"
+                         / "io.github.sha5b.Cloudy.desktop")
             if installed.exists():
                 text = installed.read_text(encoding="utf-8")
                 text = text.replace("Exec=cloudy", "Exec=cloudy --gapplication-service")

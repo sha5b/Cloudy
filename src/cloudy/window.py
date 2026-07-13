@@ -412,20 +412,37 @@ class CloudyWindow(Adw.ApplicationWindow):
 
     def _sign_out(self, account) -> None:
         app = self.get_application()
-        try:
-            if account.provider == "microsoft":
-                from .core.auth.msal_graph import GraphAuth
 
-                GraphAuth(app.microsoft_client_id(), app.secrets, account.id).sign_out()
-            elif account.provider == "google":
-                from .core.auth.google_oauth import GoogleAuth
+        def clear_tokens():
+            # Off-thread: GraphAuth's constructor runs msal tenant discovery
+            # over the NETWORK (up to ~30s offline) — never block the GTK
+            # main loop on it. Token clearing stays best-effort.
+            try:
+                if account.provider == "microsoft":
+                    from .core.auth.msal_graph import GraphAuth
 
-                GoogleAuth(
-                    app.google_client_id(), app.secrets, account.id,
-                    client_secret=app.google_client_secret(),
-                ).sign_out()
-        except Exception:  # noqa: BLE001 - clearing local token is best-effort
-            pass
+                    GraphAuth(app.microsoft_client_id(), app.secrets,
+                              account.id).sign_out()
+                elif account.provider == "google":
+                    from .core.auth.google_oauth import GoogleAuth
+
+                    GoogleAuth(
+                        app.google_client_id(), app.secrets, account.id,
+                        client_secret=app.google_client_secret(),
+                    ).sign_out()
+            except Exception:  # noqa: BLE001 - clearing local token is best-effort
+                # Belt and braces: clear the cached blob directly so the UI's
+                # "signed out" is never a lie even if the SDK path failed.
+                try:
+                    kind = ("msal-cache" if account.provider == "microsoft"
+                            else "google-token")
+                    app.secrets.clear(account.id, kind)
+                except Exception:  # noqa: BLE001
+                    pass
+
+        from .widgets.source_nav import run_async
+
+        run_async(clear_tokens, lambda _r, _e: False)
         app.evict_account_client(account.id)
         account.signed_in = False
         self._registry.update(account)
@@ -441,7 +458,11 @@ class CloudyWindow(Adw.ApplicationWindow):
     def _remove_account(self, account) -> None:
         app = self.get_application()
         secrets = app.secrets
-        for kind in ("msal-cache", "google-token", "rclone-onedrive"):
+        # Every secret kind any provider stores — "rclone-gdrive" included, or
+        # removing a Google account left its live Drive OAuth token in the
+        # keyring (silently reused if the account was ever re-added).
+        for kind in ("msal-cache", "google-token", "rclone-onedrive",
+                     "rclone-gdrive"):
             try:
                 secrets.clear(account.id, kind)
             except Exception:  # noqa: BLE001

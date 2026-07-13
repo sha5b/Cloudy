@@ -12,9 +12,14 @@ _ANGLE_RE = re.compile(r"^(.*?)<([^>]+)>\s*$")
 
 
 def esc(text: str) -> str:
-    """Escape ``& < >`` for Pango markup labels."""
+    """Escape ``& < > "`` for Pango markup labels.
+
+    Quotes must be escaped too: esc'd text is also interpolated into markup
+    *attributes* (e.g. ``href="copy:<addr>"`` in the message header), where a
+    raw ``"`` — common in RFC 5322 names like ``"Doe, John" <j@x>`` —
+    terminates the attribute and breaks the whole label's markup."""
     return ((text or "").replace("&", "&amp;").replace("<", "&lt;")
-            .replace(">", "&gt;"))
+            .replace(">", "&gt;").replace('"', "&quot;"))
 
 
 def sender_name(value: str) -> str:
@@ -73,8 +78,11 @@ def _parse_iso(iso: str):
             dt = datetime.fromisoformat(head + tz)
         except ValueError:
             return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+    # Aware stamps (mail/chat 'Z', Google offsets) convert to local; NAIVE
+    # stamps are Graph calendar times fetched with Prefer: outlook.timezone=
+    # <local> — i.e. already local wall-clock, which astimezone() on a naive
+    # value assumes. Forcing them to UTC (the old behavior) skewed "Live now"
+    # badges and dashboard countdowns by the local UTC offset.
     return dt.astimezone()  # local time
 
 

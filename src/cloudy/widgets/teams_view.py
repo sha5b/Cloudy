@@ -721,7 +721,10 @@ class TeamsView(Adw.Bin):
         if error is not None:
             self._window.add_toast(_("Couldn't send: %s") % friendly_error(error))
             return False
-        self._cache.invalidate(prefix=self._conv_key())
+        # Invalidate the channel the message was SENT to — _conv_key() is the
+        # currently-open one, which is wrong if the user switched mid-send.
+        self._cache.invalidate(
+            prefix=f"{self._account.id}:channelmsgs:{channel_id}")
         if channel_id == self._channel_id:
             self._load_conversation()
         return False

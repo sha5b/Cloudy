@@ -76,9 +76,11 @@ class ActivityView(Adw.Bin):
         return False
 
     def _set_status(self, icon, title, description="") -> None:
-        page = Adw.StatusPage(icon_name=icon, title=title)
+        # StatusPage parses title/description as Pango markup — escape, or a
+        # raw server error ('&', '<' in JSON/HTML payloads) renders blank.
+        page = Adw.StatusPage(icon_name=icon, title=esc(title))
         if description:
-            page.set_description(description)
+            page.set_description(esc(description))
         page.set_vexpand(True)
         self.set_child(page)
 

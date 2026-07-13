@@ -13,7 +13,7 @@
 %global appid io.github.sha5b.Cloudy
 
 Name:           cloudy
-Version:        0.3.0
+Version:        0.3.1
 Release:        1%{?dist}
 Summary:        Use OneDrive, SharePoint and unified mail on your desktop
 
@@ -115,6 +115,18 @@ meson test -C %{_vpath_builddir} --print-errorlogs
 %{_datadir}/%{name}/
 
 %changelog
+* Mon Jul 13 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.3.1-1
+- Chat: new messages appear reliably; loading older messages no longer duplicates or drops them.
+- Chat list groups meeting/call chats under their own section and is ordered by latest activity.
+- Fix duplicate rows in the chat and mail lists after opening items or refreshing.
+- File-open dialogs across the desktop no longer stall on mounted drives (kernel attribute caching, stale-mount cleanup).
+- Fix Rename and New Folder in the file browser (were broken); copies never overwrite an existing file.
+- Nautilus "Copy Share Link" fixed (GTK4 clipboard API).
+- Editing a Microsoft event no longer shifts its time by the local UTC offset; "Live now" and countdowns are correct.
+- All-day event fixes (west-of-UTC dates, multi-day Google events); Google attendees now receive invitation emails.
+- Gmail: inline images render; folder listing is much faster.
+- Google sign-in no longer intermittently fails; removing an account clears all its tokens; sign-out stops background sync.
+- Graph requests retry automatically on throttling; rclone remotes are scoped per account.
 * Fri Jul 10 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.3.0-1
 - Group chats: add several people to a new chat, or add people to a 1:1 (starts a group).
 - New chat composer autocompletes and accepts multiple recipients.

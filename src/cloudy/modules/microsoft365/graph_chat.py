@@ -44,8 +44,13 @@ class GraphChatMixin:
         """A page of chats, returning ``(chats, next_token)`` for "load more".
         Pages aren't reliably ordered server-side; the caller re-sorts the
         merged list by ``last_at``."""
+        # Without $orderby Graph makes no ordering promise for /me/chats, so a
+        # recently-active chat can fall outside the first page entirely and
+        # never show up as "newest". Order by last activity server-side (the
+        # space must be %-encoded or urllib rejects the URL).
         url = page_token or (
-            f"/me/chats?$top={limit}&$expand=members,lastMessagePreview")
+            f"/me/chats?$top={limit}&$expand=members,lastMessagePreview"
+            "&$orderby=lastMessagePreview/createdDateTime%20desc")
         data = self._get(url, SCOPES_CHAT)
         me = self._me_id()
         chats = [self._chat_row(c, me) for c in data.get("value", [])]

@@ -71,9 +71,14 @@ class _CodeHandler(http.server.BaseHTTPRequestHandler):
         # so two concurrent sign-ins can't cross-contaminate each other's code.
         query = urllib.parse.urlparse(self.path).query
         params = urllib.parse.parse_qs(query)
-        self.server.auth_code = params.get("code", [None])[0]
-        self.server.auth_error = params.get("error", [None])[0]
-        self.server.auth_state = params.get("state", [None])[0]
+        # Only record a request that actually carries OAuth params: browsers
+        # also hit this server for /favicon.ico right after the redirect, and
+        # unconditional assignment let that wipe the just-received code
+        # (intermittent "no authorization code" / false state-mismatch).
+        if "code" in params or "error" in params:
+            self.server.auth_code = params.get("code", [None])[0]
+            self.server.auth_error = params.get("error", [None])[0]
+            self.server.auth_state = params.get("state", [None])[0]
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
         self.end_headers()

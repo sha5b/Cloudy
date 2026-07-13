@@ -93,6 +93,20 @@ class EventDetailWindow(Adw.Window):
 
     def _on_loaded(self, event, error) -> bool:
         if error:
+            # A vanished event is almost always a declined invitation: Outlook
+            # removes declined meetings from the calendar server-side (unless
+            # "Save declined events" is on in Outlook settings). Explain that
+            # instead of dumping the raw Graph JSON on the user.
+            if "ErrorItemNotFound" in str(error):
+                self._content.set_child(Adw.StatusPage(
+                    icon_name="dialog-error-symbolic",
+                    title=_("This event is no longer on your calendar"),
+                    description=esc(_(
+                        "It may have been cancelled — or declined: Outlook "
+                        "removes declined invitations from your calendar. To "
+                        "keep them (shown as “Declined”), turn on “Save "
+                        "declined events” in Outlook’s calendar settings."))))
+                return False
             self._content.set_child(Adw.StatusPage(
                 icon_name="dialog-error-symbolic",
                 title=_("Couldn't open event"), description=esc(error)))
@@ -150,6 +164,12 @@ class EventDetailWindow(Adw.Window):
         self._edit_day_span = 0
         if start_dt is not None and end_dt is not None:
             self._edit_day_span = max(0, (end_dt.date() - start_dt.date()).days)
+        # Google all-day ends are normalized to the INCLUSIVE last day by
+        # google_client (Graph's stay exclusive). Save writes an exclusive
+        # end, so rebase the span — without this every untouched Save shrank
+        # a multi-day Google all-day event by one day.
+        if bool(ev.get("all_day")) and self._account.provider == "google":
+            self._edit_day_span += 1
         start_time = Adw.EntryRow(title=_("Start (HH:MM)"))
         start_time.set_text(start_dt.strftime("%H:%M") if start_dt else "09:00")
         group.add(start_time)

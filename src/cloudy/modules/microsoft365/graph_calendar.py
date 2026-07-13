@@ -114,17 +114,24 @@ class GraphCalendarMixin:
         """Full event detail for the reading pane."""
         select = ("subject,start,end,location,body,organizer,attendees,"
                   "isAllDay,isOnlineMeeting,onlineMeeting,webLink,responseStatus")
+        # Same Prefer: outlook.timezone header as list_events — without it
+        # Graph returns start/end in UTC while the rest of the app treats
+        # naive times as local, so the detail pane showed (and every re-save
+        # silently SHIFTED) the event by the local UTC offset.
+        headers = self._calendar_headers()
         if event_id.startswith("group:"):
             _, gid, eid = _split_id(event_id, 3)
-            data = self._get(f"/groups/{gid}/events/{eid}?$select={select}", SCOPES_GROUPS)
+            data = self._get(f"/groups/{gid}/events/{eid}?$select={select}",
+                             SCOPES_GROUPS, headers)
             can_respond = False
         elif event_id.startswith("shared:"):
             _, address, eid = _split_id(event_id, 3)
             data = self._get(f"/users/{address}/events/{eid}?$select={select}",
-                             SCOPES_MAIL_SHARED)
+                             SCOPES_MAIL_SHARED, headers)
             can_respond = False  # delegated RSVP isn't offered from here
         else:
-            data = self._get(f"/me/events/{event_id}?$select={select}", SCOPES_MAIL)
+            data = self._get(f"/me/events/{event_id}?$select={select}",
+                             SCOPES_MAIL, headers)
             can_respond = True
         organizer = ((data.get("organizer") or {}).get("emailAddress") or {})
         attendees = []
@@ -267,9 +274,16 @@ class GraphCalendarMixin:
     def _event_slot(cls, iso: str, all_day: bool) -> dict:
         """A Graph start/end slot — the editor sends a UTC ISO, but Graph
         stores wall-clock time + IANA tz (shared by create/update)."""
+        if all_day:
+            # The editor encodes the picked DATE as UTC midnight (see
+            # local_to_utc_iso); take that date verbatim. Converting to local
+            # time first landed the event on the PREVIOUS day for every zone
+            # west of UTC (UTC midnight is the prior evening there).
+            return {"dateTime": f"{iso[:10]}T00:00:00",
+                    "timeZone": cls._local_tz()}
         dt = datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone()
-        fmt = "%Y-%m-%dT00:00:00" if all_day else "%Y-%m-%dT%H:%M:%S"
-        return {"dateTime": dt.strftime(fmt), "timeZone": cls._local_tz()}
+        return {"dateTime": dt.strftime("%Y-%m-%dT%H:%M:%S"),
+                "timeZone": cls._local_tz()}
 
     @staticmethod
     def _calview_params(start_iso: str, end_iso: str, limit: int) -> str:

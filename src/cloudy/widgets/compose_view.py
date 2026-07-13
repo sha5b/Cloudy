@@ -31,6 +31,7 @@ from .source_nav import local_initial_folder, run_async
 class ComposeWindow(EditorWindow):
     def __init__(self, window, account, *, from_label: str, send_fn,
                  to: str = "", subject: str = "", body: str = "",
+                 cc: str = "", bcc: str = "",
                  title: str | None = None, draft_fn=None):
         super().__init__(window, title=title or _("New message"),
                          primary_label=_("Send"))
@@ -65,6 +66,14 @@ class ComposeWindow(EditorWindow):
         bcc_toggle.add_css_class("flat")
         bcc_toggle.connect("toggled",
                            lambda b: self._bcc_revealer.set_reveal_child(b.get_active()))
+        # Prefill (e.g. reopening a draft) — reveal the fields so nothing the
+        # user previously typed is hidden, and later silently dropped on send.
+        if cc:
+            self._cc.set_text(cc)
+            cc_toggle.set_active(True)
+        if bcc:
+            self._bcc.set_text(bcc)
+            bcc_toggle.set_active(True)
         to_row = self._field(_("To"), self._to)
         to_row.append(cc_toggle)
         to_row.append(bcc_toggle)

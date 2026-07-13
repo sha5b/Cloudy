@@ -256,6 +256,17 @@ class MountManager:
     def _safe_name(name: str) -> str:
         return "".join(c if c.isalnum() or c in "-_ " else "_" for c in name).strip()
 
+    @classmethod
+    def remote_name(cls, drive_name: str, account_id: str = "") -> str:
+        """rclone config-section name for a drive, scoped per account: two
+        accounts each having a drive literally named "OneDrive" must NOT share
+        one remote — each mount rewrote the shared section with its own token,
+        clobbering the token the other account's live daemon refreshes into
+        it. Unscoped (legacy) names are still read as a fallback when adopting
+        old mounts (see _reconstruct_record)."""
+        base = cls._safe_name(drive_name)
+        return f"{base}--{cls._safe_name(account_id)}" if account_id else base
+
     def mountpoint_for(self, name: str, base: Path | None = None) -> Path:
         """Mountpoint for a library. ``base`` overrides the global mount root
         (used for per-account mount locations); falls back to ``mount_root()``."""
@@ -474,6 +485,14 @@ class MountManager:
             "--vfs-write-back", "5s",
             "--vfs-read-chunk-size", "16M",
             "--vfs-read-chunk-size-limit", "512M",
+            #   --attr-timeout 1m  : how long the KERNEL caches file attributes.
+            #     rclone's default is 1s, which means every stat() from a file
+            #     chooser, Nautilus, or thumbnailer goes back to rclone (and
+            #     potentially the network) almost every time — this is what made
+            #     file-open dialogs across the desktop crawl once a drive was
+            #     mounted. 1m is rclone's own recommended safe raise; change
+            #     detection still works via --poll-interval invalidation.
+            "--attr-timeout", "1m",
             "--log-file", str(log_file),
             "--log-level", "INFO",
         )
@@ -543,7 +562,9 @@ class MountManager:
             return False
         out = subprocess.run(self._rclone_argv("listremotes"),
                              capture_output=True, text=True)
-        return f"{remote}:" in out.stdout.split()
+        # One remote per line; splitting on whitespace broke any remote whose
+        # name contains a space (allowed by _safe_name, e.g. "My Drive").
+        return f"{remote}:" in (l.strip() for l in out.stdout.splitlines())
 
     def authorize(self, backend: str, timeout: int = 300) -> str:
         """Run rclone's own browser OAuth for a backend (its built-in app = no
@@ -615,6 +636,14 @@ class MountManager:
         mountpoint = self.mountpoint_for(name, base)
         mountpoint.mkdir(parents=True, exist_ok=True)
 
+        # A stale mount (in the mount table but its daemon is dead) must be
+        # cleared first: is_mounted() alone would treat it as already-mounted
+        # and skip the real mount, reporting success for a drive that only
+        # returns "transport endpoint is not connected" — and a hung endpoint
+        # also stalls every file chooser on the desktop that stats it.
+        if self.mount_health(mountpoint) == "stale":
+            self._lazy_unmount(mountpoint)
+
         if not self.is_mounted(mountpoint):
             if backend is RCLONE:
                 # `rclone mount --daemon` forks and the parent exits 0 *before*
@@ -638,7 +667,15 @@ class MountManager:
                     raise RuntimeError(
                         "rclone mount didn't come up (timed out); see %s" % log_file)
             elif backend is ONEDRIVER:
-                subprocess.run([ONEDRIVER.path() or ONEDRIVER.binary, str(mountpoint)], check=True)
+                # onedriver runs in the FOREGROUND by default — subprocess.run
+                # would block this worker thread forever and the mount would
+                # appear to hang. Detach it and poll the mount table instead.
+                subprocess.Popen(
+                    [ONEDRIVER.path() or ONEDRIVER.binary, str(mountpoint)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True)
+                if not self._await_mount(mountpoint):
+                    raise RuntimeError("onedriver mount didn't come up (timed out)")
 
         self.add_bookmark(mountpoint, name)
         return MountInfo(
@@ -647,13 +684,13 @@ class MountManager:
         )
 
     def mount_drive(self, *, provider: str, drive, token: str,
-                    base: Path | None = None) -> MountInfo:
+                    base: Path | None = None, account_id: str = "") -> MountInfo:
         """Create the rclone remote for ``drive`` from a stored token and mount
         it. Shared by the Files view and the startup auto-remount so the remote
         options stay in one place. Blocking — call off the UI thread."""
         google = provider == "google"
         backend = "drive" if google else "onedrive"
-        remote = self._safe_name(drive.name)
+        remote = self.remote_name(drive.name, account_id)
         if google:
             opts = {"token": token, "scope": "drive"}
             # "Shared with me" and Shared Drives are the same backend with a
@@ -682,6 +719,14 @@ class MountManager:
             if res.returncode != 0:
                 subprocess.run([*_host_prefix(), "fusermount", "-u", str(mountpoint)],
                                check=False)
+            # A busy mount (any file still open) makes both attempts fail with
+            # exit 1. Swallowing that made the caller forget the mount record
+            # and toast "Unmounted" while the drive stayed mounted — raise
+            # instead so the UI can report the real situation.
+            if self.is_mounted(mountpoint):
+                detail = (res.stderr or res.stdout or "").strip()
+                raise RuntimeError(
+                    detail or "the drive is busy (a file may still be open)")
         self.remove_bookmark(mountpoint)
 
     # -- Nautilus sidebar bookmark ---------------------------------------
@@ -771,7 +816,8 @@ def remount_saved(registry, secrets, log=lambda _m: None) -> int:
         drive = Drive(id=rec.get("drive_id", ""), name=drive_name,
                       kind=rec.get("drive_kind", ""), web_url="")
         try:
-            mgr.mount_drive(provider=provider, drive=drive, token=token, base=base)
+            mgr.mount_drive(provider=provider, drive=drive, token=token,
+                            base=base, account_id=account_id)
             log(f"remounted {drive_name!r} at {mountpoint}")
             remounted += 1
         except Exception as exc:  # noqa: BLE001 - one bad drive must not block others
@@ -783,8 +829,11 @@ def _reconstruct_record(account, folder: str, dump: dict) -> dict | None:
     """Rebuild a mount record for a drive whose bookmark survived but whose
     ``mounts.json`` entry was lost, from the rclone remote config (which already
     holds the token, ``drive_id`` and ``drive_type``). ``folder`` is the
-    mountpoint's final path component == the rclone remote name."""
-    cfg = dump.get(folder)
+    mountpoint's final path component; the remote is the account-scoped name,
+    falling back to the legacy unscoped one for remotes created before the
+    per-account scoping."""
+    scoped = MountManager.remote_name(folder, getattr(account, "id", ""))
+    cfg = dump.get(scoped) or dump.get(folder)
     if cfg is None:
         return None
     if cfg.get("type") == "drive":  # google

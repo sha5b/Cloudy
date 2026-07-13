@@ -72,8 +72,11 @@ class TestEsc(unittest.TestCase):
     def test_escapes_markup_breakers(self):
         self.assertEqual(esc("R&D <tag>"), "R&amp;D &lt;tag&gt;")
 
-    def test_leaves_quotes_alone(self):
-        self.assertEqual(esc("Couldn't \"do\""), "Couldn't \"do\"")
+    def test_escapes_double_quotes(self):
+        # esc'd text is also interpolated into markup ATTRIBUTES (href="…"),
+        # where a raw double quote terminates the attribute and breaks the
+        # label; &quot; renders identically in text content. Apostrophes stay.
+        self.assertEqual(esc("Couldn't \"do\""), "Couldn't &quot;do&quot;")
 
     def test_none_safe(self):
         self.assertEqual(esc(None), "")

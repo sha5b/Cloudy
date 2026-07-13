@@ -15,6 +15,7 @@ from gettext import gettext as _
 
 from gi.repository import Adw, Gtk
 
+from .format import esc
 from .metrics import WIN_READ
 from .source_nav import run_async
 
@@ -66,7 +67,7 @@ class MessageWindow(Adw.Window):
             self._scroll.set_child(Adw.StatusPage(
                 icon_name="dialog-error-symbolic",
                 title=_("Couldn't open message"),
-                description=str(error or _("No data"))))
+                description=esc(str(error or _("No data")))))
             return False
         from .message_view import build_message_content
 

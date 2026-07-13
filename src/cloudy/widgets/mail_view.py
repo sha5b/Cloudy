@@ -469,7 +469,11 @@ class MailView(Adw.Bin):
             self._folder_dd.set_sensitive(False)
             return False
         self._shared_folders[address] = folders
-        if self._source == "shared":
+        # Only populate if this reply is for the shared mailbox that's STILL
+        # selected — a slower reply for a mailbox the user already switched
+        # away from must not overwrite the current one's folder list.
+        current = (self._ctx_current or {}).get("id")
+        if self._source == "shared" and address == current:
             self._populate_folders(folders)
         return False
 
@@ -525,9 +529,28 @@ class MailView(Adw.Bin):
         messages, next_token = result
         # Only the plain folder listing is cached; search results are transient.
         if not query:
-            self._window.get_application().cache.set(
-                f"{self._account.id}:messages:{folder_id}", messages
-            )
+            # Merge the fresh newest page into the cached list instead of
+            # replacing it: "Load older" pages live in the cache too, and a
+            # live refresh used to clobber them (the visible list snapped back
+            # to page one and the pagination cursor reset). The page is
+            # authoritative for its own window; older cached mail is kept.
+            cache = self._window.get_application().cache
+            key = f"{self._account.id}:messages:{folder_id}"
+            cached = cache.get(key)
+            base = list(cached[0]) if cached else []
+            page_ids = {m.get("id") for m in messages}
+            window_end = messages[-1].get("received", "") if messages else ""
+            older = [m for m in base if m.get("id") not in page_ids
+                     and (m.get("received", "") or "") <= window_end]
+            merged = messages + older
+            cache.set(key, merged)
+            if not stale:
+                # Adopt the page cursor only when no older pages are held —
+                # resetting it would make "Load older" re-fetch loaded mail.
+                if len(merged) == len(messages) or self._next_token is None:
+                    self._next_token = next_token
+                self._render(merged)
+            return False
         if not stale:
             self._next_token = next_token
             self._render(messages)
@@ -631,6 +654,10 @@ class MailView(Adw.Bin):
             self._more_row = None
         for msg in new:
             row = self._mail_row(msg)
+            # Key the row like patch_listbox does, or the next live refresh
+            # treats it as foreign: the message would get a second (duplicate)
+            # row and this one would drift out of order.
+            row._patch_key = msg["id"]
             self._list.append(row)
             self._messages_by_id[msg["id"]] = msg
             self._rows_by_id[msg["id"]] = row
@@ -703,18 +730,14 @@ class MailView(Adw.Bin):
         return True
 
     def _refresh_row(self, mid, msg) -> None:
-        """Rebuild a single row in place (e.g. after marking it read)."""
+        """Refresh a single row in place (e.g. after marking it read). Must
+        reuse the existing widget: a swapped-in replacement would lose its
+        ``_patch_key``, so the next patch_listbox pass (live refresh) would
+        treat the message as missing and add a duplicate row for it."""
         row = self._rows_by_id.get(mid)
         if row is None:
             return
-        idx = row.get_index()
-        was_selected = self._list.get_selected_row() is row
-        self._list.remove(row)
-        new_row = self._mail_row(msg)
-        self._list.insert(new_row, idx)
-        self._rows_by_id[mid] = new_row
-        if was_selected:
-            self._list.select_row(new_row)
+        self._update_mail_row(row, msg)
 
     # -- a single email row (plain Gtk.Labels: no markup parsing) ---------
     def _mail_row(self, msg) -> Gtk.ListBoxRow:
@@ -940,16 +963,26 @@ class MailView(Adw.Bin):
                                  address=address, cc=cc, bcc=bcc, html=True,
                                  attachments=attachments, importance=importance,
                                  read_receipt=read_receipt)
-                try:
-                    client.delete_message(mid)  # the sent copy supersedes it
-                except Exception:  # noqa: BLE001 - a leftover draft is harmless
-                    pass
+                # Only auto-delete an attachment-less draft: the composer can't
+                # carry the draft's server-side attachments over, so deleting
+                # one that has them would destroy files the user never saw.
+                # A leftover draft is harmless; a destroyed attachment isn't.
+                if not msg.get("attachments"):
+                    try:
+                        client.delete_message(mid)  # the sent copy supersedes it
+                    except Exception:  # noqa: BLE001 - a leftover draft is harmless
+                        pass
                 self._invalidate_messages()
 
             body = msg.get("body", "") or ""
+            if msg.get("attachments"):
+                self._window.add_toast(
+                    _("This draft has attachments — they stay on the draft "
+                      "and won't be attached here."))
             ComposeWindow(self._window, self._account,
                           from_label=self._from_label(), send_fn=send,
                           to=msg.get("to", ""), subject=msg.get("subject", ""),
+                          cc=msg.get("cc", ""), bcc=msg.get("bcc", ""),
                           body=_to_text(body) if msg.get("body_html") else body,
                           title=_("Draft"),
                           draft_fn=self._make_draft_fn()).present()
@@ -968,6 +1001,10 @@ class MailView(Adw.Bin):
             self._split.set_show_content(True)  # already open; just reveal it
             return
         self._open_mid = mid
+        # Drop the previous message's body NOW: reply shortcuts (Ctrl+R) fire
+        # before the fetch completes, and a stale _open_msg would quietly build
+        # the reply from the previously-open message.
+        self._open_msg = None
         # Group conversations are read-only (no per-user delete).
         self._delete_btn.set_sensitive(not str(mid).startswith("group:"))
         self._reply_btn.set_sensitive(False)  # enabled once the body loads

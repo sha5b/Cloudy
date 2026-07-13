@@ -91,6 +91,23 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
   </screenshots>
 
   <releases>
+    <release version="0.3.1" date="2026-07-13">
+      <description>
+        <p>A stability sweep: reliable chat, correct calendar times, and a desktop that stays fast with mounted drives.</p>
+        <ul>
+          <li>Chat: new messages arrive reliably, and loading older messages no longer shows duplicates or makes messages vanish</li>
+          <li>Chat list groups meeting and call chats under their own section, ordered by latest activity</li>
+          <li>File-open dialogs across the desktop no longer crawl or hang when a cloud drive is mounted</li>
+          <li>Rename and New folder in the file browser work again; copying never overwrites an existing file</li>
+          <li>The Nautilus "Copy Share Link" action actually copies the link now</li>
+          <li>Editing a calendar event no longer silently shifts its time; live badges and countdowns show correctly</li>
+          <li>Declined invitations explain Outlook's "Save declined events" setting instead of showing a raw error</li>
+          <li>Google: sign-in no longer fails intermittently, attendees receive invitation emails, and Gmail folders load much faster with inline images shown</li>
+          <li>Drafts keep their Cc/Bcc when reopened, and mail lists no longer duplicate rows after a refresh</li>
+          <li>Unmounting reports honestly, stale mounts are cleaned automatically, and each account keeps its own drive credentials</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-07-10">
       <description>
         <p>Group chats, reliable file uploads, and a correct GNOME calendar.</p>

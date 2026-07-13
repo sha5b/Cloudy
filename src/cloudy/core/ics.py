@@ -120,6 +120,7 @@ def parse_invite(text: str) -> dict | None:
     ``[{email, cn, partstat}]``), else ``None``."""
     method = ""
     in_event = False
+    depth = 0  # nesting inside sub-components of the VEVENT (VALARM etc.)
     ev: dict = {"sequence": 0, "attendees": [], "all_day": False,
                 "status": "", "join_url": "", "description": ""}
     have_event = False
@@ -128,11 +129,22 @@ def parse_invite(text: str) -> dict | None:
         if name == "METHOD":
             method = value.strip().upper()
         elif name == "BEGIN" and value.strip().upper() == "VEVENT":
-            in_event = True
+            # Only the FIRST VEVENT: recurrence exceptions/cancellations in the
+            # same VCALENDAR must not merge their fields into this one.
+            in_event = not have_event
             have_event = True
+            depth = 0
         elif name == "END" and value.strip().upper() == "VEVENT":
             in_event = False
         elif not in_event:
+            continue
+        # Skip sub-components wholesale: a VALARM's DESCRIPTION ("This is an
+        # event reminder") otherwise overwrites the invite's real description.
+        elif name == "BEGIN":
+            depth += 1
+        elif name == "END":
+            depth = max(0, depth - 1)
+        elif depth:
             continue
         elif name == "UID":
             ev["uid"] = value.strip()

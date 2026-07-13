@@ -389,6 +389,12 @@ class ChatView(Adw.Bin):
             GLib.source_remove(self._search_timer)
             self._search_timer = None
         if not raw:
+            # Leaving search: the results listbox is full of rows built outside
+            # patch_listbox (no _patch_key) — clear it, or patch_listbox would
+            # leave them in place and append the whole chat list below them.
+            if self._search_mode:
+                clear_listbox(self._list)
+                self._chats_more_row = None
             self._search_mode = False
             self._render_filtered()
             return
@@ -444,14 +450,27 @@ class ChatView(Adw.Bin):
         selected = [r._chat_id for r in self._list.get_selected_rows()
                     if getattr(r, "_chat_id", None)]
 
+        # Group real conversations apart from meeting chats — every Teams
+        # video call spawns its own chat, and mixed into one list they drown
+        # out the actual conversations. Meetings go under their own header.
+        meetings = [c for c in chats if c.get("kind") == "meeting"]
+        convos = [c for c in chats if c.get("kind") != "meeting"]
+        items = list(convos)
+        if meetings:
+            items.append({"id": "::meetings::", "section": _("Meetings & calls")})
+            items.extend(meetings)
+
         def factory(chat):
+            if chat.get("section"):
+                return self._section_row(chat["section"])
             return self._chat_row(chat)
 
         def update(row, chat):
-            self._update_chat_row(row, chat)
+            if not chat.get("section"):
+                self._update_chat_row(row, chat)
 
         self._rows_by_id = patch_listbox(
-            self._list, chats, lambda c: c["id"], factory, update,
+            self._list, items, lambda c: c["id"], factory, update,
             selection=selected,
         )
 
@@ -723,13 +742,13 @@ class ChatView(Adw.Bin):
         if error or chat_id != self._chat_id or not result:
             return False  # transient failure / switched away — try again next tick
         messages, next_token = result
-        kept = [m for m in messages
+        merged = self._merge_page(self._cached_messages(chat_id), messages)
+        kept = [m for m in merged
                 if self._has_content(m) and m.get("id") not in self._deleted_ids]
         if self._thread_signature(kept) == self._thread_sig:
             return False  # nothing changed — leave the thread (and scroll) alone
-        self._msg_next_token = next_token
-        self._cache().set(self._msg_key(chat_id), messages)
-        self._render_thread(chat_id, messages)
+        self._store_page(chat_id, merged, messages, next_token)
+        self._render_thread(chat_id, merged)
         return False
 
     # -- group roster / management popover --------------------------------
@@ -960,7 +979,7 @@ class ChatView(Adw.Bin):
             self._load_more_chats()
             return
         cid = getattr(row, "_chat_id", None)
-        if cid is not None:
+        if cid:  # search hits can carry an empty chat_id — never open_chat("")
             self.open_chat(cid, getattr(row, "_chat_name", ""))
 
     # -- new chat ---------------------------------------------------------
@@ -993,7 +1012,10 @@ class ChatView(Adw.Bin):
             self._deleted_ids = set()  # locally-deleted marks are per-conversation
         self._chat_id = chat_id
         self._chat_name = name
-        self._msg_next_token = None
+        # Resume pagination where this chat left off — the cached thread may
+        # hold older pages, and starting the cursor over would re-fetch them.
+        cursor = self._cache().get(self._cursor_key(chat_id))
+        self._msg_next_token = cursor[0] if cursor else None
         self._older_row = None
         self._mentions = []
         self._chat_members = []
@@ -1049,22 +1071,67 @@ class ChatView(Adw.Bin):
         run_async(work, lambda _r, _e: False)  # best-effort; ignore failures
 
     def _mark_row_read(self, chat_id) -> None:
-        """Grey out a chat's row once opened (rebuild it without the unread mark)."""
+        """Grey out a chat's row once opened (refresh it without the unread
+        mark). Must update the row IN PLACE: swapping in a fresh row would lose
+        its ``_patch_key``, and the next patch_listbox pass would then treat the
+        chat as missing and add a second, duplicate row for it."""
         if chat_id in self._read_ids:
             return
         self._read_ids.add(chat_id)
-        old = self._rows_by_id.get(chat_id)
+        row = self._rows_by_id.get(chat_id)
         chat = next((c for c in self._all_chats if c["id"] == chat_id), None)
-        if old is None or chat is None:
+        if row is None or chat is None:
             return
-        idx = old.get_index()
-        self._list.remove(old)
-        new = self._chat_row(chat)
-        self._list.insert(new, idx)
-        self._rows_by_id[chat_id] = new
+        self._update_chat_row(row, chat)
 
     def _msg_key(self, chat_id) -> str:
         return f"{self._account.id}:chat-messages:{chat_id}"
+
+    def _cursor_key(self, chat_id) -> str:
+        # Older-messages cursor, cached beside the thread so pagination
+        # survives closing/reopening the chat (invalidating the thread's
+        # prefix clears both).
+        return f"{self._msg_key(chat_id)}:cursor"
+
+    def _cached_messages(self, chat_id) -> list:
+        cached = self._cache().get(self._msg_key(chat_id))
+        return list(cached[0]) if cached else []
+
+    @staticmethod
+    def _merge_page(cached: list, page: list) -> list:
+        """Merge a freshly-fetched newest ``page`` into the ``cached`` thread
+        (both oldest-first). The page is authoritative for the window it
+        covers: its messages replace their cached versions (edits, reactions),
+        cached messages inside that window it no longer returns are dropped
+        (deleted server-side), and older history below the window is kept — so
+        a poll can never truncate messages the user has paged in (which used to
+        wipe just-loaded older messages and re-render them, showing doubles)."""
+        if not cached or not page:
+            return list(page or cached)
+        page_ids = {m.get("id") for m in page if m.get("id")}
+        window_start = page[0].get("sent", "") or ""
+        # <= so a cached message that shares the window-start timestamp (two
+        # messages in the same second at the page seam) isn't dropped as
+        # "deleted" — the id-set exclusion already prevents duplicates.
+        older = [m for m in cached
+                 if m.get("id") not in page_ids
+                 and (m.get("sent", "") or "") <= window_start]
+        return older + list(page)
+
+    def _store_page(self, chat_id, merged, page, next_token) -> None:
+        """Persist a merged thread. The page's older-messages cursor is only
+        adopted when we hold no history beyond the page — otherwise it would
+        reset pagination to just below the newest page and the next "load
+        older" would re-fetch (and duplicate) messages already on screen."""
+        cache = self._cache()
+        cache.set(self._msg_key(chat_id), merged)
+        # Also adopt it when no cursor is held at all (e.g. the cached cursor
+        # was evicted): a dead cursor would make "load older" unavailable, and
+        # re-fetching an overlapping page is harmless now that older pages are
+        # deduped by id before rendering.
+        if len(merged) == len(page) or self._msg_next_token is None:
+            self._msg_next_token = next_token
+            cache.set(self._cursor_key(chat_id), next_token)
 
     def _load_messages(self, chat_id) -> None:
         def work():
@@ -1094,9 +1161,9 @@ class ChatView(Adw.Bin):
             return False
         self._forward_return_to = None  # opened fine; no bounce needed
         messages, next_token = result
-        self._msg_next_token = next_token
-        self._cache().set(self._msg_key(chat_id), messages)
-        self._render_thread(chat_id, messages)
+        merged = self._merge_page(self._cached_messages(chat_id), messages)
+        self._store_page(chat_id, merged, messages, next_token)
+        self._render_thread(chat_id, merged)
         # A forward-quote jump asked to land on a specific message; do it once the
         # thread has laid out (a beat after render so coordinates are valid).
         if getattr(self, "_pending_scroll_mid", None):
@@ -1331,12 +1398,17 @@ class ChatView(Adw.Bin):
             return False
         messages, next_token = result
         self._msg_next_token = next_token
-        # Extend the cached thread (older messages go before the current ones).
+        # Extend the cached thread (older messages go before the current ones),
+        # dropping anything already held: pages can overlap (Graph's skiptoken
+        # isn't a hard boundary, and a poll may have refreshed the cursor in
+        # the meantime), and an un-deduped seam message rendered twice.
         cache = self._cache()
-        cached = cache.get(self._msg_key(chat_id))
-        base = list(cached[0]) if cached else []
+        base = self._cached_messages(chat_id)
+        base_ids = {m.get("id") for m in base if m.get("id")}
+        messages = [m for m in messages if m.get("id") not in base_ids]
         full = messages + base
         cache.set(self._msg_key(chat_id), full)
+        cache.set(self._cursor_key(chat_id), next_token)
         # Anchor the view: remember the distance from the bottom so prepending
         # older bubbles grows the thread upward without moving what's on screen,
         # and hold that anchor every frame while the new bubbles' images decode.
@@ -1348,7 +1420,7 @@ class ChatView(Adw.Bin):
             self._thread.remove(self._older_row)
             self._older_row = None
         for msg in reversed(messages):
-            if self._has_content(msg):
+            if self._has_content(msg) and msg.get("id") not in self._deleted_ids:
                 widget = self._bubble(msg)
                 if msg.get("id"):
                     self._bubble_widgets[msg["id"]] = widget
@@ -1357,7 +1429,10 @@ class ChatView(Adw.Bin):
         # Keep the render bookkeeping in step with what's now on screen — older +
         # existing — so the next poll/edit takes the cheap in-place path instead
         # of a full rebuild (which would reload every image and jump the view).
-        shown = [m for m in full if self._has_content(m)]
+        # Same visibility filter as _render_thread/_on_poll (content AND not
+        # locally deleted), or the signatures would never match again.
+        shown = [m for m in full if self._has_content(m)
+                 and m.get("id") not in self._deleted_ids]
         self._rendered_sigs = [self._msg_sig(m) for m in shown]
         self._thread_sig = self._thread_signature(shown)
         self._hold_position()
@@ -2334,6 +2409,7 @@ class ChatView(Adw.Bin):
         if not self._search_mode or query.lower() != self._query:
             return False
         clear_listbox(self._list)
+        self._chats_more_row = None  # cleared with the rest; drop the reference
         self._rows_by_id = {}
         # Matching loaded chats first (find a conversation by participant name),
         # then the server's message hits (find content in any chat).
@@ -2526,8 +2602,10 @@ class ChatView(Adw.Bin):
         # reconcile poll). Use a UTC stamp so it sorts correctly against Graph's
         # Z-suffixed createdDateTime values.
         prev = (text or "").strip() or (_("(image)") if images else "")
-        self._bump_chat(datetime.now(timezone.utc).isoformat(), prev, True,
-                        chat_id=chat_id)
+        # Z-suffixed like Graph's createdDateTime, so the string compare in
+        # _bump_chat (and the list sort) sees a consistent format.
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._bump_chat(stamp, prev, True, chat_id=chat_id)
         # Echo any attached images straight from memory (no fetch round-trip).
         attachments = [{"content_type": ctype or "image/png", "data": data,
                         "name": "image"} for data, ctype in (images or [])]

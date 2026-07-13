@@ -8,6 +8,7 @@ from __future__ import annotations
 import html
 import re
 import urllib.error
+import urllib.parse  # used explicitly (urlsplit); don't rely on side-effect imports
 import urllib.request
 
 from .graph_http import _REACTIONS, BASE_URL, GraphError, _StripAuthOnRedirect

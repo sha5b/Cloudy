@@ -86,8 +86,11 @@ class SyncManager:
 
     def _on_timer(self, account_id: str) -> bool:
         account = self._app.registry.get(account_id)
+        # signed_in too: a signed-out account must not keep bisyncing on its
+        # stored rclone token until the app restarts.
         if account is None or not self._master_enabled() \
-                or not getattr(account, "full_sync", False):
+                or not getattr(account, "full_sync", False) \
+                or not getattr(account, "signed_in", True):
             self._timers.pop(account_id, None)
             return False  # GLib removes the timer
         self.sync_now(account)
@@ -105,7 +108,9 @@ class SyncManager:
             drives = self._enumerate(account)
             synced = 0
             for drive in drives:
-                remote = self._mounts._safe_name(drive.name)
+                # Account-scoped, matching mount_drive — the shared unscoped
+                # name let two accounts' same-named drives clobber tokens.
+                remote = self._mounts.remote_name(drive.name, account.id)
                 if not self._ensure_remote(account, drive, remote):
                     continue
                 try:

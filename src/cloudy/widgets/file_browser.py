@@ -346,7 +346,11 @@ class FileBrowserPane(Adw.Bin):
         self._update_nav()
         self._build_crumbs()
         self._show_status("content-loading-symbolic", _("Loading…"), "")
-        run_async(lambda: scan_directory(path), self._on_scanned)
+        # Tag the result with the folder it was scanned for: a slow scan (a
+        # hung FUSE folder can take seconds) must not overwrite the listing of
+        # a folder the user has since navigated to.
+        run_async(lambda: scan_directory(path),
+                  lambda entries, err: self._on_scanned(path, entries, err))
 
     def _update_nav(self) -> None:
         self._back.set_sensitive(self._hpos > 0)
@@ -379,7 +383,9 @@ class FileBrowserPane(Adw.Bin):
             self._crumbs.append(btn)
 
     # -- rendering --------------------------------------------------------
-    def _on_scanned(self, entries, error) -> bool:
+    def _on_scanned(self, path, entries, error) -> bool:
+        if path != self._cur():
+            return False  # stale scan for a folder we've navigated away from
         if error is not None:
             self._show_status("dialog-error-symbolic",
                               _("Couldn't open this folder"), str(error))
@@ -675,20 +681,41 @@ class FileBrowserPane(Adw.Bin):
                 srcs.append(p)
         if not srcs:
             return False
-        targets = [os.path.join(dest_dir, os.path.basename(s.rstrip("/")))
-                   for s in srcs]
 
         def work():
-            for src, target in zip(srcs, targets):
+            # Conflict-free targets, probed off-thread (a stat on a FUSE mount
+            # can block): silently overwriting a same-named file destroyed it —
+            # and the copy's Undo then deleted the victim for good.
+            targets = []
+            for src in srcs:
+                target = self._conflict_free(
+                    dest_dir, os.path.basename(src.rstrip("/")))
+                targets.append(target)
                 if os.path.isdir(src):
                     shutil.copytree(src, target)
                 else:
                     shutil.copy2(src, target)
+            return targets
 
         self._window.add_toast(_("Copying here…"))
-        run_async(work, lambda _r, err: self._after_transfer(
+        run_async(work, lambda targets, err: self._after_transfer(
             err, False, srcs, targets, reload=True))
         return True
+
+    @staticmethod
+    def _conflict_free(dest_dir: str, name: str) -> str:
+        """A target path in ``dest_dir`` that doesn't collide with an existing
+        entry: "report.docx" → "report (2).docx". Touches the filesystem —
+        call off-thread for network mounts."""
+        target = os.path.join(dest_dir, name)
+        if not os.path.lexists(target):
+            return target
+        stem, ext = os.path.splitext(name)
+        for i in range(2, 1000):
+            cand = os.path.join(dest_dir, f"{stem} ({i}){ext}")
+            if not os.path.lexists(cand):
+                return cand
+        return target
 
     # -- file operations (off-thread; trash is recoverable) --------------
     def _set_actions(self, enabled: bool) -> None:
@@ -718,6 +745,18 @@ class FileBrowserPane(Adw.Bin):
             self._window.add_undo_toast(ok_msg, undo)
             self._load()
         return False
+
+    @staticmethod
+    def _valid_child_name(name: str):
+        """Validate a user-typed file/folder name. Returns an error message to
+        toast, or None when the name is usable as a single path component."""
+        if name in (".", ".."):
+            return _("That name is reserved.")
+        if "/" in name or "\x00" in name:
+            return _("Names can't contain “/”.")
+        if len(name.encode()) > 255:
+            return _("That name is too long.")
+        return None
 
     def _rename(self, entry: dict) -> None:
         dialog = Adw.AlertDialog(heading=_("Rename"),
@@ -825,20 +864,25 @@ class FileBrowserPane(Adw.Bin):
             if not dest_dir:
                 return
             srcs = [e["path"] for e in entries]
-            targets = [os.path.join(dest_dir, os.path.basename(s.rstrip("/")))
-                       for s in srcs]
 
             def work():
-                for src, target in zip(srcs, targets):
+                # Conflict-free targets, probed off-thread (see _conflict_free)
+                # so an existing same-named file is never silently replaced.
+                targets = []
+                for src in srcs:
+                    target = self._conflict_free(
+                        dest_dir, os.path.basename(src.rstrip("/")))
+                    targets.append(target)
                     if move:
                         shutil.move(src, target)
                     elif os.path.isdir(src):
                         shutil.copytree(src, target)
                     else:
                         shutil.copy2(src, target)
+                return targets
 
             self._window.add_toast(_("Moving…") if move else _("Copying…"))
-            run_async(work, lambda _r, err: self._after_transfer(
+            run_async(work, lambda targets, err: self._after_transfer(
                 err, move, srcs, targets))
 
         dialog.select_folder(self._window, None, on_pick)
@@ -930,7 +974,8 @@ class FileBrowserPane(Adw.Bin):
 
             def work():
                 for src in paths:
-                    shutil.copy2(src, os.path.join(dest_dir, os.path.basename(src)))
+                    shutil.copy2(src, self._conflict_free(
+                        dest_dir, os.path.basename(src)))
 
             self._window.add_toast(_("Uploading…"))
             run_async(work, lambda _r, err: self._toast_then_reload(
