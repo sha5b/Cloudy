@@ -226,6 +226,25 @@ class GraphHttp:
             detail = exc.read().decode(errors="replace")
             raise GraphError(f"Graph {exc.code}: {detail}") from exc
 
+    def _put_chunk(self, url: str, part: bytes, start: int, total: int) -> dict:
+        """PUT one Content-Range chunk of an upload session. The uploadUrl is
+        pre-authenticated (its auth travels in the URL), so no bearer header —
+        sending one can even get the request rejected."""
+        req = urllib.request.Request(
+            url, data=part, method="PUT",
+            headers={
+                "Content-Type": "application/octet-stream",
+                "Content-Range":
+                    f"bytes {start}-{start + len(part) - 1}/{total}",
+            })
+        try:
+            with self._open_retry(req, timeout=300) as resp:
+                raw = resp.read().decode()
+                return json.loads(raw) if raw else {}
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode(errors="replace")
+            raise GraphError(f"Graph {exc.code}: {detail}") from exc
+
     def _post_html(self, path: str, html_doc: str, scopes: Sequence[str]) -> dict:
         """POST a OneNote HTML document (distinct from the JSON ``_post``)."""
         token = self._token_provider(scopes)

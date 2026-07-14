@@ -841,11 +841,16 @@ class MailView(Adw.Bin):
                 row._flags.remove(child)
                 child = nxt
 
-        if msg.get("important") or msg.get("starred"):
+        if msg.get("important") or msg.get("starred") or msg.get("meeting"):
             if msg.get("important"):
                 row._flags.append(Gtk.Image.new_from_icon_name("mail-mark-important-symbolic"))
             if msg.get("starred"):
                 row._flags.append(Gtk.Image.new_from_icon_name("starred-symbolic"))
+            if msg.get("meeting"):
+                # Meeting invite/update/cancellation — mirrors Outlook's
+                # calendar glyph so invites stand out in the list.
+                row._flags.append(
+                    Gtk.Image.new_from_icon_name("x-office-calendar-symbolic"))
             row._flags.set_visible(True)
         else:
             row._flags.set_visible(False)
@@ -1023,7 +1028,9 @@ class MailView(Adw.Bin):
 
             client = build_account_client(self._window.get_application(), self._account)
             msg = client.get_message(mid)
-            invite = self._parse_invite(client, mid, msg)
+            # Graph invites (eventMessage) arrive pre-parsed on the message;
+            # otherwise look for an iMIP .ics attachment (Gmail, external).
+            invite = msg.get("invite") or self._parse_invite(client, mid, msg)
             if invite is not None:
                 msg["invite"] = invite
             return msg
@@ -1088,6 +1095,27 @@ class MailView(Adw.Bin):
             return
         if action == "removeCancelled":
             self._remove_cancelled(invite)
+            return
+        # A provider-staged event (Graph eventMessage) answers through the real
+        # RSVP action with sendResponse=true — Exchange then notifies the
+        # organizer and updates their attendee tracking itself. A hand-built
+        # iMIP reply attachment is NOT auto-processed by Exchange organizers,
+        # so it's kept only as the fallback for plain .ics invites below.
+        staged_id = invite.get("event_id")
+        if staged_id:
+            self._window.add_toast(_("Sending response…"))
+
+            def graph_work():
+                from .clients import build_account_client
+
+                client = build_account_client(
+                    self._window.get_application(), self._account)
+                client.respond_event(staged_id, action, send=True)
+                invalidate_cached(self._window.get_application(),
+                                  self._account.id, "events")
+                return action, True
+
+            run_async(graph_work, self._on_invite_replied)
             return
         if not invite.get("organizer_email"):
             self._window.add_toast(_("This invite has no organizer to reply to."))
@@ -1157,7 +1185,8 @@ class MailView(Adw.Bin):
             from .clients import build_account_client
 
             client = build_account_client(self._window.get_application(), self._account)
-            eid = client.find_event_by_uid(invite.get("uid", ""))
+            eid = (invite.get("event_id")
+                   or client.find_event_by_uid(invite.get("uid", "")))
             if not eid:
                 return False
             client.delete_event(eid)
@@ -1294,11 +1323,17 @@ class MailView(Adw.Bin):
         subject = msg.get("subject", "")
         if subject and not subject.lower().startswith(("fwd:", "fw:")):
             subject = _("Fwd: %s") % subject
-        # The compose editor takes a plain-text prefill (it produces the HTML on
-        # send), so quote the original as text and re-attach its files so the
-        # forward actually carries them.
-        body = self._signature_block() + self._forward_quote(msg)
-        atts_meta = [a for a in (msg.get("attachments") or []) if a.get("id")]
+        # Microsoft messages forward through Graph's native action, which keeps
+        # the original HTML, inline images and attachments server-side — so the
+        # composer only prefills the signature (Exchange appends the quoted
+        # original itself). Other providers keep the client-built forward:
+        # quote the original as text and re-attach its files.
+        native = (self._account.provider != "google"
+                  and not str(mid).startswith("group:"))
+        body = self._signature_block() + ("" if native
+                                          else self._forward_quote(msg))
+        atts_meta = ([] if native else
+                     [a for a in (msg.get("attachments") or []) if a.get("id")])
         source, address = self._send_context()
 
         def send(to, subject, body, *, cc=None, bcc=None,
@@ -1306,6 +1341,11 @@ class MailView(Adw.Bin):
             from .clients import build_account_client
 
             client = build_account_client(self._window.get_application(), self._account)
+            if native:
+                client.forward_mail(mid, to, body, html=True, cc=cc,
+                                    attachments=attachments)
+                self._invalidate_messages()
+                return
             fwd_atts = list(attachments or [])
             for a in atts_meta:
                 try:

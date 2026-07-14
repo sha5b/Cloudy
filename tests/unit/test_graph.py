@@ -88,8 +88,12 @@ class TestListEvents(unittest.TestCase):
         client = GraphClient.__new__(GraphClient)
         with unittest.mock.patch.object(client, "_get_all", return_value=[]) as get_all:
             list(client.list_events("2026-06-16T00:00:00Z", "2026-06-17T00:00:00Z"))
-            args = get_all.call_args.args
+            # The "Me" source now aggregates: first call is the default
+            # calendarView (with the timezone header), later calls enumerate
+            # the other calendars.
+            args = get_all.call_args_list[0].args
             self.assertEqual(len(args), 3)
+            self.assertIn("/me/calendarView", args[0])
             headers = args[2]
             self.assertIn("Prefer", headers)
             self.assertIn('outlook.timezone="', headers["Prefer"])
@@ -145,6 +149,44 @@ class TestEventsFromJson(unittest.TestCase):
 
     def test_empty(self):
         self.assertEqual(GraphClient._events_from_json({}), [])
+
+
+@_skip
+class TestMessageRowMeetingFlag(unittest.TestCase):
+    def test_event_message_is_flagged(self):
+        m = {"id": "A", "subject": "S",
+             "@odata.type": "#microsoft.graph.eventMessageRequest"}
+        self.assertTrue(GraphClient._message_row(m)["meeting"])
+
+    def test_plain_message_is_not(self):
+        self.assertFalse(GraphClient._message_row({"id": "A"})["meeting"])
+
+
+@_skip
+class TestSplitAttachments(unittest.TestCase):
+    def test_small_stay_inline(self):
+        atts = [{"name": "a", "data": b"x" * 1000}]
+        small, big = GraphClient._split_attachments(atts)
+        self.assertEqual(len(small), 1)
+        self.assertEqual(big, [])
+
+    def test_large_goes_to_upload_session(self):
+        atts = [{"name": "big", "data": b"x" * 3_000_000}]
+        small, big = GraphClient._split_attachments(atts)
+        self.assertEqual(small, [])
+        self.assertEqual(len(big), 1)
+
+    def test_budget_is_cumulative(self):
+        # Two 1.5 MB files fit the ~4 MB request cap individually but not
+        # together — the second must spill to an upload session.
+        atts = [{"name": "a", "data": b"x" * 1_500_000},
+                {"name": "b", "data": b"y" * 1_500_000}]
+        small, big = GraphClient._split_attachments(atts)
+        self.assertEqual([a["name"] for a in small], ["a"])
+        self.assertEqual([a["name"] for a in big], ["b"])
+
+    def test_none_is_empty(self):
+        self.assertEqual(GraphClient._split_attachments(None), ([], []))
 
 
 if __name__ == "__main__":

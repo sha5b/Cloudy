@@ -276,8 +276,19 @@ SCOPE_HINT = _(
 
 
 def is_scope_error(error: str | None) -> bool:
-    """True when a call failed for lack of a required scope (vs. a real error)."""
-    return bool(error) and "requested scopes" in error
+    """True when a call failed for lack of a required scope (vs. a real error).
+
+    Matches our own token-provider message ("no token for the requested
+    scopes") plus Google's granular-consent 403s — a scope the user un-ticked
+    on Google's consent screen surfaces as "insufficient authentication
+    scopes" / ACCESS_TOKEN_SCOPE_INSUFFICIENT, which should offer the same
+    inline "Re-sign in" recovery instead of reading like a hard failure."""
+    if not error:
+        return False
+    return ("requested scopes" in error
+            or "insufficient authentication scopes" in error
+            or "ACCESS_TOKEN_SCOPE_INSUFFICIENT" in error
+            or "insufficientPermissions" in error)
 
 
 _API_ERROR_RE = re.compile(r"^(Graph|Google)\s+(\d+):\s*(.*)$", re.DOTALL)

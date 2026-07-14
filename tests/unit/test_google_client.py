@@ -1,9 +1,34 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Shahab Nedaei
 
+import base64
 import unittest
 
-from cloudy.modules.gmail.google_client import GoogleClient
+from cloudy.modules.gmail.google_client import (
+    GoogleClient,
+    _decode_b64url,
+    _part_charset,
+)
+
+
+class TestBodyCharset(unittest.TestCase):
+    def test_latin1_body_decodes_with_declared_charset(self):
+        raw = "Grüße & café".encode("iso-8859-1")
+        data = base64.urlsafe_b64encode(raw).decode()
+        self.assertEqual(_decode_b64url(data, "iso-8859-1"), "Grüße & café")
+
+    def test_bad_charset_falls_back_to_utf8(self):
+        data = base64.urlsafe_b64encode("hällo".encode()).decode()
+        self.assertEqual(_decode_b64url(data, "no-such-charset"), "hällo")
+
+    def test_part_charset_parsed_from_content_type(self):
+        part = {"headers": [
+            {"name": "Content-Type",
+             "value": 'text/plain; charset="ISO-8859-1"; format=flowed'}]}
+        self.assertEqual(_part_charset(part), "ISO-8859-1")
+
+    def test_part_charset_missing(self):
+        self.assertEqual(_part_charset({"headers": []}), "")
 
 
 class TestNormalization(unittest.TestCase):
@@ -57,16 +82,32 @@ class TestNormalization(unittest.TestCase):
         self.assertEqual(row["start"], "2026-06-10")
         self.assertEqual(row["end"], "2026-06-12")
 
+    @staticmethod
+    def _client(me: str = "users/self"):
+        # _chat_message_row needs the cached own-user id (used for is_mine).
+        client = GoogleClient.__new__(GoogleClient)
+        client._chat_me = me
+        return client
+
     def test_chat_message_row(self):
         m = {"name": "spaces/A/messages/1", "text": "hi",
-             "sender": {"displayName": "Bob &amp; co"}, "createTime": "t",
+             "sender": {"displayName": "Bob &amp; co", "name": "users/bob"},
+             "createTime": "t",
              "attachments": [{"contentName": "f.png", "downloadUri": "u",
                               "contentType": "image/png"}]}
-        row = GoogleClient._chat_message_row(m)
+        row = self._client()._chat_message_row(m)
         self.assertEqual(row["id"], "spaces/A/messages/1")
         self.assertEqual(row["from"], "Bob & co")
         self.assertFalse(row["is_mine"])
         self.assertEqual(row["attachments"][0]["name"], "f.png")
+
+    def test_chat_message_row_own_message(self):
+        m = {"name": "spaces/A/messages/3", "text": "hi",
+             "sender": {"displayName": "Me", "name": "users/self"},
+             "createTime": "t"}
+        self.assertTrue(self._client()._chat_message_row(m)["is_mine"])
+        # Unknown own-id must never claim someone else's message as ours.
+        self.assertFalse(self._client(me="")._chat_message_row(m)["is_mine"])
 
     def test_chat_message_row_legacy_attachment_key(self):
         # Older payloads may use the singular "attachment" key; keep fallback.
@@ -74,7 +115,7 @@ class TestNormalization(unittest.TestCase):
              "sender": {"displayName": "Bob"}, "createTime": "t",
              "attachment": [{"contentName": "legacy.png", "downloadUri": "u",
                              "contentType": "image/png"}]}
-        row = GoogleClient._chat_message_row(m)
+        row = self._client()._chat_message_row(m)
         self.assertEqual(row["attachments"][0]["name"], "legacy.png")
 
 

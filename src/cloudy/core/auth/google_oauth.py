@@ -39,7 +39,14 @@ SCOPES_MAIL = [
 ]
 # calendar.events grants read + create/delete of events (supersedes the old
 # read-only scope so the New event / Delete actions work).
-SCOPES_CALENDAR = ["https://www.googleapis.com/auth/calendar.events"]
+# calendarlist.readonly is required for calendarList.list — calendar.events is
+# NOT an accepted scope there, so without it listing the user's calendars
+# always 403'd and multi-calendar aggregation silently degraded to
+# primary-only. Existing accounts must re-sign-in to pick it up.
+SCOPES_CALENDAR = [
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+]
 # Read-only access to Google Contacts + auto-saved "other contacts" (people you
 # email but haven't saved) — for To: autocomplete.
 SCOPES_CONTACTS = [
@@ -218,6 +225,10 @@ class GoogleAuth:
             return None
         self._token["access_token"] = token
         self._token["expiry"] = time.time() + resp.get("expires_in", 3600)
+        # Google may rotate the refresh token; dropping the new one meant the
+        # stored token eventually died and forced a full re-sign-in.
+        if resp.get("refresh_token"):
+            self._token["refresh_token"] = resp["refresh_token"]
         self._store()
         return token
 

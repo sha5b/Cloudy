@@ -153,6 +153,12 @@ class CloudyWindow(Adw.ApplicationWindow):
         if account_id == getattr(self, "_account_shown", None):
             self._set_tab_badge("mail", count)
 
+    def set_account_pending_invites(self, account_id: str, count: int) -> None:
+        """Update the Calendar tab badge with the number of meeting invitations
+        awaiting an answer (called by the notifier's invite sweep)."""
+        if account_id == getattr(self, "_account_shown", None):
+            self._set_tab_badge("calendar", count)
+
     def set_account_chat_unread(self, account_id: str, count: int) -> None:
         """Update an account row's red chat badge (called by the notifier)."""
         badge = self._account_chat_badges.get(account_id)
@@ -287,13 +293,15 @@ class CloudyWindow(Adw.ApplicationWindow):
             page.set_icon_name(icon)
             self._tab_pages[key] = page
 
-        # Seed the Mail/Chat tab badges with the same unread counts the sidebar
-        # shows (Calendar/Files have no "new since you looked" count yet).
+        # Seed the tab badges with the notifier's counts: unread mail, chats
+        # with new messages, and meeting invitations awaiting an answer.
         app = self.get_application()
         notifier = getattr(app, "notifier", None)
         if notifier is not None:
             self._set_tab_badge("mail", notifier.unread_count(account.id))
             self._set_tab_badge("chat", notifier.chat_unread_count(account.id))
+            self._set_tab_badge("calendar",
+                                notifier.pending_invites_count(account.id))
 
         # Re-open on the tab the user last left for this account.
         remembered = self._last_tab.get(account.id)

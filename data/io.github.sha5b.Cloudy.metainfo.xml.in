@@ -91,6 +91,22 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
   </screenshots>
 
   <releases>
+    <release version="0.3.2" date="2026-07-14">
+      <description>
+        <p>Meeting invitations finally get first-class treatment, and this release fixes a batch of provider-API mistakes found in a full audit.</p>
+        <ul>
+          <li>Meeting invitations in Mail now show a proper invite card with Accept / Tentative / Decline and a Join link — and answering updates the organizer's tracking correctly</li>
+          <li>New invitations raise a "You're invited" notification and the Calendar tab shows a badge with your unanswered invitations</li>
+          <li>Invite emails are marked with a calendar icon in the message list</li>
+          <li>Nested Outlook mail folders (folders inside folders) are now listed and reachable</li>
+          <li>Secondary and shared-in calendars now appear alongside your default calendar</li>
+          <li>Large attachments (over ~3 MB) can now be sent; forwards keep the original formatting, inline images and attachments; replies keep the quoted conversation</li>
+          <li>Replying in Teams/group conversations works (needs one re-sign-in); files sent in chats are now openable by the recipients</li>
+          <li>The Nautilus extension no longer freezes the file manager while Cloudy is busy</li>
+          <li>Google: multiple calendars actually aggregate now, editing chat messages works, your own chat messages show on the right side, non-UTF-8 mail displays correctly, and busy months are no longer truncated</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.1" date="2026-07-13">
       <description>
         <p>A stability sweep: reliable chat, correct calendar times, and a desktop that stays fast with mounted drives.</p>

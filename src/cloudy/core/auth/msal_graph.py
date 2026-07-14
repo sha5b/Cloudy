@@ -56,9 +56,12 @@ SCOPES_MAIL_SHARED = [
 SCOPES_PEOPLE = ["People.Read"]
 # Enumerate the Teams the user belongs to (each Team's files = a doc library).
 SCOPES_TEAMS = ["Team.ReadBasic.All"]
-# Read M365 group mailboxes (conversations) and group/team calendars. Usually
-# requires tenant-admin consent.
-SCOPES_GROUPS = ["Group.Read.All"]
+# M365 group mailboxes (conversations) and group/team calendars. ReadWrite —
+# not Read — because replying to a group conversation thread
+# (POST /groups/{id}/threads/{tid}/reply) requires Group.ReadWrite.All; with
+# the read-only scope every group reply 403'd. Usually requires tenant-admin
+# consent. Adding this forces existing accounts to Sign Out → Sign In once.
+SCOPES_GROUPS = ["Group.ReadWrite.All"]
 # Read + send the signed-in user's Teams chats (1:1 and group). Delegated and
 # unmetered (per-message billing only applies to *application* permissions).
 # Work/school accounts only — consumer Microsoft accounts have no Graph chats.

@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import html
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -26,10 +27,12 @@ from datetime import datetime, timezone
 from typing import Callable, Sequence
 
 from ...core.auth.google_oauth import (
+    SCOPES_BASE,
     SCOPES_CALENDAR,
     SCOPES_CHAT,
     SCOPES_CONTACTS,
     SCOPES_MAIL,
+    USERINFO,
 )
 
 GMAIL = "https://gmail.googleapis.com/gmail/v1"
@@ -42,12 +45,34 @@ class GoogleError(Exception):
     pass
 
 
-def _decode_b64url(data: str) -> str:
+def _decode_b64url(data: str, charset: str = "") -> str:
+    """base64url → text. ``body.data`` holds the part's bytes in its ORIGINAL
+    charset — decoding everything as UTF-8 turned ISO-8859-1 / windows-1252
+    mail into mojibake, so honour the part's declared charset."""
     padded = data + "=" * (-len(data) % 4)
     try:
-        return base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace")
+        raw = base64.urlsafe_b64decode(padded)
     except Exception:  # noqa: BLE001
         return ""
+    for cs in (charset, "utf-8"):
+        if not cs:
+            continue
+        try:
+            return raw.decode(cs)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def _part_charset(payload: dict) -> str:
+    """The charset= parameter of a part's Content-Type header, if declared."""
+    for h in payload.get("headers", []) or []:
+        if (h.get("name") or "").lower() != "content-type":
+            continue
+        m = re.search(r"charset\s*=\s*\"?([\w.:-]+)", h.get("value") or "",
+                      re.IGNORECASE)
+        return m.group(1) if m else ""
+    return ""
 
 
 def _extract_rich(payload: dict) -> tuple[str, bool]:
@@ -59,9 +84,9 @@ def _extract_rich(payload: dict) -> tuple[str, bool]:
     mime = payload.get("mimeType", "")
     data = payload.get("body", {}).get("data")
     if mime == "text/html" and data:
-        return _decode_b64url(data), True
+        return _decode_b64url(data, _part_charset(payload)), True
     if mime == "text/plain" and data:
-        return _decode_b64url(data), False
+        return _decode_b64url(data, _part_charset(payload)), False
 
     html_part = ""
     text_part = ""
@@ -590,19 +615,28 @@ class GoogleClient:
         })
 
         def fetch(cal: dict) -> list[dict]:
-            try:
-                data = self._get(
-                    f"{CALENDAR}/calendars/{self._cal_path(cal['id'])}/events?{params}",
-                    SCOPES_CALENDAR)
-            except GoogleError:
-                return []  # one unreachable calendar must not sink the whole agenda
-            evs = []
-            for e in data.get("items", []):
-                ev = self._event_from_json(e)
-                ev["id"] = self._wrap_event_id(cal["id"], ev["id"])
-                ev["calendar"] = cal["name"]
-                ev["color"] = cal["color"]
-                evs.append(ev)
+            evs: list[dict] = []
+            base_url = (f"{CALENDAR}/calendars/{self._cal_path(cal['id'])}"
+                        f"/events?{params}")
+            token = ""
+            # Follow nextPageToken (bounded): a single page capped at
+            # ``limit`` silently truncated busy months.
+            for _ in range(10):
+                url = base_url + (
+                    f"&pageToken={urllib.parse.quote(token)}" if token else "")
+                try:
+                    data = self._get(url, SCOPES_CALENDAR)
+                except GoogleError:
+                    break  # one unreachable calendar must not sink the agenda
+                for e in data.get("items", []):
+                    ev = self._event_from_json(e)
+                    ev["id"] = self._wrap_event_id(cal["id"], ev["id"])
+                    ev["calendar"] = cal["name"]
+                    ev["color"] = cal["color"]
+                    evs.append(ev)
+                token = data.get("nextPageToken", "")
+                if not token:
+                    break
             return evs
 
         out: list[dict] = []
@@ -832,9 +866,23 @@ class GoogleClient:
         out.reverse()
         return out, data.get("nextPageToken")
 
-    @staticmethod
-    def _chat_message_row(m: dict) -> dict:
+    def _my_chat_user(self) -> str:
+        """Our own Chat user resource name (``users/<sub>``). The OIDC ``sub``
+        claim from the userinfo endpoint is the same id the Chat API puts in
+        ``sender.name``, so this is how own messages are recognized (they used
+        to be hard-coded not-mine, which drew them on the wrong side and
+        hid edit/delete). Cached; empty when unavailable."""
+        if not hasattr(self, "_chat_me"):
+            try:
+                sub = self._get(USERINFO, SCOPES_BASE).get("sub", "")
+                self._chat_me = f"users/{sub}" if sub else ""
+            except GoogleError:
+                self._chat_me = ""
+        return self._chat_me
+
+    def _chat_message_row(self, m: dict) -> dict:
         sender = m.get("sender") or {}
+        me = self._my_chat_user()
         attachments = [
             {"name": a.get("contentName") or "attachment",
              "url": a.get("downloadUri") or a.get("thumbnailUri") or "",
@@ -846,8 +894,7 @@ class GoogleClient:
             "text": m.get("text", "") or m.get("formattedText", ""),
             "from": html.unescape(sender.get("displayName", "") or ""),
             "sent": m.get("createTime", ""),
-            # User-auth Chat API doesn't expose our own user id for comparison.
-            "is_mine": False,
+            "is_mine": bool(me) and sender.get("name") == me,
             "attachments": attachments,
         }
 
@@ -870,7 +917,10 @@ class GoogleClient:
         self._delete(f"{CHAT}/{message_id}", SCOPES_CHAT)
 
     def edit_chat_message(self, chat_id: str, message_id: str, text: str) -> None:
-        self._patch(f"{CHAT}/{message_id}", {"text": text}, SCOPES_CHAT)
+        # updateMask is REQUIRED by spaces.messages.update — without it the
+        # PATCH is a guaranteed 400 and editing never worked.
+        self._patch(f"{CHAT}/{message_id}?updateMask=text",
+                    {"text": text}, SCOPES_CHAT)
 
     def list_chat_members(self, chat_id: str) -> list[dict]:
         return []  # Google Chat @mentions aren't wired yet

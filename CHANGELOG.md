@@ -11,6 +11,78 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-07-14
+
+Meeting invitations become first-class, plus fixes from a full audit of the
+Microsoft Graph and Google API clients.
+
+### Added
+- **Meeting-invite cards for Microsoft mail**: an Outlook meeting invitation
+  (Graph `eventMessage`) now renders the same invite card Gmail `.ics` invites
+  get — when/where, Join link, Accept / Tentative / Decline — via the
+  documented `$expand=microsoft.graph.eventMessage/event` follow-up. Invite
+  rows carry a calendar icon in the message list.
+- **Pending-invitation badge + notification**: the notifier sweeps the next
+  two weeks for events you haven't answered, badges the Calendar tab with the
+  count, and raises a "You're invited" banner (tier 1) for new invitations.
+- **Nested Outlook mail folders**: the folder list now walks `childFolders`
+  recursively (flattened as "Inbox / Projects / …") — subfolders used to be
+  invisible.
+- **Secondary personal calendars**: the Me source merges every other owned or
+  shared-in calendar with the default `calendarView` (best-effort per
+  calendar, bounded fan-out).
+- **Large mail attachments**: attachments that would push a request over
+  Graph's ~4 MB cap are sent through `createUploadSession` chunked uploads
+  (send, reply and draft paths); mixed batches split automatically.
+- **Native forward for Microsoft mail**: forwards go through Graph's
+  `forward`/`createForward` action, so the original HTML body, inline images
+  and attachments survive (the client-built forward flattened to plain text).
+
+### Fixed
+- **Nautilus extension froze the file manager**: `ManagedRoots` was fetched
+  with a *synchronous* D-Bus call (up to 1.5 s) on Nautilus's UI thread every
+  time the 30 s cache expired, and the proxy was created synchronously. Menu
+  hooks now always return the cached snapshot immediately; the proxy and the
+  roots refresh are fully async (`DO_NOT_LOAD_PROPERTIES` /
+  `DO_NOT_CONNECT_SIGNALS`).
+- **Invite RSVP now reaches the organizer's tracking**: answering a Microsoft
+  invite email uses `/me/events/{id}/accept|tentativelyAccept|decline` with
+  `sendResponse: true` on the auto-staged event. The old hand-built iMIP
+  `.ics` file attachment (which Exchange organizers don't auto-process, sent
+  with `send=False`) remains only as the fallback for plain `.ics` invites.
+- **Replies dropped the quoted conversation**: the reply action now passes the
+  new text as `comment` — setting `message.body` replaced Exchange's reply
+  draft (which is where the quoted thread lives), so recipients got
+  context-free replies.
+- **Group-conversation replies always 403'd**: `Group.Read.All` →
+  `Group.ReadWrite.All` (the `threads/{id}/reply` action requires write).
+  Existing accounts must Sign Out → Sign In once.
+- **Files sent in Teams chats were unopenable**: the reference attachment
+  pointed into the sender's OneDrive with no permission grant, so every
+  recipient got 403. Cloudy now invites the chat's members to the file (org
+  view-link fallback), mirroring what Teams itself does.
+- **Google — calendar list could never load**: the requested
+  `calendar.events` scope isn't accepted by `calendarList.list`, so listing
+  calendars always 403'd and multi-calendar aggregation silently fell back to
+  primary-only. Added `calendar.calendarlist.readonly` (re-sign-in to pick it
+  up).
+- **Google Chat — editing a message never worked**: the required
+  `updateMask=text` parameter was missing (guaranteed 400).
+- **Google Chat — own messages rendered as someone else's**: `is_mine` was
+  hard-coded `False`; it now compares `sender.name` against the OIDC `sub`
+  (`users/<sub>`), restoring right-side bubbles and edit/delete of own
+  messages.
+- **Google mail bodies in non-UTF-8 charsets** (ISO-8859-1, windows-1252, …)
+  rendered as mojibake: bodies are now decoded with the part's declared
+  charset.
+- **Google calendar months were truncated**: `list_events` now follows
+  `nextPageToken` per calendar instead of stopping at the first page (50
+  items).
+- **Google sign-in aged out needlessly**: a rotated `refresh_token` in a
+  refresh response was dropped instead of persisted.
+- **Google granular-consent 403s** ("insufficient authentication scopes") now
+  trigger the inline "Re-sign in" recovery instead of reading like an error.
+
 ## [0.3.0] - 2026-07-10
 
 ### Added

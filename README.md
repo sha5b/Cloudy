@@ -49,10 +49,15 @@ mail, calendar & chat — behind one adaptive UI.
 - **Files** as live `rclone` FUSE mounts — two-way network drives that appear in
   GNOME Files and an in-app browser (not synced copies), with right-click
   OneDrive / SharePoint share links and optional offline sync.
-- **Mail**: read (HTML), compose, reply/reply-all, with **Me / Teams / Shared**
-  mailbox sources and contacts autocomplete.
-- **Calendar**: month grid + agenda, event detail with an attendee response
-  tracker, and **create / edit / delete** events + RSVP.
+- **Mail**: read (HTML), compose, reply/reply-all (keeping the quoted thread),
+  forward with full fidelity, large attachments, nested folders, with
+  **Me / Teams / Shared** mailbox sources and contacts autocomplete. **Meeting
+  invitations** render an invite card with **Accept / Tentative / Decline**
+  and a Join link — answering updates the organizer's tracking.
+- **Calendar**: month grid + agenda across your default **and secondary**
+  calendars, event detail with an attendee response tracker, **create / edit /
+  delete** events + RSVP, and a badge + notification for **invitations you
+  haven't answered yet**.
 - **Chat**: a Teams-style messenger for **Teams chats** (work/school Microsoft
   accounts) and **Google Chat** (Workspace) — 1:1, group and meeting threads,
   inline images (attach or paste), emoji reactions, @mentions, reply/forward

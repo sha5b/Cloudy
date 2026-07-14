@@ -22,8 +22,11 @@ class GraphCalendarMixin:
     # -- Calendar ---------------------------------------------------------
     def list_calendars(self) -> list[dict]:
         return [
-            {"id": c["id"], "name": c.get("name", "")}
-            for c in self._get_all("/me/calendars?$top=50", SCOPES_MAIL)
+            {"id": c["id"], "name": c.get("name", ""),
+             "default": bool(c.get("isDefaultCalendar"))}
+            for c in self._get_all(
+                "/me/calendars?$select=id,name,isDefaultCalendar&$top=50",
+                SCOPES_MAIL)
         ]
 
     def list_events(self, start_iso: str, end_iso: str, *,
@@ -37,6 +40,8 @@ class GraphCalendarMixin:
         * ``"group:<group_id>"`` — a group/team calendar.
         """
         headers = self._calendar_headers()
+        if not calendar_id:
+            return self._all_my_events(start_iso, end_iso, limit, headers)
         path = self._calendar_view_path(calendar_id, start_iso, end_iso, limit)
         scope = self._calendar_scope(calendar_id)
         items = self._get_all(path, scope, headers)
@@ -51,6 +56,35 @@ class GraphCalendarMixin:
                 addr = parts[1]
                 for e in events:
                     e["id"] = f"shared:{addr}:{e['id']}"
+        return events
+
+    def _all_my_events(self, start_iso: str, end_iso: str, limit: int,
+                       headers) -> list[dict]:
+        """The "Me" source: default calendarView merged with every other owned
+        or shared-in calendar. ``/me/calendarView`` alone covers ONLY the
+        default calendar, which silently hid secondary calendars (custom,
+        holidays, calendars shared into the mailbox). Extra calendars are
+        best-effort so one broken share can't blank the whole month."""
+        params = self._calview_params(start_iso, end_iso, limit)
+        items = self._get_all(f"/me/calendarView?{params}", SCOPES_MAIL, headers)
+        events = self._events_from_json({"value": items})
+        seen = {e["id"] for e in events}
+        try:
+            extras = [c for c in self.list_calendars() if not c.get("default")]
+        except GraphError:
+            extras = []
+        for cal in extras[:10]:  # bound the fan-out on calendar-hoarder accounts
+            try:
+                more = self._get_all(
+                    f"/me/calendars/{cal['id']}/calendarView?{params}",
+                    SCOPES_MAIL, headers)
+            except GraphError:
+                continue
+            for e in self._events_from_json({"value": more}):
+                if e["id"] not in seen:
+                    seen.add(e["id"])
+                    events.append(e)
+        events.sort(key=lambda e: (e.get("start", ""), e.get("subject", "")))
         return events
 
     def _calendar_view_path(self, calendar_id: str | None,

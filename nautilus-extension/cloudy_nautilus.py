@@ -47,50 +47,67 @@ _SHARE_LINK_TIMEOUT_MS = 20000
 # These paths almost never change, so a long TTL keeps the file manager fast.
 _ROOTS_TTL_S = 30.0
 # If creating the D-Bus proxy fails (app not running / bus stalled), remember
-# that for a short while so every menu rebuild doesn't retry synchronously.
+# that for a short while so every menu rebuild doesn't retry.
 _PROXY_FAILURE_TTL_S = 10.0
 
+# Shared extension state. get_file_items/get_background_items run on Nautilus's
+# UI thread with NO async variant, so nothing here may ever block: the proxy is
+# created asynchronously, the roots cache is refreshed asynchronously, and the
+# menu hooks only ever read the last cached snapshot.
+_state = {
+    "proxy": None,          # Gio.DBusProxy once created
+    "creating": False,      # a new_for_bus() is in flight
+    "failed_at": 0.0,       # last proxy-creation failure (monotonic)
+    "pending": [],          # callbacks waiting for the proxy
+    "roots": (),            # cached managed roots (normalized paths)
+    "roots_at": 0.0,        # when the roots were last refreshed (monotonic)
+    "refreshing": False,    # a ManagedRoots call is in flight
+}
 
-def _proxy():
-    """Return a cached D-Bus proxy to the Cloudy sync service, or None.
 
-    Creation is bounded by a timeout so a stalled session bus can't freeze
-    Nautilus on every menu query.
+def _ensure_proxy(on_ready=None):
+    """Create (once, asynchronously) the D-Bus proxy to the Cloudy service.
+
+    ``on_ready(proxy_or_None)`` fires from the GLib main loop when the proxy is
+    available (or creation failed). Never blocks the calling thread.
     """
+    proxy = _state["proxy"]
+    if proxy is not None:
+        if on_ready is not None:
+            on_ready(proxy)
+        return
     now = time.monotonic()
-    failed_since = getattr(_proxy, "_failed_at", 0)
-    if now - failed_since < _PROXY_FAILURE_TTL_S:
-        return None
-    if not hasattr(_proxy, "_p"):
+    if now - _state["failed_at"] < _PROXY_FAILURE_TTL_S:
+        if on_ready is not None:
+            on_ready(None)
+        return
+    if on_ready is not None:
+        _state["pending"].append(on_ready)
+    if _state["creating"]:
+        return
+    _state["creating"] = True
+
+    def _on_created(_source, res):
+        _state["creating"] = False
         try:
-            _proxy._p = Gio.DBusProxy.new_for_bus_sync(
-                Gio.BusType.SESSION,
-                Gio.DBusProxyFlags.DO_NOT_AUTO_START,
-                None, BUS_NAME, OBJECT_PATH, INTERFACE, None,
-            )
+            _state["proxy"] = Gio.DBusProxy.new_for_bus_finish(res)
         except GLib.Error:
-            _proxy._p = None
-            _proxy._failed_at = now
-    return _proxy._p
+            _state["proxy"] = None
+            _state["failed_at"] = time.monotonic()
+        waiters, _state["pending"] = _state["pending"], []
+        for cb in waiters:
+            cb(_state["proxy"])
 
-
-def _call(method, variant, reply_type=None):
-    proxy = _proxy()
-    if proxy is None:
-        return None
-    try:
-        result = proxy.call_sync(
-            method, variant, Gio.DBusCallFlags.NONE, _DBUS_TIMEOUT_MS, None
-        )
-        if reply_type is not None:
-            # Best-effort sanity check: if the result doesn't match the expected
-            # variant signature, treat it as no result (keeps the extension safe
-            # against future interface changes).
-            if result is not None and result.get_type_string() != reply_type:
-                return None
-        return result
-    except GLib.Error:
-        return None
+    Gio.DBusProxy.new_for_bus(
+        Gio.BusType.SESSION,
+        # Skip the GetAll-properties round-trip and signal subscription — this
+        # service exposes methods only, and both add blocking bus traffic.
+        Gio.DBusProxyFlags.DO_NOT_AUTO_START
+        | Gio.DBusProxyFlags.DO_NOT_LOAD_PROPERTIES
+        | Gio.DBusProxyFlags.DO_NOT_CONNECT_SIGNALS,
+        None, BUS_NAME, OBJECT_PATH, INTERFACE, None,
+        _on_created,
+    )
 
 
 def _call_async(method, variant, reply_type=None, callback=None,
@@ -98,30 +115,36 @@ def _call_async(method, variant, reply_type=None, callback=None,
     """Fire a D-Bus call without blocking Nautilus's UI thread.
 
     ``callback(result, error)`` is invoked from the GLib main loop when the call
-    finishes. If the proxy is unavailable the callback is invoked immediately
-    with (None, None).
+    finishes. If the proxy is unavailable the callback is invoked with
+    (None, None) once creation has failed.
     """
-    proxy = _proxy()
-    if proxy is None:
-        if callback is not None:
-            callback(None, None)
-        return
 
-    def _on_done(_proxy, res):
-        result = None
-        err = None
-        try:
-            result = _proxy.call_finish(res)
-            if reply_type is not None and result is not None \
-                    and result.get_type_string() != reply_type:
-                result = None
-        except GLib.Error as exc:
-            err = exc
-        if callback is not None:
-            callback(result, err)
+    def _with_proxy(proxy):
+        if proxy is None:
+            if callback is not None:
+                callback(None, None)
+            return
 
-    proxy.call(method, variant, Gio.DBusCallFlags.NONE, timeout_ms,
-               None, _on_done)
+        def _on_done(_proxy, res):
+            result = None
+            err = None
+            try:
+                result = _proxy.call_finish(res)
+                if reply_type is not None and result is not None \
+                        and result.get_type_string() != reply_type:
+                    # Best-effort sanity check: a mismatched variant signature
+                    # is treated as no result (keeps the extension safe against
+                    # future interface changes).
+                    result = None
+            except GLib.Error as exc:
+                err = exc
+            if callback is not None:
+                callback(result, err)
+
+        proxy.call(method, variant, Gio.DBusCallFlags.NONE, timeout_ms,
+                   None, _on_done)
+
+    _ensure_proxy(_with_proxy)
 
 
 def _path_of(file):
@@ -131,22 +154,27 @@ def _path_of(file):
 
 def _managed_roots():
     """The Cloudy-managed directories (mount + sync roots), as normalized path
-    strings. Fetched from the app over D-Bus ONCE and cached for ``_ROOTS_TTL_S``
-    so the per-file / per-folder menu hooks below can decide "is this ours?" with
-    a pure string compare — never a blocking D-Bus call on Nautilus's UI thread,
-    which is what made the whole file manager sluggish. Empty when the app isn't
-    running (so nothing is offered and no work is done)."""
+    strings. Always returns the cached snapshot IMMEDIATELY (empty until the
+    first async fetch lands) and, when the cache is older than ``_ROOTS_TTL_S``,
+    kicks off an asynchronous refresh in the background. The menu hooks below
+    run on Nautilus's UI thread on every selection change / folder open, so this
+    must never wait on D-Bus — a synchronous call here is exactly what froze the
+    whole file manager whenever the app was busy or a FUSE mount stalled."""
     now = time.monotonic()
-    cache = getattr(_managed_roots, "_cache", None)
-    if cache is not None and (now - cache[1]) < _ROOTS_TTL_S:
-        return cache[0]
-    roots = ()
-    result = _call("ManagedRoots", None, "(as)")
-    if result is not None:
-        (paths,) = result.unpack()
-        roots = tuple(os.path.normpath(p) for p in paths if p)
-    _managed_roots._cache = (roots, now)
-    return roots
+    if (now - _state["roots_at"]) >= _ROOTS_TTL_S and not _state["refreshing"]:
+        _state["refreshing"] = True
+
+        def _on_roots(result, _error):
+            _state["refreshing"] = False
+            _state["roots_at"] = time.monotonic()
+            roots = ()
+            if result is not None:
+                (paths,) = result.unpack()
+                roots = tuple(os.path.normpath(p) for p in paths if p)
+            _state["roots"] = roots
+
+        _call_async("ManagedRoots", None, "(as)", _on_roots)
+    return _state["roots"]
 
 
 def _under_roots(path, roots):

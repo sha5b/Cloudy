@@ -2546,7 +2546,8 @@ class ChatView(Adw.Bin):
 
             client = build_account_client(self._window.get_application(), self._account)
             if rich:
-                file_atts = [client.upload_chat_file(name, data, ctype)
+                file_atts = [client.upload_chat_file(name, data, ctype,
+                                                     chat_id=chat_id)
                              for data, ctype, name in files]
                 content, mention_array = self._compose_html(text, mentions)
                 return client.send_chat_html(

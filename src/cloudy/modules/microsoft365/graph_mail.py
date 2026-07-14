@@ -74,12 +74,11 @@ class GraphMailMixin:
         )
         return folders
 
+    # How deep to walk nested mail folders (Inbox / Projects / 2026 / …).
+    _MAX_FOLDER_DEPTH = 4
+
     def _mail_folders(self, base: str, scopes) -> list[dict]:
-        folders = [
-            {"id": f["id"], "name": f.get("displayName", ""),
-             "unread": f.get("unreadItemCount", 0), "well_known": ""}
-            for f in self._get_all(f"{base}?$top=50", scopes)
-        ]
+        folders = self._folder_tree(base, scopes)
         # Tag Inbox and Drafts via the locale-independent well-known aliases
         # (the Graph id is opaque and the name is localized, e.g. "Posteingang").
         # Drafts lets the Mail view open a draft back into the composer.
@@ -93,6 +92,26 @@ class GraphMailMixin:
                     f["well_known"] = alias
                     break
         return folders
+
+    def _folder_tree(self, base: str, scopes, *, prefix: str = "",
+                     depth: int = 0, url: str | None = None) -> list[dict]:
+        """Flatten the folder hierarchy into "Parent / Child" entries.
+        ``/mailFolders`` returns TOP-LEVEL folders only, so anything filed
+        under a subfolder (everyday Outlook practice) used to be invisible.
+        Recurses only into folders that report children, bounded by depth."""
+        sel = "$select=id,displayName,unreadItemCount,childFolderCount"
+        items = self._get_all(f"{url or base}?$top=50&{sel}", scopes)
+        out = []
+        for f in items:
+            name = f"{prefix}{f.get('displayName', '')}"
+            out.append({"id": f["id"], "name": name,
+                        "unread": f.get("unreadItemCount", 0),
+                        "well_known": ""})
+            if f.get("childFolderCount") and depth < self._MAX_FOLDER_DEPTH:
+                out.extend(self._folder_tree(
+                    base, scopes, prefix=f"{name} / ", depth=depth + 1,
+                    url=f"{base}/{f['id']}/childFolders"))
+        return out
 
     def inbox_unread(self) -> int:
         """Unread message count of the personal Inbox (cheap single call)."""
@@ -162,6 +181,11 @@ class GraphMailMixin:
             "is_read": m.get("isRead", True),
             "important": m.get("importance") == "high",
             "starred": (m.get("flag") or {}).get("flagStatus") == "flagged",
+            # Derived-type marker: meeting invites/updates/cancellations come
+            # back as microsoft.graph.eventMessage* — even under $select the
+            # OData type annotation is present for derived types, so the list
+            # can show a calendar marker without extra requests.
+            "meeting": "eventmessage" in (m.get("@odata.type") or "").lower(),
         }
 
     def _list_group_threads(self, group_id: str, limit: int,
@@ -256,13 +280,19 @@ class GraphMailMixin:
         bcc = _addrs(data.get("bccRecipients"))
         body = data.get("body") or {}
         content = body.get("content", "")
-        # NB: meetingMessageType (which would let us synthesize a "X accepted"
-        # card) lives on the derived eventMessage type and isn't reachable via
-        # $select or an entity-cast on this Graph endpoint (both 400). So empty-
-        # bodied meeting notifications just fall back to the reader's
-        # "No message content" placeholder — see message_view.
+        # meetingMessageType can't be $select-ed on the base /messages endpoint
+        # (400), but derived types still carry their @odata.type annotation — so
+        # when this message is an eventMessage, fetch the invite details (and
+        # the calendar event Exchange auto-staged) with the documented
+        # $expand=microsoft.graph.eventMessage/event follow-up. Personal
+        # mailbox only: RSVP on a shared mailbox isn't offered from here.
         meeting_response = ""
+        invite = None
+        if scope_base == "/me" and \
+                "eventmessage" in (data.get("@odata.type") or "").lower():
+            invite = self._meeting_invite(raw_id)
         return {
+            **({"invite": invite} if invite else {}),
             "id": message_id,
             "subject": html.unescape(data.get("subject", "(no subject)")),
             "from": html.unescape(from_disp),
@@ -285,6 +315,59 @@ class GraphMailMixin:
             # empty (e.g. meeting acceptance/decline notifications carry no body).
             "preview": html.unescape(data.get("bodyPreview", "")),
             "meeting_response": meeting_response,
+        }
+
+    def _meeting_invite(self, raw_id: str) -> dict | None:
+        """Meeting-invite details for an eventMessage, shaped like the parsed
+        iMIP dict from ``core.ics`` so the reader's invite card and RSVP bar
+        render it exactly like a Gmail ``.ics`` invite. Includes ``event_id``
+        (the copy Exchange auto-staged on the user's calendar) so the RSVP can
+        go through the proper ``/me/events/{id}/accept`` action instead of a
+        hand-built iMIP mail. Best-effort: ``None`` just means no invite card."""
+        try:
+            data = self._get(
+                f"/me/messages/{raw_id}"
+                f"?$expand=microsoft.graph.eventMessage/event",
+                SCOPES_MAIL)
+        except Exception:  # noqa: BLE001 - the message still renders without it
+            return None
+        method = {"meetingRequest": "REQUEST",
+                  "meetingCancelled": "CANCEL"}.get(
+            data.get("meetingMessageType", ""))
+        if method is None:
+            return None  # accepted/declined notifications aren't actionable
+        event = data.get("event") or {}
+
+        def _ical(dt: dict | None) -> str:
+            """Graph dateTimeTimeZone → iCal basic format (UTC gets a Z)."""
+            val = ((dt or {}).get("dateTime") or "")[:19]
+            if not val:
+                return ""
+            compact = val.replace("-", "").replace(":", "")
+            return compact + ("Z" if (dt or {}).get("timeZone") == "UTC" else "")
+
+        organizer = ((event.get("organizer") or {}).get("emailAddress")
+                     or (data.get("from") or {}).get("emailAddress") or {})
+        start = data.get("startDateTime") or event.get("start")
+        end = data.get("endDateTime") or event.get("end")
+        location = ((data.get("location") or {}).get("displayName")
+                    or (event.get("location") or {}).get("displayName") or "")
+        return {
+            "method": method,
+            "status": "CANCELLED" if method == "CANCEL" else "",
+            "summary": html.unescape(event.get("subject")
+                                     or data.get("subject", "") or ""),
+            "dtstart": _ical(start),
+            "dtend": _ical(end),
+            "all_day": bool(event.get("isAllDay") or data.get("isAllDay")),
+            "location": html.unescape(location),
+            "organizer_email": organizer.get("address", ""),
+            "uid": event.get("iCalUId", ""),
+            "join_url": (event.get("onlineMeeting") or {}).get("joinUrl", ""),
+            # Graph vocabulary (notResponded/accepted/…) — the RSVP bar's
+            # normalizer understands it alongside the iCal PARTSTAT one.
+            "my_response": (event.get("responseStatus") or {}).get("response", ""),
+            "event_id": event.get("id", ""),
         }
 
     def _file_attachments(self, scope_base: str, raw_id: str, has: bool,
@@ -404,6 +487,63 @@ class GraphMailMixin:
     def _recipients(addresses) -> list[dict]:
         return [{"emailAddress": {"address": a}} for a in addresses if a]
 
+    # Graph rejects any single request over ~4 MB, and attachments from ~3 MB
+    # up must go through an upload session (createUploadSession + chunked
+    # PUTs). The budget is on the base64-encoded size, and it's cumulative, so
+    # several mid-size files can't push one JSON payload over the cap together.
+    _INLINE_ATTACH_BUDGET = 2_500_000
+    _UPLOAD_CHUNK = 12 * 327_680  # session chunks must be 320 KiB multiples
+
+    @classmethod
+    def _split_attachments(cls, attachments) -> tuple[list, list]:
+        """(inline-able, needs-upload-session) split of raw attachment dicts."""
+        small, big = [], []
+        budget = cls._INLINE_ATTACH_BUDGET
+        for a in attachments or []:
+            cost = (len(a.get("data") or b"") * 4) // 3  # base64 size
+            if cost <= budget:
+                budget -= cost
+                small.append(a)
+            else:
+                big.append(a)
+        return small, big
+
+    def _upload_attachment(self, base: str, message_id: str, a: dict,
+                           scopes) -> None:
+        """Attach one large file to a draft via an upload session."""
+        data = a.get("data") or b""
+        item = {
+            "attachmentType": "file",
+            "name": a.get("name") or "attachment",
+            "contentType": a.get("content_type") or "application/octet-stream",
+            "size": len(data),
+        }
+        if a.get("inline"):
+            item["isInline"] = True
+        if a.get("content_id"):
+            item["contentId"] = a["content_id"]
+        sess = self._post(
+            f"{base}/messages/{message_id}/attachments/createUploadSession",
+            {"AttachmentItem": item}, scopes)
+        url = sess.get("uploadUrl")
+        if not url:
+            raise GraphError("upload session came back without an uploadUrl")
+        for off in range(0, len(data), self._UPLOAD_CHUNK):
+            self._put_chunk(url, data[off:off + self._UPLOAD_CHUNK],
+                            off, len(data))
+
+    def _draft_with_attachments(self, base: str, message: dict, attachments,
+                                scopes) -> dict:
+        """Create a draft carrying attachments of any size — small ones inline
+        in the create, large ones via upload sessions. Returns the draft."""
+        small, big = self._split_attachments(attachments)
+        if small:
+            message["attachments"] = self._build_attachments(small)
+        draft = self._post(f"{base}/messages", message, scopes)
+        for a in big:
+            self._upload_attachment(base, draft["id"], a, scopes)
+        return draft
+
     @staticmethod
     def _build_attachments(attachments) -> list[dict]:
         """Graph fileAttachment objects from ``[{name, content_type, data,
@@ -451,13 +591,22 @@ class GraphMailMixin:
             message["importance"] = importance
         if read_receipt:
             message["isReadReceiptRequested"] = True
+        if source == "shared" and address:
+            base, scopes = f"/users/{address}", SCOPES_MAIL_SHARED
+        else:
+            base, scopes = "/me", SCOPES_MAIL
+        _small, big = self._split_attachments(attachments)
+        if big:
+            # Too large for a single sendMail request (Graph caps at ~4 MB):
+            # stage a draft, stream the big files up in chunks, then send it.
+            draft = self._draft_with_attachments(base, message, attachments,
+                                                 scopes)
+            self._post(f"{base}/messages/{draft['id']}/send", None, scopes)
+            return
         if attachments:
             message["attachments"] = self._build_attachments(attachments)
-        payload = {"message": message, "saveToSentItems": True}
-        if source == "shared" and address:
-            self._post(f"/users/{address}/sendMail", payload, SCOPES_MAIL_SHARED)
-        else:
-            self._post("/me/sendMail", payload, SCOPES_MAIL)
+        self._post(f"{base}/sendMail",
+                   {"message": message, "saveToSentItems": True}, scopes)
 
     def save_draft(self, *, to, subject: str, body: str, cc=None, bcc=None,
                    html: bool = False, attachments=None, source: str = "me",
@@ -473,12 +622,11 @@ class GraphMailMixin:
             message["ccRecipients"] = self._recipients(cc)
         if bcc:
             message["bccRecipients"] = self._recipients(bcc)
-        if attachments:
-            message["attachments"] = self._build_attachments(attachments)
         if source == "shared" and address:
-            return self._post(f"/users/{address}/messages", message,
-                              SCOPES_MAIL_SHARED)
-        return self._post("/me/messages", message, SCOPES_MAIL)
+            return self._draft_with_attachments(
+                f"/users/{address}", message, attachments, SCOPES_MAIL_SHARED)
+        return self._draft_with_attachments(
+            "/me", message, attachments, SCOPES_MAIL)
 
     def reply_mail(self, message_id: str, body: str, *, reply_all: bool = False,
                    html: bool = False, attachments=None,
@@ -498,15 +646,104 @@ class GraphMailMixin:
             return
         base, raw_id, scopes = self._message_scope(message_id)
         action = "replyAll" if reply_all else "reply"
-        # The reply action accepts a draft override via "message"; we only set the
-        # body (and any attachments) so Graph keeps the recipients/subject/thread.
-        msg = {"body": comment}
+        _small, big = self._split_attachments(attachments)
+        if big:
+            self._reply_via_draft(base, raw_id, action, body, html=html,
+                                  attachments=attachments,
+                                  read_receipt=read_receipt, scopes=scopes)
+            return
+        # Send the new text as the action's "comment": Exchange builds the
+        # reply draft itself and keeps the quoted conversation underneath.
+        # Setting message.body instead REPLACES that draft body — which is why
+        # replies used to arrive with no conversation history at all.
+        payload: dict = {"comment": self._comment_html(body, html)}
+        msg = {}
         if read_receipt:
             msg["isReadReceiptRequested"] = True
         if attachments:
             msg["attachments"] = self._build_attachments(attachments)
-        self._post(f"{base}/messages/{raw_id}/{action}",
-                   {"message": msg}, scopes)
+        if msg:
+            payload["message"] = msg
+        self._post(f"{base}/messages/{raw_id}/{action}", payload, scopes)
+
+    @staticmethod
+    def _comment_html(body: str, is_html: bool) -> str:
+        """The reply text as HTML (Exchange folds the comment into an HTML
+        reply draft; plain text needs its newlines preserved)."""
+        if is_html:
+            return body
+        return html.escape(body).replace("\n", "<br>")
+
+    def _reply_via_draft(self, base: str, raw_id: str, action: str, body: str,
+                         *, html: bool, attachments, read_receipt: bool,
+                         scopes) -> None:
+        """Reply with attachments too big to inline: let Exchange build the
+        reply draft (createReply keeps the quoted original + recipients),
+        prepend the new text, stream the big files up, then send."""
+        create = "createReplyAll" if action == "replyAll" else "createReply"
+        draft = self._post(f"{base}/messages/{raw_id}/{create}", None, scopes)
+        did = draft["id"]
+        quoted = (draft.get("body") or {}).get("content", "")
+        patch: dict = {"body": {
+            "contentType": "HTML",
+            "content": f"<div>{self._comment_html(body, html)}</div>{quoted}",
+        }}
+        if read_receipt:
+            patch["isReadReceiptRequested"] = True
+        self._patch(f"{base}/messages/{did}", patch, scopes)
+        small, big = self._split_attachments(attachments)
+        for obj in self._build_attachments(small):
+            self._post(f"{base}/messages/{did}/attachments", obj, scopes)
+        for a in big:
+            self._upload_attachment(base, did, a, scopes)
+        self._post(f"{base}/messages/{did}/send", None, scopes)
+
+    def forward_mail(self, message_id: str, to, comment: str = "", *,
+                     html: bool = False, cc=None, attachments=None) -> None:
+        """Forward through Graph's native action: Exchange rebuilds the
+        message itself, keeping the original HTML body, inline (cid:) images
+        and every original attachment — the old client-built forward flattened
+        the body to plain text and dropped inline images. ``attachments`` are
+        *extra* files the user added while forwarding."""
+        if message_id.startswith("group:"):
+            raise GraphError("Group conversations can't be forwarded.")
+        base, raw_id, scopes = self._message_scope(message_id)
+        _small, big = self._split_attachments(attachments)
+        if big:
+            # Same draft dance as large-attachment replies: createForward
+            # keeps the original content, then stream the new files up.
+            draft = self._post(f"{base}/messages/{raw_id}/createForward",
+                               None, scopes)
+            did = draft["id"]
+            quoted = (draft.get("body") or {}).get("content", "")
+            patch: dict = {
+                "body": {"contentType": "HTML",
+                         "content": f"<div>{self._comment_html(comment, html)}"
+                                    f"</div>{quoted}"},
+                "toRecipients": self._recipients(to),
+            }
+            if cc:
+                patch["ccRecipients"] = self._recipients(cc)
+            self._patch(f"{base}/messages/{did}", patch, scopes)
+            small, big2 = self._split_attachments(attachments)
+            for obj in self._build_attachments(small):
+                self._post(f"{base}/messages/{did}/attachments", obj, scopes)
+            for a in big2:
+                self._upload_attachment(base, did, a, scopes)
+            self._post(f"{base}/messages/{did}/send", None, scopes)
+            return
+        payload: dict = {
+            "toRecipients": self._recipients(to),
+            "comment": self._comment_html(comment, html),
+        }
+        msg = {}
+        if cc:
+            msg["ccRecipients"] = self._recipients(cc)
+        if attachments:
+            msg["attachments"] = self._build_attachments(attachments)
+        if msg:
+            payload["message"] = msg
+        self._post(f"{base}/messages/{raw_id}/forward", payload, scopes)
 
     # -- Contacts ---------------------------------------------------------
     def list_contacts(self, *, limit: int = 200) -> list[dict]:

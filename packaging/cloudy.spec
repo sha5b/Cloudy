@@ -13,7 +13,7 @@
 %global appid io.github.sha5b.Cloudy
 
 Name:           cloudy
-Version:        0.3.1
+Version:        0.3.2
 Release:        1%{?dist}
 Summary:        Use OneDrive, SharePoint and unified mail on your desktop
 
@@ -115,6 +115,15 @@ meson test -C %{_vpath_builddir} --print-errorlogs
 %{_datadir}/%{name}/
 
 %changelog
+* Tue Jul 14 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.3.2-1
+- Meeting invitations in Mail show an invite card (Accept/Tentative/Decline, Join) and answering updates the organizer's tracking.
+- Calendar tab badge + "You're invited" notification for unanswered invitations; invite mails carry a calendar icon in the list.
+- Nested Outlook mail folders; secondary/shared-in calendars aggregate into the Me source.
+- Attachments over ~3 MB send via Graph upload sessions; replies keep the quoted thread; forwards keep HTML/inline images/attachments.
+- Group-conversation replies work (Group.ReadWrite.All; re-sign-in once); files sent in Teams chats are openable by recipients.
+- Nautilus extension no longer freezes the file manager (fully async D-Bus).
+- Google: calendar list scope fixed (multi-calendar works), chat edit fixed, own messages on the right side, charset-aware mail decoding, event pagination, rotated refresh tokens persisted.
+
 * Mon Jul 13 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.3.1-1
 - Chat: new messages appear reliably; loading older messages no longer duplicates or drops them.
 - Chat list groups meeting/call chats under their own section and is ordered by latest activity.

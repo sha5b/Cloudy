@@ -457,11 +457,15 @@ class GraphChatMixin:
     _CHAT_FILES_FOLDER = "Microsoft Teams Chat Files"
 
     def upload_chat_file(self, filename: str, data: bytes,
-                         content_type: str = "") -> dict:
+                         content_type: str = "", chat_id: str = "") -> dict:
         """Upload a file to the user's OneDrive 'Microsoft Teams Chat Files'
         folder and return a reference-attachment dict ``{id, name, contentUrl}``
         for :meth:`send_chat_html`. This is how non-image files are sent to a
-        chat (images go inline via hosted contents instead)."""
+        chat (images go inline via hosted contents instead). Pass ``chat_id``
+        so the chat's members are granted access to the file — a reference
+        attachment is just a link into *your* OneDrive, and without an explicit
+        permission grant every recipient gets a 403 when opening it (Teams
+        itself does this grant when you attach a file)."""
         name = filename or "file"
         safe = urllib.parse.quote(name)
         folder = urllib.parse.quote(self._CHAT_FILES_FOLDER)
@@ -469,6 +473,8 @@ class GraphChatMixin:
                 "?@microsoft.graph.conflictBehavior=rename")
         item = self._put_bytes(path, data, content_type or "application/octet-stream",
                                SCOPES_FILES)
+        if chat_id and item.get("id"):
+            self._grant_chat_file_access(item["id"], chat_id)
         # Teams keys the <attachment> placeholder on the driveItem eTag's GUID;
         # fall back to the item id if the eTag isn't in the expected shape.
         etag = item.get("eTag", "") or ""
@@ -479,6 +485,34 @@ class GraphChatMixin:
             "name": item.get("name", name),
             "contentUrl": item.get("webUrl", ""),
         }
+
+    def _grant_chat_file_access(self, item_id: str, chat_id: str) -> None:
+        """Give a chat's members permission on a just-uploaded file. Prefer a
+        per-member invite (mirrors what Teams grants); fall back to an
+        organization-scope view link when that fails (guest members, tenants
+        that block direct sharing). Best-effort — the message still sends."""
+        try:
+            me = self._me_id()
+            recipients = [
+                {"email": m["email"]}
+                for m in self.list_chat_members(chat_id)
+                if m.get("email") and m.get("id") != me
+            ]
+            if recipients:
+                self._post(f"/me/drive/items/{item_id}/invite", {
+                    "recipients": recipients,
+                    "requireSignIn": True,
+                    "sendInvitation": False,
+                    "roles": ["write"],
+                }, SCOPES_FILES)
+                return
+        except GraphError:
+            pass
+        try:
+            self._post(f"/me/drive/items/{item_id}/createLink",
+                       {"type": "view", "scope": "organization"}, SCOPES_FILES)
+        except GraphError:
+            pass
 
     def search_messages(self, query: str, *, limit: int = 25) -> list[dict]:
         """Server-side search across the user's chat messages (Microsoft Search).

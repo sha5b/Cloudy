@@ -14,6 +14,7 @@ accounts it can't reach. Honours the ``notifications-enabled`` GSetting.
 from __future__ import annotations
 
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from gettext import gettext as _
 from gettext import ngettext
@@ -29,6 +30,12 @@ _POLL_SECONDS = 120
 _FIRST_POLL_SECONDS = 12
 _REMINDER_WINDOW = timedelta(minutes=15)
 _MAX_MAIL_PER_TICK = 4  # don't flood on a busy inbox
+# Pending meeting invitations: how far ahead to look for events you haven't
+# answered yet (drives the Calendar tab badge + "You're invited" banner), and
+# how often to sweep that window (it's a wider, heavier query than the
+# next-hour reminder poll, so it runs on its own slower cadence).
+_INVITE_WINDOW = timedelta(days=14)
+_INVITE_POLL_SECONDS = 600
 # Batch routine (tier-2) banners into one summary on this cadence, instead of
 # pinging per message (Iqbal & Bailey 2008 breakpoint deferral). Only active at
 # notify-level 'digest'; the queue is held while DND/quiet hours are on.
@@ -57,6 +64,9 @@ class NotificationManager:
         self._notified_events: set = set()        # f"{acct}:{event id}"
         self._seen_events: dict[str, set] = {}     # account id -> {event id} last poll
         self._unread: dict[str, int] = {}         # account id -> inbox unread count
+        self._pending_invites: dict[str, int] = {}  # account id -> unanswered invites
+        self._seen_invites: dict[str, set] = {}    # account id -> {event id} notified
+        self._invite_polled: dict[str, float] = {}  # account id -> last sweep (monotonic)
         self._seen_chat: dict[str, dict] = {}     # account id -> {chat id: last_at}
         self._chat_unread: dict[str, set] = {}    # account id -> {chat id with new msgs}
         self._digest: dict[str, dict] = {}        # account id -> pending tier-2 summary
@@ -82,6 +92,11 @@ class NotificationManager:
         win = self._app.props.active_window
         if win is not None and hasattr(win, "set_account_unread"):
             win.set_account_unread(account_id, self._unread[account_id])
+
+    def pending_invites_count(self, account_id: str) -> int:
+        """Meeting invitations awaiting an answer in the next two weeks
+        (0 until the first invite sweep). Drives the Calendar tab badge."""
+        return self._pending_invites.get(account_id, 0)
 
     def chat_unread_count(self, account_id: str) -> int:
         """Number of chats with unseen new messages (0 until first poll)."""
@@ -291,6 +306,7 @@ class NotificationManager:
                 self._poll_mail(account)
             if "calendar" in caps:
                 self._poll_calendar(account)
+                self._poll_invites(account)
                 # Keep the GNOME Shell / Evolution (EDS) calendar mirror current
                 # for *edits* and *deletes*, not just newly-appearing event ids:
                 # re-mirror the whole current month on a steady cadence. This is
@@ -484,6 +500,71 @@ class NotificationManager:
                 "app.notify-join-meeting", GLib.Variant("s", join_url)))
             self._play_ring()
         self._app.send_notification(f"event-{account.id}-{ev.get('id', '')}", note)
+
+    # -- pending meeting invitations --------------------------------------
+    def _poll_invites(self, account) -> None:
+        """Sweep the next two weeks for events the user hasn't answered
+        (responseStatus notResponded / needsAction). Providers can't filter on
+        the response server-side (verified Graph limitation), so this lists the
+        window and counts client-side — which is why it runs on its own slower
+        cadence than the next-hour reminder poll."""
+        now_mono = time.monotonic()
+        if now_mono - self._invite_polled.get(account.id, 0.0) < _INVITE_POLL_SECONDS:
+            return
+        self._invite_polled[account.id] = now_mono
+        now = datetime.now(timezone.utc)
+        start_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_iso = (now + _INVITE_WINDOW).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        def work():
+            from ..widgets.clients import build_account_client
+
+            client = build_account_client(self._app, account)
+            return client.list_events(start_iso, end_iso)
+
+        threading.Thread(
+            target=self._run,
+            args=(work, lambda r, e: self._on_invites(account, r, e)),
+            daemon=True).start()
+
+    def _on_invites(self, account, events, error) -> bool:
+        if error or events is None:
+            return False
+        pending = [ev for ev in events
+                   if (ev.get("response") or "").lower()
+                   in ("notresponded", "needsaction")]
+        self._pending_invites[account.id] = len(pending)
+        win = self._app.props.active_window
+        if win is not None and hasattr(win, "set_account_pending_invites"):
+            win.set_account_pending_invites(account.id, len(pending))
+        # Banner once per invite; the first sweep is baseline-only so a fresh
+        # start doesn't re-announce every long-standing unanswered invite.
+        seen = self._seen_invites.setdefault(account.id, set())
+        first_time = f"invites:{account.id}" not in self._primed
+        self._primed.add(f"invites:{account.id}")
+        for ev in pending:
+            eid = ev.get("id")
+            if not eid or eid in seen:
+                continue
+            seen.add(eid)
+            if not first_time and self._allowed(1):
+                self._notify_invite(account, ev)
+        self._trim_set(seen, self._MAX_SEEN_EVENTS)
+        return False
+
+    def _notify_invite(self, account, ev) -> None:
+        subject = ev.get("subject", "") or _("(no title)")
+        start = _parse_dt(ev.get("start", ""))
+        when = start.astimezone().strftime("%a %d %b, %H:%M") if start else ""
+        note = Gio.Notification.new(_("You're invited · %s") % account.display_name)
+        note.set_body(_("%(title)s — %(time)s") % {"title": subject, "time": when}
+                      if when else subject)
+        note.set_icon(self._type_icon("x-office-calendar-symbolic"))
+        note.set_priority(Gio.NotificationPriority.HIGH)
+        payload = GLib.Variant("s", f"{account.id}\x1f{ev.get('id', '')}")
+        note.set_default_action(
+            Gio.Action.print_detailed_name("app.notify-open-calendar", payload))
+        self._app.send_notification(f"invite-{account.id}-{ev.get('id', '')}", note)
 
     def _play_ring(self) -> None:
         """Best-effort 'incoming call' cue for a starting online meeting. Plays
