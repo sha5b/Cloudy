@@ -11,6 +11,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-07-14
+
+### Added
+- **Chat status events**: Teams system messages now render as centered status
+  lines instead of being silently dropped — "X added Y" (including the
+  Teams-style "shared chat history from the past N days" suffix), "X removed
+  Y", "Y left the chat", chat renames, and call started/ended.
+- **Deleted-message tombstones**: a deleted chat message keeps its place in
+  the thread as a dim "X deleted this message" placeholder instead of
+  vanishing (which silently reshuffled the history).
+
+### Fixed
+- Status rows and tombstones offer no reply/edit/delete/selection actions —
+  they're events, not messages.
+
 ## [0.3.2] - 2026-07-14
 
 Meeting invitations become first-class, plus fixes from a full audit of the

@@ -91,6 +91,15 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
   </screenshots>
 
   <releases>
+    <release version="0.3.3" date="2026-07-14">
+      <description>
+        <p>Chat threads now tell the whole story.</p>
+        <ul>
+          <li>Membership events show as status lines: who was added (and how much chat history they can see), who was removed, who left, chat renames, and call started/ended</li>
+          <li>Deleted messages leave a "X deleted this message" placeholder instead of silently disappearing from the history</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.2" date="2026-07-14">
       <description>
         <p>Meeting invitations finally get first-class treatment, and this release fixes a batch of provider-API mistakes found in a full audit.</p>

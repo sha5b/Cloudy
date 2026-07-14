@@ -13,7 +13,7 @@
 %global appid io.github.sha5b.Cloudy
 
 Name:           cloudy
-Version:        0.3.2
+Version:        0.3.3
 Release:        1%{?dist}
 Summary:        Use OneDrive, SharePoint and unified mail on your desktop
 
@@ -115,6 +115,10 @@ meson test -C %{_vpath_builddir} --print-errorlogs
 %{_datadir}/%{name}/
 
 %changelog
+* Tue Jul 14 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.3.3-1
+- Chat system events render as status lines: member added (with shared-history note), removed, left, chat renamed, call started/ended.
+- Deleted chat messages keep a placeholder in the thread instead of vanishing.
+
 * Tue Jul 14 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.3.2-1
 - Meeting invitations in Mail show an invite card (Accept/Tentative/Decline, Join) and answering updates the organizer's tracking.
 - Calendar tab badge + "You're invited" notification for unanswered invitations; invite mails carry a calendar icon in the list.

@@ -1709,6 +1709,13 @@ class ChatView(Adw.Bin):
             flash.remove_css_class("cloudy-bubble-flash"), False)[1])
 
     def _bubble(self, msg) -> Gtk.Widget:
+        # System events (member added/removed/left, rename, calls) render as a
+        # centered dim status line — like Teams — with no bubble, menu or
+        # selection. Deleted messages keep a placeholder instead of vanishing.
+        if msg.get("system"):
+            return self._system_row(msg)
+        if msg.get("deleted"):
+            return self._deleted_row(msg)
         mine = bool(msg.get("is_mine"))
         outer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         outer.set_halign(Gtk.Align.END if mine else Gtk.Align.START)
@@ -1832,6 +1839,49 @@ class ChatView(Adw.Bin):
         tap.connect("pressed", lambda g, _n, _x, _y: self._on_bubble_primary(msg, g))
         bubble.add_controller(tap)
         outer._bubble = bubble  # the styled inner box (for the jump-to flash)
+        return outer
+
+    @staticmethod
+    def _system_row(msg) -> Gtk.Widget:
+        """A centered "X added Y" / "Call ended" status line (no bubble, no
+        context menu — it's not a message anyone can reply to or delete)."""
+        outer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
+                        halign=Gtk.Align.CENTER,
+                        margin_top=4, margin_bottom=4)
+        icon = Gtk.Image.new_from_icon_name("system-users-symbolic")
+        icon.set_pixel_size(12)
+        icon.add_css_class("dim-label")
+        outer.append(icon)
+        lbl = Gtk.Label(label=msg.get("text", ""), wrap=True,
+                        justify=Gtk.Justification.CENTER,
+                        max_width_chars=70)
+        lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        lbl.add_css_class("dim-label")
+        lbl.add_css_class("caption")
+        outer.append(lbl)
+        outer._bubble = lbl  # jump-to flash target parity with real bubbles
+        return outer
+
+    def _deleted_row(self, msg) -> Gtk.Widget:
+        """The tombstone for a deleted message: keeps the thread position (so
+        history doesn't silently reshuffle) but offers no actions."""
+        mine = bool(msg.get("is_mine"))
+        outer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        outer.set_halign(Gtk.Align.END if mine else Gtk.Align.START)
+        bubble = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        bubble.add_css_class("cloudy-bubble")
+        if mine:
+            bubble.add_css_class("mine")
+        sender = (msg.get("from", "") or "").strip()
+        who = _("You") if mine else (sender or _("Someone"))
+        lbl = Gtk.Label(xalign=0)
+        lbl.set_markup("<i>%s</i>" % GLib.markup_escape_text(
+            _("%s deleted this message") % who))
+        lbl.add_css_class("dim-label")
+        lbl.add_css_class("caption")
+        bubble.append(lbl)
+        outer.append(bubble)
+        outer._bubble = bubble
         return outer
 
     # -- multi-select mode ------------------------------------------------

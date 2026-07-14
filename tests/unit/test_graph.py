@@ -189,5 +189,66 @@ class TestSplitAttachments(unittest.TestCase):
         self.assertEqual(GraphClient._split_attachments(None), ([], []))
 
 
+@_skip
+class TestChatSystemEvents(unittest.TestCase):
+    @staticmethod
+    def _event(dtype, detail=None, **msg):
+        d = {"@odata.type": f"#microsoft.graph.{dtype}"}
+        d.update(detail or {})
+        return {"id": "m1", "createdDateTime": "2026-07-14T08:00:00Z",
+                "eventDetail": d, **msg}
+
+    def test_members_added(self):
+        row = GraphClient._system_event_row(self._event(
+            "membersAddedEventMessageDetail",
+            {"initiator": {"user": {"id": "u1", "displayName": "Philip"}},
+             "members": [{"id": "u2", "displayName": "Jacob"}],
+             "visibleHistoryStartDateTime": "2026-07-04T08:00:00Z"}))
+        self.assertTrue(row["system"])
+        self.assertEqual(
+            row["text"],
+            "Philip added Jacob and shared chat history from the past 10 days")
+
+    def test_member_left_when_initiator_removed_self(self):
+        row = GraphClient._system_event_row(self._event(
+            "membersDeletedEventMessageDetail",
+            {"initiator": {"user": {"id": "u2", "displayName": "Jacob"}},
+             "members": [{"id": "u2", "displayName": "Jacob"}]}))
+        self.assertEqual(row["text"], "Jacob left the chat")
+
+    def test_member_removed_by_other(self):
+        row = GraphClient._system_event_row(self._event(
+            "membersDeletedEventMessageDetail",
+            {"initiator": {"user": {"id": "u1", "displayName": "Philip"}},
+             "members": [{"id": "u2", "displayName": "Jacob"}]}))
+        self.assertEqual(row["text"], "Philip removed Jacob")
+
+    def test_missing_names_fall_back(self):
+        row = GraphClient._system_event_row(self._event(
+            "membersAddedEventMessageDetail",
+            {"members": [{"id": "u2"}]}))
+        self.assertEqual(row["text"], "Someone added Someone")
+
+    def test_rename_and_calls(self):
+        row = GraphClient._system_event_row(self._event(
+            "chatRenamedEventMessageDetail",
+            {"initiator": {"user": {"id": "u1", "displayName": "P"}},
+             "chatDisplayName": "New name"}))
+        self.assertEqual(row["text"], "P renamed the chat to “New name”")
+        self.assertEqual(GraphClient._system_event_row(self._event(
+            "callEndedEventMessageDetail"))["text"], "Call ended")
+
+    def test_unknown_event_hidden(self):
+        self.assertIsNone(GraphClient._system_event_row(self._event(
+            "teamsAppInstalledEventMessageDetail")))
+
+    def test_all_history_suffix(self):
+        row = GraphClient._system_event_row(self._event(
+            "membersAddedEventMessageDetail",
+            {"members": [{"id": "u2", "displayName": "J"}],
+             "visibleHistoryStartDateTime": "0001-01-01T00:00:00Z"}))
+        self.assertIn("shared all chat history", row["text"])
+
+
 if __name__ == "__main__":
     unittest.main()

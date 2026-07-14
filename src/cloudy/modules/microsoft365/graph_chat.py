@@ -12,6 +12,7 @@ import json
 import os
 import re
 import urllib.parse
+from datetime import datetime
 
 from .graph_http import _REACTIONS, BASE_URL, GraphError
 
@@ -27,6 +28,25 @@ from ...core.auth.msal_graph import (
     SCOPES_FILES,
     SCOPES_PRESENCE,
 )
+
+
+def _shared_history_suffix(visible_from: str, created: str) -> str:
+    """Teams-style suffix for member-added events describing how much history
+    the new member can see. Graph marks "all history" with a year-0001
+    timestamp; otherwise the window is visibleHistoryStartDateTime→now."""
+    if not visible_from:
+        return ""
+    if visible_from.startswith("0001"):
+        return " and shared all chat history"
+    try:
+        fmt = "%Y-%m-%dT%H:%M:%S"
+        days = (datetime.strptime(created[:19], fmt)
+                - datetime.strptime(visible_from[:19], fmt)).days
+    except ValueError:
+        return " and shared chat history"
+    if days <= 0:
+        return ""
+    return f" and shared chat history from the past {days} days"
 
 
 class GraphChatMixin:
@@ -132,11 +152,77 @@ class GraphChatMixin:
         url = page_token or f"/me/chats/{chat_id}/messages?$top={limit}"
         data = self._get(url, SCOPES_CHAT)
         me = self._me_id()
-        out = [self._chat_message_row(m, me, chat_id)
-               for m in data.get("value", [])
-               if m.get("messageType") == "message" and not m.get("deletedDateTime")]
+        out = []
+        for m in data.get("value", []):
+            mtype = m.get("messageType")
+            if mtype == "systemEventMessage":
+                # Membership changes, renames, calls — Teams shows these as
+                # centered status lines; dropping them hid who was added or
+                # removed and when.
+                row = self._system_event_row(m)
+            elif mtype != "message":
+                row = None
+            elif m.get("deletedDateTime"):
+                # Keep a placeholder instead of silently vanishing the bubble.
+                user = (m.get("from") or {}).get("user") or {}
+                row = {
+                    "id": m.get("id", ""), "text": "", "markup": "",
+                    "from": html.unescape(user.get("displayName", "") or ""),
+                    "sent": m.get("createdDateTime", ""),
+                    "is_mine": bool(user.get("id")) and user.get("id") == me,
+                    "attachments": [], "reactions": [], "web_url": "",
+                    "reply_to": None, "forward": None, "deleted": True,
+                }
+            else:
+                row = self._chat_message_row(m, me, chat_id)
+            if row is not None:
+                out.append(row)
         out.reverse()
         return out, data.get("@odata.nextLink")
+
+    @staticmethod
+    def _system_event_row(m: dict) -> dict | None:
+        """A systemEventMessage as a centered status row ``{system: True,
+        text}`` — member added/removed/left, chat renamed, call started/ended.
+        Unknown event kinds return ``None`` (hidden) rather than noise."""
+        detail = m.get("eventDetail") or {}
+        dtype = (detail.get("@odata.type") or "").rsplit(".", 1)[-1]
+        initiator = ((detail.get("initiator") or {}).get("user") or {})
+        who = html.unescape(initiator.get("displayName") or "") or "Someone"
+
+        def names() -> list[str]:
+            return [html.unescape(u.get("displayName") or "") or "Someone"
+                    for u in (detail.get("members") or [])]
+
+        member_ids = [u.get("id") for u in (detail.get("members") or [])]
+        text = None
+        if dtype == "membersAddedEventMessageDetail":
+            text = f"{who} added {', '.join(names())}"
+            text += _shared_history_suffix(
+                detail.get("visibleHistoryStartDateTime", ""),
+                m.get("createdDateTime", ""))
+        elif dtype == "membersDeletedEventMessageDetail":
+            if member_ids and initiator.get("id") in member_ids:
+                text = f"{names()[0]} left the chat"
+            else:
+                text = f"{who} removed {', '.join(names())}"
+        elif dtype == "membersLeftEventMessageDetail":
+            text = f"{', '.join(names())} left the chat"
+        elif dtype == "chatRenamedEventMessageDetail":
+            new_name = html.unescape(detail.get("chatDisplayName") or "")
+            text = f"{who} renamed the chat to “{new_name}”"
+        elif dtype == "callStartedEventMessageDetail":
+            text = "Call started"
+        elif dtype == "callEndedEventMessageDetail":
+            text = "Call ended"
+        if text is None:
+            return None
+        return {
+            "id": m.get("id", ""), "text": text, "markup": "", "from": "",
+            "sent": m.get("createdDateTime", ""), "is_mine": False,
+            "attachments": [], "reactions": [], "web_url": "",
+            "reply_to": None, "forward": None, "system": True,
+        }
 
     def recent_chat_activity(self, *, max_chats: int = 8,
                              per_chat: int = 15) -> list[dict]:
