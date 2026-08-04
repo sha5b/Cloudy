@@ -124,6 +124,10 @@ baked at build time or supplied via `.env` — see [docs/SECRETS.md](docs/SECRET
 - Licensed under the **GNU General Public License v3.0 or later** — see [COPYING](COPYING). Each source file carries an SPDX identifier.
 - Cloudy is an independent project, **not affiliated with Microsoft or Google**. All trademarks belong to their respective owners.
 
+## Credits
+
+- Logo and app icon designed by **Johannes Krumböck** — [krumboeck.xyz](https://krumboeck.xyz/)
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
