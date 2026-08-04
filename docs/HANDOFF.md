@@ -7,7 +7,7 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
 
 Cloudy is a **GTK4 / Libadwaita (Python / PyGObject)** super-app for **Microsoft 365 (OneDrive + Teams/SharePoint, Mail, Calendar)** and **Google (Gmail, Calendar, Drive)** on Fedora 44 (GNOME 50). It orchestrates proven backends (rclone for mounts; Microsoft Graph / Google REST for mail/calendar) rather than reimplementing them. Read `docs/ARCHITECTURE.md`, `docs/AUTH.md`, `docs/SECRETS.md`, `docs/ROADMAP.md` for depth.
 
-## Current status (v0.3.3, 2026-07-14)
+## Current status (v0.3.4, 2026-08-04)
 
 Working and shipped (RPM + Flatpak; `make release` reinstalls the user Flatpak so the running app == release):
 - **Sign-in** (Microsoft via MSAL, Google via loopback+PKCE), tokens in libsecret.
@@ -136,6 +136,22 @@ A first attempt stopped poll/presence timers on `unrealize`, but `Adw.ViewStack`
 ---
 
 ## Changelog (reverse-chronological)
+
+### 0.3.4 — full-app stability audit (files freezes, chat/badges, threading) (2026-08-04)
+Four parallel deep audits (chat, badges, file-browser/mounts, app-wide threading) + fixes; `make test` 5/5, 139 unit tests, headless instantiate smoke test green.
+- **File-browser lock-ups (the "locks up all the time")**: `_open_uri` used the *sync* `Gio.AppInfo.launch_default_for_uri`, which stats + content-sniffs the FUSE file on the GTK thread (forever on a hung mount) → now `launch_default_for_uri_async`. Rename/New-folder ran `Path.resolve()` (lstat/readlink walk) on the mount in the dialog handler → replaced with the pure-string `_child_inside` (normpath+commonpath). Chat's attach/save file I/O (`load_contents`/`replace_contents`) moved off-thread too.
+- **Flatpak mount-table storm**: `MountManager.active_mounts()` is a sync `flatpak-spawn --host` in Flatpak and was called once per drive on the main thread (tab map, every 3 s during uploads). Now: 2 s TTL cache on the mount table (`_TABLE_TTL`, invalidated on mount/unmount; `fresh=True` for `_await_mount`), `files_view.refresh_mount_states` warms it off-thread, `_refresh_upload_status` filters mounted drives inside the worker.
+- **Dead-mount detection**: `files_view._on_row_activated` now checks `mount_health` off-thread — "stale" (daemon gone) toasts "isn't responding — unmount and mount it again" instead of an eternal "Loading…". New `MountManager.healthy_mounts()` (one ps read for all mounts); `dashboard._scan_roots` walks only live mountpoints (a hung readdir can't be interrupted by `recent_changes`' deadline). Subprocess timeouts added to `unmount`/`_lazy_unmount`/`has_remote`/`create_remote`/`delete_remote`.
+- **Chat unread coherence**: `_read_ids` is now a **watermark dict** (chat id → last_at at read time), not a permanent set — a newer message re-bolds the row, so row state and the red badge agree. New `notifier.set_open_chat` (set in `open_chat`, cleared/re-set on unmap/map): `_on_chat` skips badging the on-screen chat while the main window is focused. `_ack_open_chat` (from `_on_poll`) advances the watermark + server read marker for messages rendered in the open focused chat.
+- **Tombstones actually render**: `_has_content` now passes `deleted` rows (0.3.3's tombstones were filtered out as empty — dead code).
+- **Failed sends survive re-renders**: `_failed_bubbles` (chat id, widget) is re-appended by `_full_render`; a still-un-acked optimistic echo survives too unless its server copy is already in the page (no duplicates). `_mark_sending` unregisters on retry. Also: stale `_chats_more_row` nulled in `_set_list_message` (GTK-CRITICAL).
+- **Notifier**: `_main_window()` (finds the CloudyWindow via `get_windows()`) replaces every `props.active_window` badge push — badges no longer freeze while a composer/media window has focus. `_spawn` gives each (kind, account) poll an in-flight guard (no stacking under 429 throttling). `_prime_once` clears its source id (shutdown GLib-CRITICAL).
+- **Teams view**: poll re-render preserves in-progress reply drafts + only auto-scrolls when already near the bottom; dropped `esc()` on plain labels (double-escape); `_valid_markup` pre-check before `set_markup` (which g_warns + blanks, never raises).
+- **Google**: `GoogleError` carries `status`; `list_messages_page` tolerates per-message 404s (one deleted mail no longer blanks the page; 401/403 still propagate). `list_chats` populates `last_at` from `lastActiveTime` (Google chat badge detection was structurally dead). `GoogleAuth.acquire_token` refresh path is lock-serialized (racing refreshes could lose a rotated refresh token → forced re-sign-in). `graph_chat._user_bind` doubles apostrophes in `users('…')` binds (OData).
+- **EDS**: module-level RLock around uid-index load→publish→save (+ `_get_client` lazy init); Preferences enable-toggle backfill runs via new `publish_all_cached_events_async` (was seconds of sync D-Bus on the GTK thread). `application._migrate_legacy_settings` short-circuits via a marker file (was up to 3×5 s dconf subprocesses every launch).
+- **Dashboard**: first-load errors render a status page instead of an eternal spinner; the Unread stat uses `client.inbox_unread()` (server-side) instead of counting the 25-message preview page. **window.py**: `_show_dashboard`/`_show_disabled_account`/`_remove_account` reset `_account_shown`/`_tab_pages`/view refs (notifier pushes were badging detached ViewStackPages and refetching for detached views); `esc()` on the turned-off StatusPage title and sign-in placeholder description.
+- Unit suite grew to 139 (`test_google_client` page-tolerance/last_at, `test_graph` `_user_bind`).
+- **NOT fixed (deliberate)**: Google OAuth `state`/class-attr/localhost items, mail remote-content loading (security backlog — behavior changes needing sign-off); Mail `refresh_live` pagination collapse; Files `_load`/`_toggle_expand` nav race; calendar multi-day end date (live-API testing needed).
 
 ### rclone mount reliability: SharePoint uploads, logging, reconciliation, sync status (2026-07-09)
 All in `modules/microsoft365/mounts.py` (+ `widgets/files_view.py`, `application.py`); tests in `tests/unit/test_files.py` (`TestMountArgv`, `TestReconcile`).

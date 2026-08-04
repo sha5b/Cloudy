@@ -28,7 +28,7 @@ from .file_browser_utils import recent_changes
 from .format import parse_iso_utc, relative_time
 from .metrics import SPACE_L, SPACE_M
 from .month_grid import MonthGrid
-from .source_nav import is_pinned, run_async
+from .source_nav import is_pinned, run_async, status_page
 
 
 class DashboardView(Adw.Bin):
@@ -186,11 +186,19 @@ class DashboardView(Adw.Bin):
 
             events, messages, pinned = [], [], []
             chats, activity = [], []
+            unread_total = 0
             for account in accounts:
                 try:
                     client = build_account_client(app, account)
                 except Exception:  # noqa: BLE001
                     continue
+                # Server-side inbox count for the Unread stat: counting the
+                # fetched preview page caps the number at the page size and
+                # disagrees with the sidebar badge (which uses this same count).
+                try:
+                    unread_total += int(client.inbox_unread() or 0)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[dashboard] {account.id}: unread count failed: {exc}")
                 # Separate try-blocks so a calendar failure (e.g. one provider's
                 # scope error) doesn't also wipe this account's mail from the
                 # overview, and vice versa. Log so a persistent fault is
@@ -239,11 +247,19 @@ class DashboardView(Adw.Bin):
                 pair[0], "chat", "teams", pair[1].get("id", "")))
             files = recent_changes(self._scan_roots(accounts))
             return {"events": events, "messages": messages, "pinned": pinned,
-                    "chats": chats, "activity": activity,
+                    "chats": chats, "activity": activity, "unread": unread_total,
                     "files": files, "mounted": self._count_mounted(accounts)}
 
-        def done(res, _error):
-            if not res or self.get_root() is None:  # navigated away mid-fetch
+        def done(res, error):
+            if self.get_root() is None:  # navigated away mid-fetch
+                return
+            if error is not None or not res:
+                # Without this the first load (no cache yet) would sit on the
+                # "Loading your day…" spinner forever when the fetch raises.
+                if not self._data:
+                    self._content.set_child(status_page(
+                        "dialog-warning-symbolic", _("Couldn't load your day"),
+                        str(error) if error else _("No data returned.")))
                 return
             app.cache.set(self._CACHE_KEY, res)
             self._on_loaded(res)
@@ -311,13 +327,18 @@ class DashboardView(Adw.Bin):
         }
 
     def _scan_roots(self, accounts) -> list:
-        # Scan each account's own mount base (not the shared mount_root, which
-        # contains them all) so recent_changes gives every account a fair scan
-        # share — otherwise one big account folder starves the rest and the
-        # Dashboard shows only one account's files.
+        # Scan per-mountpoint rather than per-account base so recent_changes
+        # gives every drive a fair scan share — and ONLY mountpoints whose FUSE
+        # daemon is alive: walking a dead mount hangs the worker forever (the
+        # deadline can't interrupt a stuck readdir). Runs on the worker thread
+        # (healthy_mounts shells out to ps/mountinfo).
         roots = [sync_root()]
-        for account in accounts:
-            roots.append(mount_base_for(account))
+        bases = {str(mount_base_for(account)) for account in accounts}
+        bases.add(str(mount_root()))  # pre-namespacing flat mounts
+        mm = MountManager()
+        for mp in sorted(mm.healthy_mounts()):
+            if os.path.dirname(mp) in bases:
+                roots.append(Path(mp))
         return roots
 
     def _on_loaded(self, data) -> bool:

@@ -637,10 +637,17 @@ class FileBrowserPane(Adw.Bin):
         if path is None:
             return
         uri = "file://" + GLib.Uri.escape_string(str(path), "/", False)
-        try:
-            Gio.AppInfo.launch_default_for_uri(uri, None)
-        except Exception as exc:  # noqa: BLE001
-            self._window.add_toast(_("Couldn't open: %s") % exc)
+
+        # The synchronous launch stats + content-sniffs the target to pick a
+        # handler, which on a FUSE mount blocks the GTK thread (forever, if the
+        # mount daemon is hung). The async variant does that off the main loop.
+        def on_done(_obj, result) -> None:
+            try:
+                Gio.AppInfo.launch_default_for_uri_finish(result)
+            except Exception as exc:  # noqa: BLE001
+                self._window.add_toast(_("Couldn't open: %s") % exc)
+
+        Gio.AppInfo.launch_default_for_uri_async(uri, None, None, on_done)
 
     # -- drag and drop ----------------------------------------------------
     def _attach_drag(self, widget, entry: dict) -> None:
@@ -758,6 +765,17 @@ class FileBrowserPane(Adw.Bin):
             return _("That name is too long.")
         return None
 
+    @staticmethod
+    def _child_inside(parent: str, dest: str) -> bool:
+        """Pure-string containment check (no lstat/readlink — Path.resolve()
+        walks the filesystem, which blocks the GTK thread on a FUSE mount)."""
+        parent = os.path.normpath(parent)
+        dest = os.path.normpath(dest)
+        try:
+            return os.path.commonpath([parent, dest]) == parent and dest != parent
+        except ValueError:
+            return False
+
     def _rename(self, entry: dict) -> None:
         dialog = Adw.AlertDialog(heading=_("Rename"),
                                  body=_("Enter a new name for “%s”.") % entry["name"])
@@ -784,11 +802,7 @@ class FileBrowserPane(Adw.Bin):
                 return
             dest = os.path.join(str(cur), name)
             src = entry["path"]
-            try:
-                if not Path(dest).resolve().is_relative_to(Path(cur).resolve()):
-                    self._window.add_toast(_("Invalid destination."))
-                    return
-            except OSError:
+            if not self._child_inside(str(cur), dest):
                 self._window.add_toast(_("Invalid destination."))
                 return
 
@@ -942,11 +956,7 @@ class FileBrowserPane(Adw.Bin):
                 self._window.add_toast(err)
                 return
             dest = os.path.join(str(cur), name)
-            try:
-                if not Path(dest).resolve().is_relative_to(Path(cur).resolve()):
-                    self._window.add_toast(_("Invalid destination."))
-                    return
-            except OSError:
+            if not self._child_inside(str(cur), dest):
                 self._window.add_toast(_("Invalid destination."))
                 return
             run_async(lambda: os.mkdir(dest),

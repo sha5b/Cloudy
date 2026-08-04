@@ -485,12 +485,16 @@ class CloudyPreferences(Adw.PreferencesDialog):
         self._rebuild_accounts()  # refresh the per-account sync toggles' state
 
     def _on_eds_toggled(self, switch, _param) -> None:
-        """When the user enables the EDS mirror, backfill from cached events."""
+        """When the user enables the EDS mirror, backfill from cached events.
+
+        Off-thread: the backfill makes sync EDS D-Bus calls (SourceRegistry,
+        per-event create/modify) that would freeze the UI for seconds if run
+        in this GTK signal handler."""
         if switch.get_active() and self._app is not None:
             try:
-                from .core.eds_publish import publish_all_cached_events
+                from .core.eds_publish import publish_all_cached_events_async
 
-                publish_all_cached_events(self._app)
+                publish_all_cached_events_async(self._app)
             except Exception:  # noqa: BLE001 - preferences must not break on EDS
                 pass
 

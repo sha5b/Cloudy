@@ -110,6 +110,11 @@ class GoogleAuth:
         self._secrets = secrets
         self._account_id = account_id
         self._token = self._load()
+        # One GoogleAuth is shared by every worker thread of an account (the
+        # per-account client cache + ThreadPoolExecutors), and Google rotates
+        # refresh tokens — concurrent refreshes could lose the rotated token
+        # and force a full re-sign-in, so refreshes are serialized.
+        self._refresh_lock = threading.Lock()
 
     # -- persistence ------------------------------------------------------
     def _load(self) -> dict:
@@ -207,30 +212,37 @@ class GoogleAuth:
             return None
         if self._token.get("expiry", 0) > time.time() + 60:
             return self._token.get("access_token")
-        refresh = self._token.get("refresh_token")
-        if not refresh:
-            return None
-        data = {
-            "client_id": self._client_id,
-            "refresh_token": refresh,
-            "grant_type": "refresh_token",
-        }
-        if self._client_secret:
-            data["client_secret"] = self._client_secret
-        resp = self._post_token(data)
-        token = resp.get("access_token")
-        if not token:
-            # Refresh failed (revoked/expired refresh token, network error).
-            # Return None so callers surface "re-sign in" rather than crash.
-            return None
-        self._token["access_token"] = token
-        self._token["expiry"] = time.time() + resp.get("expires_in", 3600)
-        # Google may rotate the refresh token; dropping the new one meant the
-        # stored token eventually died and forced a full re-sign-in.
-        if resp.get("refresh_token"):
-            self._token["refresh_token"] = resp["refresh_token"]
-        self._store()
-        return token
+        with self._refresh_lock:
+            # Re-check under the lock: while we waited, another thread may
+            # have refreshed already — reuse its fresh token instead of
+            # racing a second refresh (which could clobber a rotated
+            # refresh token and kill the whole account).
+            if self._token.get("expiry", 0) > time.time() + 60:
+                return self._token.get("access_token")
+            refresh = self._token.get("refresh_token")
+            if not refresh:
+                return None
+            data = {
+                "client_id": self._client_id,
+                "refresh_token": refresh,
+                "grant_type": "refresh_token",
+            }
+            if self._client_secret:
+                data["client_secret"] = self._client_secret
+            resp = self._post_token(data)
+            token = resp.get("access_token")
+            if not token:
+                # Refresh failed (revoked/expired refresh token, network error).
+                # Return None so callers surface "re-sign in" rather than crash.
+                return None
+            self._token["access_token"] = token
+            self._token["expiry"] = time.time() + resp.get("expires_in", 3600)
+            # Google may rotate the refresh token; dropping the new one meant
+            # the stored token eventually died and forced a full re-sign-in.
+            if resp.get("refresh_token"):
+                self._token["refresh_token"] = resp["refresh_token"]
+            self._store()
+            return token
 
     def sign_out(self) -> None:
         self._token = {}

@@ -11,6 +11,58 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-08-04
+
+Full-app stability audit: file-browser freezes, chat/badge correctness, and
+threading races across the app.
+
+### Fixed
+- **Files no longer freeze the app**: opening a file, the "Open in system
+  Files" button, and Rename/New-folder confirmation all touched the FUSE mount
+  on the GTK thread — on a slow or hung mount this locked the whole UI
+  (forever, if the rclone daemon had died). File opens are now async, the
+  destination checks are pure string logic, and saves/attachment reads in Chat
+  run off-thread too.
+- **Flatpak Files tab no longer stalls on tab switch**: every mount-state
+  check spawned a synchronous `flatpak-spawn --host` round-trip per drive on
+  the main thread. The mount table is now cached briefly and refreshed
+  off-thread; the upload-status poll filters mounted drives in the worker.
+- **Dead mounts are detected instead of hanging "Loading…"**: opening a
+  library now checks the mount daemon is alive first (a hung mount shows
+  "isn't responding — unmount and mount it again"); the Dashboard's
+  recent-files scan only walks mountpoints with a live daemon.
+- **Chat unread is finally coherent**: a chat opened once can now show unread
+  again (read state is a message-time watermark, not a permanent flag); the
+  badge no longer lights up—and sticks—for the conversation you're actively
+  reading (the notifier knows which chat is on screen, and new messages in the
+  open focused chat advance the server read marker); deleted-message
+  tombstones from 0.3.3 actually render (they were filtered out as empty).
+- **Failed sends survive**: a failed chat message (Retry button + attached
+  images) is no longer silently destroyed when a background poll re-renders
+  the thread.
+- **Badges update while a composer window is focused**: notifier pushes went
+  through the *focused* window, so unread counts silently froze while writing
+  mail in the non-modal composer.
+- **Teams channels**: a poll re-render no longer wipes in-progress reply text
+  or yanks the scroll position; names/subjects with "&" no longer display
+  double-escaped; a post with malformed formatting falls back to plain text
+  instead of rendering blank.
+- **Google**: one deleted message no longer blanks the whole Gmail page;
+  Google Chat activity can badge (spaces expose their last-active time);
+  concurrent token refreshes no longer race (which could lose a rotated
+  refresh token and force a re-sign-in); Graph chat actions work for
+  addresses containing an apostrophe.
+- **Notifier**: polls no longer stack up under provider throttling (one
+  in-flight poll per account and kind); a shutdown no longer removes an
+  already-fired timer id; the Dashboard shows an error state instead of
+  spinning forever when the first load fails, and its Unread stat uses the
+  server-side count instead of the first page.
+- **EDS calendar mirror**: concurrent publishes no longer corrupt the uid
+  index; enabling the toggle no longer freezes the app; startup no longer
+  re-runs the legacy dconf migration every launch.
+- Escaped account names in the "turned off" page and sign-in placeholder
+  (Pango markup).
+
 ## [0.3.3] - 2026-07-14
 
 ### Added

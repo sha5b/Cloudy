@@ -75,27 +75,42 @@ class CloudyApplication(Adw.Application):
         come up empty after the rename. Copies the old subtree to the new path on
         first run only — guarded so it never raises, no-ops if ``dconf`` isn't on
         PATH (e.g. inside the Flatpak runtime), the old data is gone, or the new
-        config already exists (don't clobber a fresh/already-migrated setup)."""
+        config already exists (don't clobber a fresh/already-migrated setup).
+
+        A marker file short-circuits every launch after the first attempt: the
+        ``dconf`` subprocesses run synchronously in ``__init__``, so a wedged
+        dconf would otherwise delay startup by up to 15 s *every* launch. The
+        migration is best-effort, so the marker is written unconditionally
+        after the first attempt (including when dconf is unavailable) — we
+        never retry."""
         import shutil
         import subprocess
+        from pathlib import Path
 
-        dconf = shutil.which("dconf")
-        if not dconf:
+        marker = Path(GLib.get_user_data_dir()) / "cloudy" / "legacy-settings-migrated"
+        if marker.exists():
             return
-        old, new = "/io/github/sha5b/Clouddrive/", "/io/github/sha5b/Cloudy/"
         try:
-            existing = subprocess.run(
-                [dconf, "read", new + "accounts"],
-                capture_output=True, text=True, timeout=5).stdout.strip()
-            if existing:
-                return  # already migrated or a fresh config — leave it alone
-            dump = subprocess.run(
-                [dconf, "dump", old], capture_output=True, text=True, timeout=5)
-            if dump.returncode != 0 or not dump.stdout.strip():
-                return  # nothing to migrate
-            subprocess.run([dconf, "load", new], input=dump.stdout, text=True,
-                           timeout=5, check=False)
+            dconf = shutil.which("dconf")
+            if dconf:
+                old, new = "/io/github/sha5b/Clouddrive/", "/io/github/sha5b/Cloudy/"
+                existing = subprocess.run(
+                    [dconf, "read", new + "accounts"],
+                    capture_output=True, text=True, timeout=5).stdout.strip()
+                if not existing:  # else already migrated/fresh — leave it alone
+                    dump = subprocess.run(
+                        [dconf, "dump", old],
+                        capture_output=True, text=True, timeout=5)
+                    if dump.returncode == 0 and dump.stdout.strip():
+                        subprocess.run(
+                            [dconf, "load", new], input=dump.stdout, text=True,
+                            timeout=5, check=False)
         except (OSError, subprocess.SubprocessError):
+            pass
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+        except OSError:
             pass
 
     # -- OAuth client ids (env override wins over GSettings) -------------

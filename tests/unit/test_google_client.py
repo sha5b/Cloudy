@@ -6,6 +6,7 @@ import unittest
 
 from cloudy.modules.gmail.google_client import (
     GoogleClient,
+    GoogleError,
     _decode_b64url,
     _part_charset,
 )
@@ -202,6 +203,60 @@ class TestMultiCalendar(unittest.TestCase):
         self.gc.delete_event(xmas["id"])
         self.assertTrue(all("hol%40group" in url for _, url in self.gc.writes))
         self.assertEqual(len(self.gc.writes), 2)
+
+
+class _PageGC(GoogleClient):
+    """Scripted message-page client: ``fail`` ids raise with ``status``."""
+
+    def __init__(self, fail=(), status=404):
+        super().__init__(lambda scopes: "token")
+        self._fail = set(fail)
+        self._status = status
+
+    def _get(self, url, scopes):
+        if "/messages?" in url:
+            return {"messages": [{"id": "m1"}, {"id": "m2"}, {"id": "m3"}],
+                    "nextPageToken": "tok"}
+        mid = url.split("/messages/")[1].split("?")[0]
+        if mid in self._fail:
+            raise GoogleError(f"Google {self._status}: nope",
+                              status=self._status)
+        return {"id": mid, "payload": {"headers": []}}
+
+
+class TestMessagePageTolerance(unittest.TestCase):
+    def test_deleted_message_404_skipped(self):
+        # A message deleted between list and get must not sink the page.
+        msgs, token = _PageGC(fail={"m2"}).list_messages_page("INBOX")
+        self.assertEqual([m["id"] for m in msgs], ["m1", "m3"])
+        self.assertEqual(token, "tok")
+
+    def test_page_intact_without_failures(self):
+        msgs, _ = _PageGC().list_messages_page("INBOX")
+        self.assertEqual(len(msgs), 3)
+
+    def test_scope_error_still_propagates(self):
+        # 401/403 affects every row alike — must surface, not be swallowed.
+        with self.assertRaises(GoogleError):
+            _PageGC(fail={"m2"}, status=403).list_messages_page("INBOX")
+
+
+class TestChatSpaces(unittest.TestCase):
+    def test_last_at_from_last_active_time(self):
+        class GC(GoogleClient):
+            def _get(self, url, scopes):
+                return {"spaces": [
+                    {"name": "spaces/A", "spaceType": "DIRECT_MESSAGE",
+                     "lastActiveTime": "2026-08-01T10:00:00Z"},
+                    {"name": "spaces/B", "displayName": "Team"},
+                ]}
+
+        chats = GC(lambda s: "t").list_chats()
+        by_id = {c["id"]: c for c in chats}
+        # lastActiveTime feeds the notifier's change detection (keyed on
+        # last_at); absent field keeps the "" fallback.
+        self.assertEqual(by_id["spaces/A"]["last_at"], "2026-08-01T10:00:00Z")
+        self.assertEqual(by_id["spaces/B"]["last_at"], "")
 
 
 class TestFolders(unittest.TestCase):

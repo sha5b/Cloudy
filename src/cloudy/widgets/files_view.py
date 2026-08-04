@@ -236,12 +236,20 @@ class FilesView(Adw.Bin):
 
     def refresh_mount_states(self) -> None:
         """Re-evaluate every row's Mount/Unmount state against the live mount
-        table. Cheap (one mount-table read per drive), so it's safe to run when
-        the view is shown — picks up mounts the startup restore / health
-        watchdog reconnected while the user was elsewhere."""
-        for lib in self._libraries:
-            self._apply_button(lib)
-        self._refresh_upload_status()
+        table — picks up mounts the startup restore / health watchdog
+        reconnected while the user was elsewhere. The table read is warmed
+        off-thread first: in Flatpak it's a synchronous ``flatpak-spawn --host``
+        round-trip, which must never run on the GTK loop (this ran once per
+        drive on every tab switch and could hang the whole UI)."""
+        def done(_active, error) -> bool:
+            if error is not None or not self.get_mapped():
+                return False
+            for lib in self._libraries:  # hits the warmed mount-table cache
+                self._apply_button(lib)
+            self._refresh_upload_status()
+            return False
+
+        run_async(lambda: self._mounts.active_mounts(fresh=True), done)
 
     # -- live sync status (via each mount's --rc socket) -----------------
     def _cancel_status_poll(self) -> None:
@@ -254,14 +262,20 @@ class FilesView(Adw.Bin):
         Reads rclone's VFS cache metadata off-thread (never touches FUSE), then
         re-polls every few seconds while anything is still uploading and stops
         once everything has landed on the server."""
-        mounted = [lib for lib in self._libraries if self._is_mounted(lib["drive"])]
-        if not mounted:
+        base = self._mount_base()
+        libs = [(lib["drive"].name,
+                 str(self._mounts.mountpoint_for(lib["drive"].name, base)))
+                for lib in self._libraries]
+        if not libs:
             self._cancel_status_poll()
             return
-        names = [lib["drive"].name for lib in mounted]
 
         def work():
-            return {name: self._mounts.upload_status(name) for name in names}
+            # Mounted-filter inside the worker: the mount-table read can be a
+            # host subprocess in Flatpak and must stay off the GTK thread.
+            table = self._mounts.active_mounts()
+            return {name: self._mounts.upload_status(name)
+                    for name, mp in libs if mp in table}
 
         run_async(work, self._on_upload_status)
 
@@ -271,7 +285,10 @@ class FilesView(Adw.Bin):
         # A result can land after unmap cancelled the timer (the fetch was
         # already in flight); re-arming from here would keep the poll — and its
         # per-drive mount-table checks — running while the tab is hidden.
-        if error or not statuses or not self.get_mapped():
+        if error or not self.get_mapped():
+            return False
+        if not statuses:  # nothing mounted — stop watching
+            self._cancel_status_poll()
             return False
         busy = False
         for name, st in statuses.items():
@@ -302,13 +319,29 @@ class FilesView(Adw.Bin):
         if lib is None:
             return
         drive = lib["drive"]
-        if not self._is_mounted(drive):
-            self._window.add_toast(_("Mount %s first.") % drive.name)
-            return
-        self._open_name = drive.name
         mp = self._mounts.mountpoint_for(drive.name, self._mount_base())
-        self._pane.open_root(mp, drive.name)
-        self._split.set_show_content(True)  # reveal the browser when collapsed
+
+        # Health check off-thread (it shells out to ps): a mountpoint can sit
+        # in the mount table with its daemon dead ("stale") — opening it would
+        # hang the browser's scan forever on "Loading…".
+        def done(health, error) -> bool:
+            if error is not None:
+                health = "absent"
+            if health == "absent":
+                self._window.add_toast(_("Mount %s first.") % drive.name)
+                return False
+            if health == "stale":
+                self._window.add_toast(
+                    _("%s isn't responding — unmount and mount it again.")
+                    % drive.name)
+                self._apply_button(lib)
+                return False
+            self._open_name = drive.name
+            self._pane.open_root(mp, drive.name)
+            self._split.set_show_content(True)  # reveal when collapsed
+            return False
+
+        run_async(lambda: self._mounts.mount_health(mp), done)
 
     # -- mount / unmount --------------------------------------------------
     def _mount(self, lib) -> None:

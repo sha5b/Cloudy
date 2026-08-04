@@ -64,7 +64,11 @@ class ChatView(Adw.Bin):
         self._chats_next_token = None  # cursor for older conversations
         self._chats_loading = False
         self._chats_more_row = None
-        self._read_ids: set = set()    # chats read in this session (force greyed)
+        # chat id -> last_at watermark at read time. A watermark, not a flag: a
+        # message newer than it must re-bold the row (a permanent "read" mark
+        # made the row and the red badge disagree forever after one open).
+        self._read_ids: dict = {}
+        self._failed_bubbles: list = []  # (chat id, widget) of un-sent messages
         self._editing = None           # message being edited, if any
         self._chat_members: list = []  # current chat's members (for @mentions)
         self._mentions: list = []      # mentions picked for the pending message
@@ -81,6 +85,13 @@ class ChatView(Adw.Bin):
         self._poll_source = None       # adaptive open-thread poll timer
         self._thread_sig = None        # signature of the rendered thread (poll diff)
         self._members_pop = None       # the group roster/management popover
+
+        # Tell the notifier which chat is actually on screen — it skips badging
+        # the conversation being read. Cleared while the tab is hidden (an
+        # Adw.ViewStack unmaps the hidden page) so background arrivals badge.
+        self.connect("map",
+                     lambda *_a: self._set_notifier_open_chat(self._chat_id))
+        self.connect("unmap", lambda *_a: self._set_notifier_open_chat(None))
 
         # -- left pane: the chat list ------------------------------------
         self._list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE,
@@ -289,6 +300,9 @@ class ChatView(Adw.Bin):
 
     def _set_list_message(self, text: str) -> None:
         clear_listbox(self._list)
+        # clear_listbox just removed the more-row; a stale reference would make
+        # the next _render_filtered call remove() a parentless row (GTK critical).
+        self._chats_more_row = None
         self._list.append(message_row(text))
 
     def _reauth_prompt(self) -> None:
@@ -498,8 +512,9 @@ class ChatView(Adw.Bin):
         # the bold rows always agree. Cleared once opened this session.
         notifier = getattr(self._window.get_application(), "notifier", None)
         flagged = bool(notifier and notifier.is_chat_unread(self._account.id, chat["id"]))
-        unread = ((bool(chat.get("unread")) or flagged)
-                  and chat["id"] not in self._read_ids)
+        watermark = self._read_ids.get(chat["id"])
+        seen = watermark is not None and (chat.get("last_at") or "") <= watermark
+        unread = (bool(chat.get("unread")) or flagged) and not seen
         is_meeting = chat.get("kind") == "meeting"
         row._chat_id = chat["id"]
         row._chat_name = chat.get("name", "")
@@ -749,7 +764,24 @@ class ChatView(Adw.Bin):
             return False  # nothing changed — leave the thread (and scroll) alone
         self._store_page(chat_id, merged, messages, next_token)
         self._render_thread(chat_id, merged)
+        self._ack_open_chat(chat_id, merged)
         return False
+
+    def _ack_open_chat(self, chat_id, messages) -> None:
+        """Messages just rendered in the open, focused chat are read by
+        definition: advance the local watermark and the server read marker, and
+        re-clear the notifier flag. open_chat only did this once, so the badge
+        could light up (and stick) for the conversation being watched."""
+        root = self.get_root()
+        if root is None or (hasattr(root, "is_active") and not root.is_active()):
+            return
+        newest = max((m.get("sent") or "" for m in messages), default="")
+        if newest and newest > self._read_ids.get(chat_id, ""):
+            self._mark_read_server(chat_id)
+        notifier = getattr(self._window.get_application(), "notifier", None)
+        if notifier is not None and hasattr(notifier, "mark_chat_read"):
+            notifier.mark_chat_read(self._account.id, chat_id)
+        self._mark_row_read(chat_id, upto=newest)
 
     # -- group roster / management popover --------------------------------
     def _on_show_members(self, button) -> None:
@@ -1040,6 +1072,7 @@ class ChatView(Adw.Bin):
         notifier = getattr(self._window.get_application(), "notifier", None)
         if notifier is not None and hasattr(notifier, "mark_chat_read"):
             notifier.mark_chat_read(self._account.id, chat_id)
+        self._set_notifier_open_chat(chat_id)
         self._mark_row_read(chat_id)
         self._mark_read_server(chat_id)
         row = self._rows_by_id.get(chat_id)
@@ -1056,6 +1089,11 @@ class ChatView(Adw.Bin):
         self._load_messages(chat_id)
         self._start_poll()
 
+    def _set_notifier_open_chat(self, chat_id) -> None:
+        notifier = getattr(self._window.get_application(), "notifier", None)
+        if notifier is not None and hasattr(notifier, "set_open_chat"):
+            notifier.set_open_chat(self._account.id if chat_id else None, chat_id)
+
     # -- server-side read state -------------------------------------------
     def _mark_read_server(self, chat_id) -> None:
         if self._account.provider != "microsoft":
@@ -1070,16 +1108,18 @@ class ChatView(Adw.Bin):
 
         run_async(work, lambda _r, _e: False)  # best-effort; ignore failures
 
-    def _mark_row_read(self, chat_id) -> None:
-        """Grey out a chat's row once opened (refresh it without the unread
-        mark). Must update the row IN PLACE: swapping in a fresh row would lose
-        its ``_patch_key``, and the next patch_listbox pass would then treat the
-        chat as missing and add a second, duplicate row for it."""
-        if chat_id in self._read_ids:
-            return
-        self._read_ids.add(chat_id)
-        row = self._rows_by_id.get(chat_id)
+    def _mark_row_read(self, chat_id, upto: str = "") -> None:
+        """Grey out a chat's row (advance its read watermark to the newest
+        known message time). Must update the row IN PLACE: swapping in a fresh
+        row would lose its ``_patch_key``, and the next patch_listbox pass
+        would then treat the chat as missing and add a duplicate row."""
         chat = next((c for c in self._all_chats if c["id"] == chat_id), None)
+        mark = max(self._read_ids.get(chat_id, ""), upto,
+                   (chat or {}).get("last_at") or "")
+        if self._read_ids.get(chat_id) == mark:
+            return
+        self._read_ids[chat_id] = mark
+        row = self._rows_by_id.get(chat_id)
         if row is None or chat is None:
             return
         self._update_chat_row(row, chat)
@@ -1294,17 +1334,38 @@ class ChatView(Adw.Bin):
 
     def _full_render(self, messages) -> None:
         """Tear down and rebuild every bubble from scratch (used on first open
-        and whenever an in-place append can't preserve the thread)."""
+        and whenever an in-place append can't preserve the thread).
+
+        Failed sends (Retry button + in-memory attachments) and a still-un-acked
+        optimistic echo must survive the teardown — destroying them silently
+        discards the user's message. They're detached first and re-appended at
+        the bottom; the echo is dropped instead if the server copy is already in
+        ``messages`` (re-appending it then would duplicate the message)."""
+        keep = [w for cid, w in self._failed_bubbles if cid == self._chat_id]
+        opt = self._optimistic
+        if opt is not None:
+            confirmed = any(
+                m.get("is_mine") and (m.get("text", "") or "").strip()
+                == (opt["text"] or "").strip() for m in messages)
+            if confirmed:
+                opt = None
+            else:
+                keep.append(opt["widget"])
+        for w in keep:
+            if w.get_parent() is self._thread:
+                self._thread.remove(w)
         self._clear_thread()
+        self._optimistic = opt
         self._older_row = None
-        if not messages:
-            return
-        self._sync_older_row()
-        for msg in messages:
-            widget = self._bubble(msg)
-            if msg.get("id"):
-                self._bubble_widgets[msg["id"]] = widget
-            self._thread.append(widget)
+        if messages:
+            self._sync_older_row()
+            for msg in messages:
+                widget = self._bubble(msg)
+                if msg.get("id"):
+                    self._bubble_widgets[msg["id"]] = widget
+                self._thread.append(widget)
+        for w in keep:
+            self._thread.append(w)
 
     def _appended_only(self, messages):
         """If the currently-rendered thread is an unchanged prefix of
@@ -1352,11 +1413,14 @@ class ChatView(Adw.Bin):
         # A forwarded/replied message can have no body text and no file
         # attachments of its own (the quoted content lives in `forward`/
         # `reply_to`), so count those too — otherwise it's filtered out as
-        # "empty" and the message disappears from the thread.
+        # "empty" and the message disappears from the thread. Deleted-message
+        # tombstones are deliberately empty and must also pass, or the
+        # "X deleted this message" row never renders.
         return (bool((msg.get("text", "") or "").strip())
                 or bool(msg.get("attachments"))
                 or bool(msg.get("forward"))
-                or bool(msg.get("reply_to")))
+                or bool(msg.get("reply_to"))
+                or bool(msg.get("deleted")))
 
     # -- older-message pagination -----------------------------------------
     def _sync_older_row(self) -> None:
@@ -2172,12 +2236,16 @@ class ChatView(Adw.Bin):
             return  # cancelled
         if gfile is None:
             return
-        try:
+
+        # Write off-thread: the chosen destination can be a FUSE mount, where a
+        # synchronous write blocks the GTK loop (forever, on a hung daemon).
+        def work():
             gfile.replace_contents(data, None, False,
                                    Gio.FileCreateFlags.NONE, None)
-            self._window.add_toast(_("Saved"))
-        except GLib.Error as exc:
-            self._window.add_toast(_("Couldn't save: %s") % exc.message)
+            return True
+
+        run_async(work, lambda _r, err: self._window.add_toast(
+            _("Couldn't save: %s") % friendly_error(err) if err else _("Saved")))
 
     @staticmethod
     def _has_downloadable(msg) -> bool:
@@ -2230,22 +2298,35 @@ class ChatView(Adw.Bin):
             return  # cancelled
         if files is None:
             return
-        for i in range(files.get_n_items()):
-            gfile = files.get_item(i)
-            if gfile is None:
-                continue
-            try:
+        picked = [files.get_item(i) for i in range(files.get_n_items())]
+
+        # Read off-thread: the picker can browse into a FUSE mount, where a
+        # synchronous read means downloading the file on the GTK loop.
+        def read_one(gfile):
+            def work():
                 ok, data, _etag = gfile.load_contents(None)
                 if not ok:
-                    continue
+                    raise GLib.Error.new_literal(
+                        GLib.quark_from_string("cloudy"), _("read failed"), 0)
                 ctype = "application/octet-stream"
                 info = gfile.query_info("standard::content-type", 0, None)
                 if info and info.get_content_type():
                     ctype = info.get_content_type()
-            except GLib.Error as exc:
-                self._window.add_toast(_("Couldn't read file: %s") % exc.message)
-                continue
-            self._stage_bytes(bytes(data), ctype, gfile.get_basename() or "")
+                return bytes(data), ctype, gfile.get_basename() or ""
+
+            def done(res, err) -> bool:
+                if err is not None or res is None:
+                    self._window.add_toast(
+                        _("Couldn't read file: %s") % friendly_error(err))
+                else:
+                    self._stage_bytes(*res)
+                return False
+
+            run_async(work, done)
+
+        for gfile in picked:
+            if gfile is not None:
+                read_one(gfile)
 
     def _stage_image(self, texture) -> None:
         self._stage_bytes(texture.save_to_png_bytes().get_data(), "image/png",
@@ -2721,6 +2802,10 @@ class ChatView(Adw.Bin):
             if foot is not None:
                 foot.remove(btn)
             outer._retry_btn = None  # type: ignore[attr-defined]
+        # No longer failed: stop shielding it from full re-renders (on success
+        # the reconcile adopts it; on another failure _mark_failed re-adds it).
+        self._failed_bubbles = [(c, w) for c, w in self._failed_bubbles
+                                if w is not outer]
         icon = getattr(outer, "_status_icon", None)
         if icon is not None:
             icon.remove_css_class("error")
@@ -2731,8 +2816,12 @@ class ChatView(Adw.Bin):
         """Flag a bubble as un-sent: a red badge + a Retry button that re-fires
         the same send. The bubble stays put (we don't reload on failure)."""
         # Drop the optimistic pointer so a later background poll's _apply_status
-        # won't hide this bubble's failed badge.
+        # won't hide this bubble's failed badge; track it instead so a full
+        # thread re-render re-appends it rather than destroying the un-sent
+        # message (and its Retry button / in-memory attachments).
         self._optimistic = None
+        if not any(w is outer for _c, w in self._failed_bubbles):
+            self._failed_bubbles.append((self._chat_id, outer))
         icon = getattr(outer, "_status_icon", None)
         if icon is None:
             return

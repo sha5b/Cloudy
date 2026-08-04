@@ -91,6 +91,20 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
   </screenshots>
 
   <releases>
+    <release version="0.3.4" date="2026-08-04">
+      <description>
+        <p>A full-app stability audit: the file browser can no longer freeze the app, and chat unread state finally behaves.</p>
+        <ul>
+          <li>Opening files, renaming, and creating folders on a slow or dead mount no longer lock up the whole app — and a dead mount is detected and reported instead of loading forever</li>
+          <li>Switching to the Files tab in the Flatpak no longer stalls the window</li>
+          <li>A chat you already opened can show as unread again, and the red badge no longer sticks on the conversation you are actively reading</li>
+          <li>Deleted-message placeholders actually appear, and a failed send (with its Retry button) survives background refreshes</li>
+          <li>Unread badges keep updating while you write mail in a composer window</li>
+          <li>Teams channel refreshes no longer wipe reply text you are typing or jump the scroll position</li>
+          <li>Gmail: one deleted message no longer empties the whole list; Google sign-ins no longer randomly expire from racing token refreshes</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.3" date="2026-07-14">
       <description>
         <p>Chat threads now tell the whole story.</p>

@@ -21,12 +21,22 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 _CAL_NAME = "Cloudy"
 _PRODID = "-//Shahab Nedaei//Cloudy//EN"
+
+# Serializes every load-index → publish → save-index critical section (and the
+# lazy ECal client init). Publishers run concurrently on worker threads — the
+# calendar view, the per-account background sync, and the enable-backfill — and
+# the whole-file read/rewrite of eds_uids.json would otherwise clobber each
+# other's bucket updates, leaving stale events in GNOME Calendar. Reentrant
+# because publish_events calls _get_client while already holding it. All
+# callers are background threads, so a coarse lock is fine.
+_eds_lock = threading.RLock()
 
 # Bumped whenever the mirror format changes (timezone handling, UID format,
 # source parent, etc.) so stale/wrong events are wiped and rebuilt instead of
@@ -258,75 +268,76 @@ def publish_events(app, account, events, month: str | None = None) -> None:
         return
     if getattr(app, "_eds_disabled", False):
         return
-    if not _ensure_fresh_calendar(app):
-        return
-    client = _get_client(app)
-    if client is None:
-        return
+    with _eds_lock:
+        if not _ensure_fresh_calendar(app):
+            return
+        client = _get_client(app)
+        if client is None:
+            return
 
-    from .gi_compat import require
+        from .gi_compat import require
 
-    if require("ECal", ("2.0", "3.0")) is None or \
-            require("ICalGLib", ("3.0", "4.0")) is None:
-        return  # EDS not available on this runtime
-    from gi.repository import ECal, ICalGLib
+        if require("ECal", ("2.0", "3.0")) is None or \
+                require("ICalGLib", ("3.0", "4.0")) is None:
+            return  # EDS not available on this runtime
+        from gi.repository import ECal, ICalGLib
 
-    # Normalize input and determine the month bucket.
-    events = events or []
-    if month is None and events:
-        month = _month_of(events[0])
-    if month is None:
-        month = "unknown"
-    # Keep only THIS month's events in this bucket: callers pass spans that
-    # spill into adjacent months (the calendar's 6-week grid), and letting the
-    # spill-over into this bucket while the background publisher owns those
-    # events in their own month's bucket made the two deletion-diffs fight —
-    # events churned/vanished from GNOME's calendar.
-    if month != "unknown":
-        events = [ev for ev in events if _month_of(ev) == month]
+        # Normalize input and determine the month bucket.
+        events = events or []
+        if month is None and events:
+            month = _month_of(events[0])
+        if month is None:
+            month = "unknown"
+        # Keep only THIS month's events in this bucket: callers pass spans that
+        # spill into adjacent months (the calendar's 6-week grid), and letting the
+        # spill-over into this bucket while the background publisher owns those
+        # events in their own month's bucket made the two deletion-diffs fight —
+        # events churned/vanished from GNOME's calendar.
+        if month != "unknown":
+            events = [ev for ev in events if _month_of(ev) == month]
 
-    desired: dict[str, dict] = {}
-    for ev in events:
-        uid = _event_uid(account, ev)
-        block = _vevent(uid, ev)
-        if block is None:
-            continue
-        desired[uid] = block
-
-    index = _load_uid_index()
-    bucket = f"{account.id}:{month}"
-    previous = set(index.get(bucket, []))
-    current = set(desired.keys())
-
-    # Remove events that disappeared from this month.
-    for uid in previous - current:
-        try:
-            client.remove_object_sync(
-                uid, None, ECal.ObjModType.ALL, ECal.OperationFlags.NONE, None)
-        except Exception:  # noqa: BLE001 - may not exist
-            pass
-
-    # Create or update the rest.
-    for uid, block in desired.items():
-        try:
-            icomp = ICalGLib.Component.new_from_string(block)
-            if icomp is None:
+        desired: dict[str, dict] = {}
+        for ev in events:
+            uid = _event_uid(account, ev)
+            block = _vevent(uid, ev)
+            if block is None:
                 continue
-            existing = None
-            try:
-                existing = client.get_object_sync(uid, None, None)
-            except Exception:  # noqa: BLE001 - not present yet
-                existing = None
-            if existing is not None:
-                client.modify_object_sync(
-                    icomp, ECal.ObjModType.ALL, ECal.OperationFlags.NONE, None)
-            else:
-                client.create_object_sync(icomp, ECal.OperationFlags.NONE, None)
-        except Exception as exc:  # noqa: BLE001 - one bad event shouldn't abort
-            _log(f"skip event: {exc}")
+            desired[uid] = block
 
-    index[bucket] = list(current)
-    _save_uid_index(index)
+        index = _load_uid_index()
+        bucket = f"{account.id}:{month}"
+        previous = set(index.get(bucket, []))
+        current = set(desired.keys())
+
+        # Remove events that disappeared from this month.
+        for uid in previous - current:
+            try:
+                client.remove_object_sync(
+                    uid, None, ECal.ObjModType.ALL, ECal.OperationFlags.NONE, None)
+            except Exception:  # noqa: BLE001 - may not exist
+                pass
+
+        # Create or update the rest.
+        for uid, block in desired.items():
+            try:
+                icomp = ICalGLib.Component.new_from_string(block)
+                if icomp is None:
+                    continue
+                existing = None
+                try:
+                    existing = client.get_object_sync(uid, None, None)
+                except Exception:  # noqa: BLE001 - not present yet
+                    existing = None
+                if existing is not None:
+                    client.modify_object_sync(
+                        icomp, ECal.ObjModType.ALL, ECal.OperationFlags.NONE, None)
+                else:
+                    client.create_object_sync(icomp, ECal.OperationFlags.NONE, None)
+            except Exception as exc:  # noqa: BLE001 - one bad event shouldn't abort
+                _log(f"skip event: {exc}")
+
+        index[bucket] = list(current)
+        _save_uid_index(index)
 
 
 def remove_account_events(app, account_id: str) -> None:
@@ -337,28 +348,29 @@ def remove_account_events(app, account_id: str) -> None:
     """
     if getattr(app, "_eds_disabled", False):
         return
-    client = _get_client(app)
-    if client is None:
-        return
-    from .gi_compat import require
-    if require("ECal", ("2.0", "3.0")) is None:
-        return
-    from gi.repository import ECal
+    with _eds_lock:
+        client = _get_client(app)
+        if client is None:
+            return
+        from .gi_compat import require
+        if require("ECal", ("2.0", "3.0")) is None:
+            return
+        from gi.repository import ECal
 
-    index = _load_uid_index()
-    prefix = f"{account_id}:"
-    buckets = [k for k in list(index.keys()) if k.startswith(prefix)]
-    removed_any = False
-    for bucket in buckets:
-        for uid in index.pop(bucket, []):
-            try:
-                client.remove_object_sync(
-                    uid, None, ECal.ObjModType.ALL, ECal.OperationFlags.NONE, None)
-                removed_any = True
-            except Exception:  # noqa: BLE001
-                pass
-    if removed_any or buckets:
-        _save_uid_index(index)
+        index = _load_uid_index()
+        prefix = f"{account_id}:"
+        buckets = [k for k in list(index.keys()) if k.startswith(prefix)]
+        removed_any = False
+        for bucket in buckets:
+            for uid in index.pop(bucket, []):
+                try:
+                    client.remove_object_sync(
+                        uid, None, ECal.ObjModType.ALL, ECal.OperationFlags.NONE, None)
+                    removed_any = True
+                except Exception:  # noqa: BLE001
+                    pass
+        if removed_any or buckets:
+            _save_uid_index(index)
     _eds_publish_throttle.pop(account_id, None)
 
 
@@ -381,24 +393,25 @@ def clear_all_events(app) -> None:
     Called when the user disables the EDS mirror so GNOME Calendar doesn't keep
     showing stale Cloudy events.
     """
-    if not getattr(app, "_eds_disabled", False):
-        client = _get_client(app)
-        if client is not None:
-            from .gi_compat import require
-            if require("ECal", ("2.0", "3.0")) is not None:
-                from gi.repository import ECal
-                index = _load_uid_index()
-                for bucket, uids in list(index.items()):
-                    if bucket.startswith("_"):
-                        continue
-                    for uid in uids:
-                        try:
-                            client.remove_object_sync(
-                                uid, None, ECal.ObjModType.ALL,
-                                ECal.OperationFlags.NONE, None)
-                        except Exception:  # noqa: BLE001
-                            pass
-    _save_uid_index({})
+    with _eds_lock:
+        if not getattr(app, "_eds_disabled", False):
+            client = _get_client(app)
+            if client is not None:
+                from .gi_compat import require
+                if require("ECal", ("2.0", "3.0")) is not None:
+                    from gi.repository import ECal
+                    index = _load_uid_index()
+                    for bucket, uids in list(index.items()):
+                        if bucket.startswith("_"):
+                            continue
+                        for uid in uids:
+                            try:
+                                client.remove_object_sync(
+                                    uid, None, ECal.ObjModType.ALL,
+                                    ECal.OperationFlags.NONE, None)
+                            except Exception:  # noqa: BLE001
+                                pass
+        _save_uid_index({})
     _eds_publish_throttle.clear()
 
 
@@ -443,6 +456,19 @@ def publish_all_cached_events(app) -> None:
                     publish_events(app, account, events, month=month)
                 except Exception:  # noqa: BLE001 - EDS mirroring never affects UI
                     pass
+
+
+def publish_all_cached_events_async(app) -> None:
+    """Off-thread variant of ``publish_all_cached_events`` (EDS calls block)."""
+    import threading
+
+    def work():
+        try:
+            publish_all_cached_events(app)
+        except Exception:  # noqa: BLE001 - EDS mirroring never affects UI
+            pass
+
+    threading.Thread(target=work, daemon=True).start()
 
 
 # Throttle background full-month EDS sync so a busy notification poll doesn't
@@ -497,7 +523,16 @@ def publish_account_current_month_async(app, account) -> None:
 
 
 def _get_client(app):
-    """Lazily build (and cache) the ECal client for the Cloudy calendar."""
+    """Lazily build (and cache) the ECal client for the Cloudy calendar.
+
+    Guarded by ``_eds_lock`` so two worker threads racing the lazy init don't
+    each connect their own client (the loser's connection would leak).
+    """
+    with _eds_lock:
+        return _get_client_locked(app)
+
+
+def _get_client_locked(app):
     client = getattr(app, "_eds_client", None)
     if client is not None:
         return client

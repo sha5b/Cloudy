@@ -70,9 +70,36 @@ class NotificationManager:
         self._seen_chat: dict[str, dict] = {}     # account id -> {chat id: last_at}
         self._chat_unread: dict[str, set] = {}    # account id -> {chat id with new msgs}
         self._digest: dict[str, dict] = {}        # account id -> pending tier-2 summary
+        self._busy: set = set()                   # "{kind}:{account id}" polls in flight
+        self._open_chat: tuple | None = None      # (account id, chat id) on screen
         self._timer = None
         self._digest_timer = None
         self._prime_source = None
+
+    def _main_window(self):
+        """The main CloudyWindow, wherever focus is. ``props.active_window``
+        tracks *focus*, so while a non-modal composer/viewer is focused it
+        returns that window instead — and badge pushes were silently dropped
+        (nothing re-seeds them until a later poll lands with the main window
+        focused)."""
+        for win in self._app.get_windows():
+            if hasattr(win, "set_account_unread"):
+                return win
+        return None
+
+    def _spawn(self, key: str, work, on_done) -> None:
+        """Run one poll worker per (kind, account). Under provider throttling a
+        poll can legally outlive the tick interval; without this guard identical
+        polls stack up and worsen the throttling that delayed them."""
+        if key in self._busy:
+            return
+        self._busy.add(key)
+
+        def done(result, error):
+            self._busy.discard(key)
+            return on_done(result, error)
+
+        threading.Thread(target=self._run, args=(work, done), daemon=True).start()
 
     def unread_count(self, account_id: str) -> int:
         """Last-polled inbox unread count for an account (0 until first poll)."""
@@ -89,8 +116,8 @@ class NotificationManager:
         if current <= 0:
             return
         self._unread[account_id] = current - 1
-        win = self._app.props.active_window
-        if win is not None and hasattr(win, "set_account_unread"):
+        win = self._main_window()
+        if win is not None:
             win.set_account_unread(account_id, self._unread[account_id])
 
     def pending_invites_count(self, account_id: str) -> int:
@@ -114,8 +141,14 @@ class NotificationManager:
             seen.discard(chat_id)
             self._push_chat_badge(account_id)
 
+    def set_open_chat(self, account_id: str | None, chat_id: str | None) -> None:
+        """Tell the notifier which chat is on screen (None/None when none is).
+        New messages in that chat don't badge or banner while the main window
+        is focused — the user is literally reading them."""
+        self._open_chat = (account_id, chat_id) if account_id and chat_id else None
+
     def _push_chat_badge(self, account_id: str) -> None:
-        win = self._app.props.active_window
+        win = self._main_window()
         if win is not None and hasattr(win, "set_account_chat_unread"):
             win.set_account_chat_unread(account_id, self.chat_unread_count(account_id))
 
@@ -151,6 +184,9 @@ class NotificationManager:
             self._gsound = None
 
     def _prime_once(self) -> bool:
+        # Clear the id BEFORE returning False: GLib destroys the source, and a
+        # later stop() would otherwise source_remove a stale (recyclable) id.
+        self._prime_source = None
         self._tick()
         return False  # GLib removes this source
 
@@ -339,17 +375,16 @@ class NotificationManager:
                 unread = sum(1 for m in messages if not m.get("is_read", True))
             return (messages, unread)
 
-        threading.Thread(
-            target=self._run, args=(work, lambda r, e: self._on_mail(account, first_time, r, e)),
-            daemon=True).start()
+        self._spawn(f"mail:{account.id}", work,
+                    lambda r, e: self._on_mail(account, first_time, r, e))
 
     def _on_mail(self, account, first_time, result, error) -> bool:
         if error or result is None:
             return False
         messages, unread = result
         self._unread[account.id] = unread
-        win = self._app.props.active_window
-        if win is not None and hasattr(win, "set_account_unread"):
+        win = self._main_window()
+        if win is not None:
             win.set_account_unread(account.id, unread)
         seen = self._seen_mail.setdefault(account.id, set())
         ids = {m.get("id") for m in messages}
@@ -424,9 +459,8 @@ class NotificationManager:
             client = build_account_client(self._app, account)
             return client.list_events(start_iso, end_iso)
 
-        threading.Thread(
-            target=self._run, args=(work, lambda r, e: self._on_calendar(account, r, e)),
-            daemon=True).start()
+        self._spawn(f"cal:{account.id}", work,
+                    lambda r, e: self._on_calendar(account, r, e))
 
     def _on_calendar(self, account, events, error) -> bool:
         if error or not events:
@@ -445,7 +479,7 @@ class NotificationManager:
             self._primed.add(f"cal:{account.id}")
         elif new_ids:
             self._invalidate(f"{account.id}:events:")
-            win = self._app.props.active_window
+            win = self._main_window()
             if win is not None:
                 if hasattr(win, "refresh_account_calendar"):
                     win.refresh_account_calendar(account.id)
@@ -522,10 +556,8 @@ class NotificationManager:
             client = build_account_client(self._app, account)
             return client.list_events(start_iso, end_iso)
 
-        threading.Thread(
-            target=self._run,
-            args=(work, lambda r, e: self._on_invites(account, r, e)),
-            daemon=True).start()
+        self._spawn(f"invites:{account.id}", work,
+                    lambda r, e: self._on_invites(account, r, e))
 
     def _on_invites(self, account, events, error) -> bool:
         if error or events is None:
@@ -534,7 +566,7 @@ class NotificationManager:
                    if (ev.get("response") or "").lower()
                    in ("notresponded", "needsaction")]
         self._pending_invites[account.id] = len(pending)
-        win = self._app.props.active_window
+        win = self._main_window()
         if win is not None and hasattr(win, "set_account_pending_invites"):
             win.set_account_pending_invites(account.id, len(pending))
         # Banner once per invite; the first sweep is baseline-only so a fresh
@@ -598,10 +630,8 @@ class NotificationManager:
             client = build_account_client(self._app, account)
             return client.list_chats()
 
-        threading.Thread(
-            target=self._run,
-            args=(work, lambda r, e: self._on_chat(account, first_time, r, e)),
-            daemon=True).start()
+        self._spawn(f"chat:{account.id}", work,
+                    lambda r, e: self._on_chat(account, first_time, r, e))
 
     def _on_chat(self, account, first_time, chats, error) -> bool:
         if error or not chats:
@@ -629,6 +659,10 @@ class NotificationManager:
                 continue
             if c["id"] in muted:
                 continue  # silenced: no badge, no banner
+            if self._open_chat == (account.id, c["id"]):
+                win = self._main_window()
+                if win is not None and win.is_active():
+                    continue  # the user is reading this chat right now
             unread.add(c["id"])  # light up the red badge (always, even in DND)
             badge_changed = True
             # 1:1 chats are direct (tier 1); group/meeting chatter is ambient (2).
@@ -644,7 +678,7 @@ class NotificationManager:
         # including your own just-sent message bumping a conversation up — the
         # same liveness the Mail list gets.
         if any_changed:
-            win = self._app.props.active_window
+            win = self._main_window()
             if win is not None:
                 if hasattr(win, "refresh_account_chat"):
                     win.refresh_account_chat(account.id)

@@ -42,7 +42,13 @@ CHAT = "https://chat.googleapis.com/v1"
 
 
 class GoogleError(Exception):
-    pass
+    """A Google API failure. ``status`` carries the HTTP status code when the
+    failure came from an HTTP response (0 otherwise, e.g. missing token), so
+    callers can cheaply tell a per-item 404 from an auth/scope failure."""
+
+    def __init__(self, message: str, status: int = 0):
+        super().__init__(message)
+        self.status = status
 
 
 def _decode_b64url(data: str, charset: str = "") -> str:
@@ -116,7 +122,8 @@ class GoogleClient:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return json.loads(resp.read().decode())
         except urllib.error.HTTPError as exc:
-            raise GoogleError(f"Google {exc.code}: {exc.read().decode(errors='replace')}") from exc
+            raise GoogleError(f"Google {exc.code}: {exc.read().decode(errors='replace')}",
+                              status=exc.code) from exc
 
     def _post(self, url: str, body: dict | None, scopes: Sequence[str]) -> dict:
         token = self._token_provider(scopes)
@@ -133,7 +140,8 @@ class GoogleClient:
                 raw = resp.read().decode()
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as exc:
-            raise GoogleError(f"Google {exc.code}: {exc.read().decode(errors='replace')}") from exc
+            raise GoogleError(f"Google {exc.code}: {exc.read().decode(errors='replace')}",
+                              status=exc.code) from exc
 
     def _patch(self, url: str, body: dict, scopes: Sequence[str]) -> dict:
         token = self._token_provider(scopes)
@@ -149,7 +157,8 @@ class GoogleClient:
                 raw = resp.read().decode()
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as exc:
-            raise GoogleError(f"Google {exc.code}: {exc.read().decode(errors='replace')}") from exc
+            raise GoogleError(f"Google {exc.code}: {exc.read().decode(errors='replace')}",
+                              status=exc.code) from exc
 
     def _delete(self, url: str, scopes: Sequence[str]) -> None:
         token = self._token_provider(scopes)
@@ -161,7 +170,8 @@ class GoogleClient:
             with urllib.request.urlopen(req, timeout=30):
                 return
         except urllib.error.HTTPError as exc:
-            raise GoogleError(f"Google {exc.code}: {exc.read().decode(errors='replace')}") from exc
+            raise GoogleError(f"Google {exc.code}: {exc.read().decode(errors='replace')}",
+                              status=exc.code) from exc
 
     # -- Mail (Gmail) -----------------------------------------------------
     # Friendly names + display order for Gmail's system labels; user-created
@@ -217,11 +227,21 @@ class GoogleClient:
         refs = [r["id"] for r in listing.get("messages", []) if r.get("id")]
 
         def fetch(mid):
-            return self._get(
-                f"{GMAIL}/users/me/messages/{mid}"
-                f"?format=metadata&metadataHeaders=Subject&metadataHeaders=From",
-                SCOPES_MAIL,
-            )
+            try:
+                return self._get(
+                    f"{GMAIL}/users/me/messages/{mid}"
+                    f"?format=metadata&metadataHeaders=Subject&metadataHeaders=From",
+                    SCOPES_MAIL,
+                )
+            except GoogleError as exc:
+                # A message deleted between messages.list and messages.get
+                # 404s — one vanished row must not sink the whole page (same
+                # tolerance as an unreachable calendar in list_events).
+                # Anything else (auth/scope 401/403, transient 5xx) affects
+                # every row alike, so it still propagates.
+                if exc.status == 404:
+                    return None
+                raise
 
         # Gmail has no batch listing endpoint, so each row is its own GET —
         # fetched in parallel (like the calendar sweep below); serially this
@@ -230,7 +250,8 @@ class GoogleClient:
         out = []
         if refs:
             with ThreadPoolExecutor(max_workers=min(8, len(refs))) as pool:
-                out = [self._message_from_json(m) for m in pool.map(fetch, refs)]
+                out = [self._message_from_json(m)
+                       for m in pool.map(fetch, refs) if m is not None]
         return out, listing.get("nextPageToken")
 
     @staticmethod
@@ -838,7 +859,10 @@ class GoogleClient:
                 "name": html.unescape(name),
                 "kind": stype,
                 "preview": "",
-                "last_at": "",
+                # lastActiveTime (time of the space's latest message) comes
+                # back on the default spaces.list Space resource — it feeds
+                # the notifier's change detection, which keys on last_at.
+                "last_at": s.get("lastActiveTime", ""),
                 "unread": False,  # Chat API has no simple per-space unread flag
                 "from_me": False,
             })

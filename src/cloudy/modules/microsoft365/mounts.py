@@ -21,6 +21,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -272,15 +273,35 @@ class MountManager:
         (used for per-account mount locations); falls back to ``mount_root()``."""
         return (base or mount_root()) / self._safe_name(name)
 
-    @staticmethod
-    def active_mounts() -> set[str]:
+    # Mount-table snapshot cache. In Flatpak every read is a synchronous
+    # ``flatpak-spawn --host`` round-trip, and views check one mountpoint per
+    # drive — without a cache a single Files-tab refresh spawns N host
+    # processes (on the GTK thread). A couple of seconds of staleness is fine;
+    # mount/unmount invalidate explicitly.
+    _TABLE_TTL = 2.0
+    _table_cache: tuple[float, set[str]] | None = None
+    _table_lock = threading.Lock()
+
+    @classmethod
+    def _invalidate_mount_table(cls) -> None:
+        with cls._table_lock:
+            cls._table_cache = None
+
+    @classmethod
+    def active_mounts(cls, fresh: bool = False) -> set[str]:
         """All currently-mounted paths, read from the kernel mount table.
 
         Stall-proof and reliable across sessions: parses ``/proc/self/mountinfo``
         directly, so it never stats (and never blocks on) a possibly-hung FUSE
         mountpoint the way ``os.path.ismount`` would. In Flatpak it reads the
         HOST table (mounts run on the host), since the sandbox's own table
-        wouldn't show them. Returns absolute paths."""
+        wouldn't show them. Returns absolute paths. Results are cached briefly
+        (see ``_TABLE_TTL``); pass ``fresh=True`` to force a re-read."""
+        with cls._table_lock:
+            cached = cls._table_cache
+            if (not fresh and cached is not None
+                    and time.monotonic() - cached[0] < cls._TABLE_TTL):
+                return cached[1]
         if _in_flatpak():
             try:
                 out = subprocess.run(
@@ -304,10 +325,12 @@ class MountManager:
                 mp = (fields[4].replace("\\040", " ").replace("\\011", "\t")
                       .replace("\\012", "\n").replace("\\134", "\\"))
                 paths.add(mp)
+        with cls._table_lock:
+            cls._table_cache = (time.monotonic(), paths)
         return paths
 
-    def is_mounted(self, mountpoint: Path) -> bool:
-        return str(mountpoint) in self.active_mounts()
+    def is_mounted(self, mountpoint: Path, fresh: bool = False) -> bool:
+        return str(mountpoint) in self.active_mounts(fresh=fresh)
 
     def _await_mount(self, mountpoint: Path, timeout: float = 10.0) -> bool:
         """Poll the mount table until ``mountpoint`` appears (the FUSE daemon
@@ -316,10 +339,10 @@ class MountManager:
         (mount() is called via run_async), so a short sleep is fine."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if self.is_mounted(mountpoint):
+            if self.is_mounted(mountpoint, fresh=True):
                 return True
             time.sleep(0.25)
-        return self.is_mounted(mountpoint)
+        return self.is_mounted(mountpoint, fresh=True)
 
     @staticmethod
     def _process_cmdlines() -> str:
@@ -355,15 +378,34 @@ class MountManager:
             return "absent"
         return "active" if self._has_mount_process(mountpoint) else "stale"
 
+    def healthy_mounts(self) -> set[str]:
+        """Active FUSE mountpoints whose daemon is still alive, with a single
+        process-table read for all of them (``mount_health`` per path would
+        shell out to ``ps`` once per mountpoint). Only rclone/onedriver mounts
+        qualify — exactly the ones safe to scan without hanging."""
+        cmdlines = self._process_cmdlines().splitlines()
+        healthy: set[str] = set()
+        for mp in self.active_mounts():
+            for line in cmdlines:
+                if (mp in line and "mount" in line
+                        and ("rclone" in line or "onedriver" in line)):
+                    healthy.add(mp)
+                    break
+        return healthy
+
     def _lazy_unmount(self, mountpoint: Path) -> None:
         """Detach a stale/dead FUSE mount (lazy ``-z``, so even a hung endpoint
         releases). Leaves the sidebar bookmark in place — the path is unchanged
         and a remount reuses it."""
         for tool in ("fusermount3", "fusermount"):
-            res = subprocess.run(
-                [*_host_prefix(), tool, "-uz", str(mountpoint)],
-                capture_output=True, text=True)
+            try:
+                res = subprocess.run(
+                    [*_host_prefix(), tool, "-uz", str(mountpoint)],
+                    capture_output=True, text=True, timeout=30)
+            except subprocess.TimeoutExpired:
+                continue
             if res.returncode == 0:
+                self._invalidate_mount_table()
                 return
 
     # -- host-aware rclone execution -------------------------------------
@@ -561,7 +603,7 @@ class MountManager:
         if not self._rclone_binary():
             return False
         out = subprocess.run(self._rclone_argv("listremotes"),
-                             capture_output=True, text=True)
+                             capture_output=True, text=True, timeout=30)
         # One remote per line; splitting on whitespace broke any remote whose
         # name contains a space (allowed by _safe_name, e.g. "My Drive").
         return f"{remote}:" in (l.strip() for l in out.stdout.splitlines())
@@ -592,7 +634,7 @@ class MountManager:
         args = self._rclone_argv("config", "create", remote, backend)
         args += [f"{k}={v}" for k, v in opts.items()]
         args.append("--non-interactive")
-        subprocess.run(args, check=True, capture_output=True, text=True)
+        subprocess.run(args, check=True, capture_output=True, text=True, timeout=60)
 
     def list_google_shared_drives(self, token_json: str) -> list[dict]:
         """Shared (Team) Drives the Google account can access, as ``[{id, name}]``.
@@ -621,7 +663,8 @@ class MountManager:
 
     def delete_remote(self, remote: str) -> None:
         if self._rclone_binary() and self.has_remote(remote):
-            subprocess.run(self._rclone_argv("config", "delete", remote), check=False)
+            subprocess.run(self._rclone_argv("config", "delete", remote),
+                           check=False, timeout=30)
 
     # -- mount / unmount --------------------------------------------------
     def mount(self, *, name: str, remote: str, backend: Backend | None = None,

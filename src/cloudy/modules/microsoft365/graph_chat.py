@@ -30,6 +30,14 @@ from ...core.auth.msal_graph import (
 )
 
 
+def _user_bind(user: str) -> str:
+    """``user@odata.bind`` URL for a user id/UPN. The key sits inside OData
+    single quotes, so an embedded apostrophe (o'brien@…) must be doubled per
+    OData quoting or Graph rejects the whole request."""
+    quoted = user.replace("'", "''")
+    return f"{BASE_URL}/users('{quoted}')"
+
+
 def _shared_history_suffix(visible_from: str, created: str) -> str:
     """Teams-style suffix for member-added events describing how much history
     the new member can see. Graph marks "all history" with a year-0001
@@ -85,10 +93,10 @@ class GraphChatMixin:
             "members": [
                 {"@odata.type": "#microsoft.graph.aadUserConversationMember",
                  "roles": ["owner"],
-                 "user@odata.bind": f"{BASE_URL}/users('{me}')"},
+                 "user@odata.bind": _user_bind(me)},
                 {"@odata.type": "#microsoft.graph.aadUserConversationMember",
                  "roles": ["owner"],
-                 "user@odata.bind": f"{BASE_URL}/users('{recipient}')"},
+                 "user@odata.bind": _user_bind(recipient)},
             ],
         }
         chat = self._post("/chats", body, SCOPES_CHAT)
@@ -468,13 +476,13 @@ class GraphChatMixin:
         members = [
             {"@odata.type": "#microsoft.graph.aadUserConversationMember",
              "roles": ["owner"],
-             "user@odata.bind": f"{BASE_URL}/users('{me}')"},
+             "user@odata.bind": _user_bind(me)},
         ]
         for r in recipients:
             members.append(
                 {"@odata.type": "#microsoft.graph.aadUserConversationMember",
                  "roles": ["owner"],
-                 "user@odata.bind": f"{BASE_URL}/users('{r}')"})
+                 "user@odata.bind": _user_bind(r)})
         body = {"chatType": "group", "members": members}
         if topic:
             body["topic"] = topic
@@ -491,7 +499,7 @@ class GraphChatMixin:
         body = {
             "@odata.type": "#microsoft.graph.aadUserConversationMember",
             "roles": ["owner"],
-            "user@odata.bind": f"{BASE_URL}/users('{recipient}')",
+            "user@odata.bind": _user_bind(recipient),
         }
         if share_history:
             body["visibleHistoryStartDateTime"] = "0001-01-01T00:00:00Z"

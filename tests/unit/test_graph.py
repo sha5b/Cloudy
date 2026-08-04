@@ -250,5 +250,19 @@ class TestChatSystemEvents(unittest.TestCase):
         self.assertIn("shared all chat history", row["text"])
 
 
+@_skip
+class TestUserBind(unittest.TestCase):
+    def test_plain_upn(self):
+        from cloudy.modules.microsoft365.graph_chat import _user_bind
+        self.assertTrue(_user_bind("a@x.com").endswith("/users('a@x.com')"))
+
+    def test_apostrophe_doubled(self):
+        # OData quoting: an embedded ' in a UPN (o'brien@…) must be doubled
+        # or the user@odata.bind URL breaks the whole request.
+        from cloudy.modules.microsoft365.graph_chat import _user_bind
+        self.assertTrue(_user_bind("o'brien@x.com")
+                        .endswith("/users('o''brien@x.com')"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -69,6 +69,9 @@ class TeamsView(Adw.Bin):
         # re-renders only on a real change (no scroll jump / lost reply text).
         self._conv_poll_id = None
         self._conv_sig = None
+        # Inline reply entries by post id, so a poll re-render can carry an
+        # in-progress draft over into the rebuilt composer.
+        self._reply_entries: dict[str, Gtk.Entry] = {}
 
         self.set_child(self._build_layout())
         self._load_teams()
@@ -500,6 +503,16 @@ class TeamsView(Adw.Bin):
 
     def _render_posts(self, posts) -> None:
         self._conv_sig = self._posts_signature(posts)
+        # A poll re-render must not eat an in-progress reply or yank the view:
+        # carry non-empty drafts over, and only autoscroll if the user was
+        # already at (or near) the bottom.
+        drafts = {pid: entry.get_text()
+                  for pid, entry in self._reply_entries.items()
+                  if entry.get_text()}
+        adj = self._conv_scroll.get_vadjustment()
+        at_bottom = (adj.get_value() + adj.get_page_size()
+                     >= adj.get_upper() - 48)
+        self._reply_entries = {}
         self._clear_box(self._conv_box)
         title = Gtk.Label(label=esc(self._channel_name), xalign=0)
         title.add_css_class("title-2")
@@ -509,11 +522,18 @@ class TeamsView(Adw.Bin):
             self._conv_box.append(status_page(
                 "user-available-symbolic", _("No posts yet"),
                 _("Be the first to post in %s.") % esc(self._channel_name)))
-            GLib.idle_add(self._scroll_conv_to_bottom)
+            if at_bottom:
+                GLib.idle_add(self._scroll_conv_to_bottom)
             return
         for post in posts:
             self._conv_box.append(self._post_card(post))
-        GLib.idle_add(self._scroll_conv_to_bottom)
+        for pid, text in drafts.items():
+            entry = self._reply_entries.get(pid)
+            if entry is not None:
+                entry.set_text(text)
+                entry.set_position(-1)
+        if at_bottom:
+            GLib.idle_add(self._scroll_conv_to_bottom)
 
     def _post_card(self, post) -> Gtk.Widget:
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -524,7 +544,7 @@ class TeamsView(Adw.Bin):
                        margin_top=10, margin_bottom=10,
                        margin_start=12, margin_end=12)
         if post.get("subject"):
-            subj = Gtk.Label(label=esc(post["subject"]), xalign=0, wrap=True)
+            subj = Gtk.Label(label=post["subject"], xalign=0, wrap=True)
             subj.add_css_class("heading")
             inner.append(subj)
         inner.append(self._message_block(post, heading=True))
@@ -543,6 +563,8 @@ class TeamsView(Adw.Bin):
                          tooltip_text=_("Reply"))
         send.add_css_class("flat")
         pid = post.get("id", "")
+        if pid:
+            self._reply_entries[pid] = reply_entry
         reply_entry.connect(
             "activate", lambda e, mid=pid: self._send_reply(mid, e))
         send.connect(
@@ -561,7 +583,7 @@ class TeamsView(Adw.Bin):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         sender = (msg.get("from", "") or _("Unknown")).strip()
-        name = Gtk.Label(label=esc(sender), xalign=0)
+        name = Gtk.Label(label=sender, xalign=0)
         name.add_css_class("caption-heading")
         head.append(name)
         if msg.get("sent"):
@@ -582,12 +604,11 @@ class TeamsView(Adw.Bin):
         if text or markup:
             body = Gtk.Label(label=text, xalign=0, wrap=True, selectable=True)
             body.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-            if markup:
-                try:
-                    body.set_markup(markup)
-                    body.connect("activate-link", self._on_link_activated)
-                except Exception:  # noqa: BLE001 - bad markup → plain text
-                    body.set_text(text)
+            # set_markup never raises on bad markup — it g_warns and leaves the
+            # label empty — so pre-validate and fall back to the plain text.
+            if markup and self._valid_markup(markup):
+                body.set_markup(markup)
+                body.connect("activate-link", self._on_link_activated)
             box.append(body)
 
         for att in msg.get("attachments", []) or []:
@@ -615,6 +636,18 @@ class TeamsView(Adw.Bin):
         return box
 
     @staticmethod
+    def _valid_markup(markup: str) -> bool:
+        # GtkLabel accepts <a href> but Pango's own parser doesn't, so validate
+        # with links mapped to <span> (same nesting) before trusting set_markup.
+        test = re.sub(r'(?i)<a\s+href="[^"]*">', "<span>", markup)
+        test = re.sub(r"(?i)</a>", "</span>", test)
+        try:
+            Pango.parse_markup(test, -1, "\x00")
+            return True
+        except GLib.GError:
+            return False
+
+    @staticmethod
     def _reply_quote(reply) -> Gtk.Widget:
         """A compact quote of the message a post/reply is answering: an accent
         bar, the quoted author and a one-line snippet."""
@@ -625,7 +658,7 @@ class TeamsView(Adw.Bin):
         box.append(bar)
         inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
         who = (reply.get("from") or "").strip() or _("Message")
-        wlbl = Gtk.Label(label=esc(who), xalign=0,
+        wlbl = Gtk.Label(label=who, xalign=0,
                          ellipsize=Pango.EllipsizeMode.END)
         wlbl.add_css_class("caption-heading")
         inner.append(wlbl)
@@ -883,7 +916,7 @@ class TeamsView(Adw.Bin):
         toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
                          margin_top=8, margin_bottom=8,
                          margin_start=16, margin_end=16)
-        title = Gtk.Label(label=esc(page["title"]), xalign=0, hexpand=True,
+        title = Gtk.Label(label=page["title"], xalign=0, hexpand=True,
                          wrap=True)
         title.add_css_class("title-3")
         toolbar.append(title)

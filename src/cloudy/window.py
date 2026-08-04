@@ -224,6 +224,17 @@ class CloudyWindow(Adw.ApplicationWindow):
     def _show_dashboard(self) -> None:
         from .widgets.dashboard_view import DashboardView
 
+        # Forget the account views we just replaced: with _account_shown left
+        # pointing at the last account, notifier pushes kept badging detached
+        # ViewStackPages and refreshing views no longer in the widget tree.
+        self._account_stack = None
+        self._tab_pages = {}
+        self._account_mail_view = None
+        self._account_chat_view = None
+        self._account_calendar_view = None
+        self._account_activity_view = None
+        self._account_shown = None
+
         header = Adw.HeaderBar()
         refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text=_("Refresh"))
         refresh.connect("clicked", lambda *_: self._refresh_overview())
@@ -334,7 +345,10 @@ class CloudyWindow(Adw.ApplicationWindow):
             self._last_tab[self._account_shown] = name
 
     def _show_disabled_account(self, account) -> None:
+        from .widgets.format import esc
+
         self._account_stack = None
+        self._tab_pages = {}  # the previous account's pages must not be badged
         self._account_mail_view = None
         self._account_chat_view = None
         self._account_calendar_view = None
@@ -342,7 +356,7 @@ class CloudyWindow(Adw.ApplicationWindow):
         self._account_shown = account.id
         status = Adw.StatusPage(
             icon_name="action-unavailable-symbolic",
-            title=_("%s is turned off") % account.display_name,
+            title=_("%s is turned off") % esc(account.display_name),
             description=_("Enable this account in Preferences → Accounts."),
         )
         header = Adw.HeaderBar()
@@ -483,6 +497,16 @@ class CloudyWindow(Adw.ApplicationWindow):
             remove_account_events_async(app, account.id)
         except Exception:  # noqa: BLE001 - EDS cleanup is best-effort
             pass
+        if self._account_shown == account.id:
+            # Stop notifier pushes from badging/refreshing the removed
+            # account's now-detached views.
+            self._account_stack = None
+            self._tab_pages = {}
+            self._account_mail_view = None
+            self._account_chat_view = None
+            self._account_calendar_view = None
+            self._account_activity_view = None
+            self._account_shown = None
         self.content_nav.pop_to_tag("welcome")
         self.add_toast(_("Removed %s.") % account.display_name)
 
@@ -521,8 +545,13 @@ class CloudyWindow(Adw.ApplicationWindow):
         if account.signed_in:
             status.set_description(_("No items to show yet."))
         else:
+            from .widgets.format import esc
+
+            # StatusPage descriptions are Pango markup — an '&' in the address
+            # would otherwise mangle/blank the text.
             status.set_description(
-                _("Sign in to %s to load your %s.") % (account.display_name, label.lower())
+                _("Sign in to %s to load your %s.") % (esc(account.display_name),
+                                                       esc(label.lower()))
             )
             button = Gtk.Button(label=_("Sign In"), halign=Gtk.Align.CENTER)
             button.add_css_class("pill")
