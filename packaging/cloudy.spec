@@ -13,7 +13,7 @@
 %global appid io.github.sha5b.Cloudy
 
 Name:           cloudy
-Version:        0.3.3
+Version:        0.3.4
 Release:        1%{?dist}
 Summary:        Use OneDrive, SharePoint and unified mail on your desktop
 
@@ -115,6 +115,13 @@ meson test -C %{_vpath_builddir} --print-errorlogs
 %{_datadir}/%{name}/
 
 %changelog
+* Tue Aug 04 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.3.4-1
+- Full-app stability audit: file-browser freezes on FUSE mounts fixed (async
+  open, mount-table cache, dead-mount detection), chat unread/badge coherence
+  (watermark read state, on-screen chat never badges, tombstones render,
+  failed sends survive), notifier poll guards, Google token-refresh lock and
+  per-message 404 tolerance, EDS publish locks.
+
 * Tue Jul 14 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.3.3-1
 - Chat system events render as status lines: member added (with shared-history note), removed, left, chat renamed, call started/ended.
 - Deleted chat messages keep a placeholder in the thread instead of vanishing.
