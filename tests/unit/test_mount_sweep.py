@@ -23,6 +23,19 @@ if gi_setup.AVAILABLE:
 
 from cloudy.core.account_registry import Account
 
+# files_view pulls modules.microsoft365.graph -> core.auth.msal_graph ->
+# `import msal`, an app runtime dep absent from a minimal RPM build chroot
+# (same skip pattern as test_graph.py / test_teams_channels.py).
+try:
+    from cloudy.modules.microsoft365.graph import Drive  # noqa: F401
+
+    _GRAPH_OK = True
+except ImportError:
+    _GRAPH_OK = False
+
+_graph_skip = unittest.skipUnless(_GRAPH_OK,
+                                  "msal not installed (graph import unavailable)")
+
 
 def _pump(ms: int = 400) -> None:
     from gi.repository import GLib
@@ -60,6 +73,7 @@ class _FakeWindow:
 
 
 @_skip
+@_graph_skip
 class TestMountSweep(unittest.TestCase):
     def test_upload_status_queries_scoped_remote_and_updates_row(self):
         Gtk.init_check()
