@@ -4,13 +4,18 @@
 
 import unittest
 
-from gi_setup import gi  # noqa: F401 - pins GI versions before import
+import gi_setup  # pins GI versions; exposes AVAILABLE
 
-from cloudy.core.eds_publish import _vevent
-from cloudy.widgets.event_view import _format_when, _ical_when
-from cloudy.widgets.month_grid import expand_days
+if gi_setup.AVAILABLE:
+    from cloudy.core.eds_publish import _vevent
+    from cloudy.widgets.event_view import _format_when, _ical_when
+    from cloudy.widgets.month_grid import expand_days
+
+_skip_gi = unittest.skipUnless(gi_setup.AVAILABLE,
+                               "GTK/Adw typelibs unavailable (headless build)")
 
 
+@_skip_gi
 class TestExpandDays(unittest.TestCase):
     WINDOW = ("2026-06-01", "2026-07-12")
 
@@ -53,6 +58,7 @@ class TestExpandDays(unittest.TestCase):
         self.assertEqual(expand_days({}, *self.WINDOW), [])
 
 
+@_skip_gi
 class TestEdsAllDayDtend(unittest.TestCase):
     def _dt(self, ev: dict) -> str:
         block = _vevent("uid-x", ev)
@@ -92,6 +98,7 @@ def _d(day: str) -> str:
     return _date.fromisoformat(day).strftime("%-d %b")
 
 
+@_skip_gi
 class TestFormatWhen(unittest.TestCase):
     """The event detail's 'when' line — multi-day spans now carry their end."""
 
@@ -134,6 +141,7 @@ class TestFormatWhen(unittest.TestCase):
         self.assertEqual(out, "2026-08-30 · 15:00")
 
 
+@_skip_gi
 class TestIcalWhen(unittest.TestCase):
     """The mail invite card's 'when' line — same multi-day treatment."""
 

@@ -10,15 +10,25 @@ this one *before* importing those, so discovery order can't break them.
 minimal RPM build chroot during ``%check``. gi-dependent test modules skip
 themselves in that case instead of erroring out (the pure-logic tests still run).
 No widgets are instantiated here, so no display/``init`` is needed.
+
+``CLOUDY_SKIP_GI=1`` forces ``AVAILABLE = False`` WITHOUT importing gi at all:
+packaged builds (the RPM spec's ``%check``) run in a display-less container
+where the typelibs exist but driving GTK can crash the interpreter outright
+(SIGSEGV), and ``%check`` only exists to validate the logic layer anyway.
 """
 
-import gi
+import os
 
-try:
-    gi.require_version("Gtk", "4.0")
-    gi.require_version("Adw", "1")
-    from gi.repository import Adw, Gtk  # noqa: F401
-
-    AVAILABLE = True
-except (ValueError, ImportError):
+if os.environ.get("CLOUDY_SKIP_GI") == "1":
     AVAILABLE = False
+else:
+    import gi
+
+    try:
+        gi.require_version("Gtk", "4.0")
+        gi.require_version("Adw", "1")
+        from gi.repository import Adw, Gtk  # noqa: F401
+
+        AVAILABLE = True
+    except (ValueError, ImportError):
+        AVAILABLE = False

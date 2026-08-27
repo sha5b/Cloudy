@@ -5,16 +5,21 @@ import unittest
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from gi_setup import gi  # noqa: F401 - pins GI versions before import
+import gi_setup  # pins GI versions; exposes AVAILABLE
 
-from cloudy.widgets import event_time
-from cloudy.widgets.event_time import (
-    iso_to_local_naive,
-    local_to_utc_iso,
-    parse_hhmm,
-)
+if gi_setup.AVAILABLE:
+    from cloudy.widgets import event_time
+    from cloudy.widgets.event_time import (
+        iso_to_local_naive,
+        local_to_utc_iso,
+        parse_hhmm,
+    )
+
+_skip_gi = unittest.skipUnless(gi_setup.AVAILABLE,
+                               "GTK/Adw typelibs unavailable (headless build)")
 
 
+@_skip_gi
 class TestParseHhmm(unittest.TestCase):
     def test_valid_time(self):
         self.assertEqual(parse_hhmm("14:30", (0, 0)), (14, 30))
@@ -24,6 +29,7 @@ class TestParseHhmm(unittest.TestCase):
         self.assertEqual(parse_hhmm("25:00", (9, 0)), (9, 0))
 
 
+@_skip_gi
 class TestIsoToLocalNaive(unittest.TestCase):
     def test_z_utc_converted_to_local(self):
         dt = iso_to_local_naive("2026-06-29T12:00:00Z")
@@ -39,6 +45,7 @@ class TestIsoToLocalNaive(unittest.TestCase):
         self.assertIsNone(iso_to_local_naive(""))
 
 
+@_skip_gi
 class TestLocalToUtcIso(unittest.TestCase):
     def test_all_day_uses_utc_midnight_of_picked_date(self):
         dt = datetime(2026, 6, 15, 22, 30)  # local wall-clock pick
@@ -55,6 +62,7 @@ class TestLocalToUtcIso(unittest.TestCase):
         self.assertIsNotNone(back.tzinfo)
 
 
+@_skip_gi
 class TestDstSafeConversion(unittest.TestCase):
     """local_to_utc_iso must use the offset of the TARGET date, not today's
     (a fixed offset drifted every save for the other DST half-year)."""

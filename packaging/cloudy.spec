@@ -90,6 +90,10 @@ meson compile -C %{_vpath_builddir}
 DESTDIR=%{buildroot} meson install -C %{_vpath_builddir} --skip-subprojects
 
 %check
+# Logic tests only: the CI container has the typelibs but no display, where
+# driving GTK from the test suite can crash the interpreter (SIGSEGV).
+# CLOUDY_SKIP_GI=1 makes gi-dependent tests skip instead of running.
+export CLOUDY_SKIP_GI=1
 # desktop/schema/metainfo (and blueprint, if the subproject is present) validators.
 meson test -C %{_vpath_builddir} --print-errorlogs
 
