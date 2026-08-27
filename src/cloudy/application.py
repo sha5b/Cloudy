@@ -155,6 +155,7 @@ class CloudyApplication(Adw.Application):
         self._add_target_action("notify-open-mail", self._on_notify_open_mail)
         self._add_target_action("notify-open-calendar", self._on_notify_open_calendar)
         self._add_target_action("notify-open-chat", self._on_notify_open_chat)
+        self._add_target_action("notify-open-teams", self._on_notify_open_teams)
         self._add_target_action("notify-join-meeting", self._on_notify_join_meeting)
 
     def _add_target_action(self, name, callback):
@@ -490,6 +491,17 @@ class CloudyApplication(Adw.Application):
                 window.open_calendar_event(account, event_id)
             else:
                 window.open_account_tab(account, "calendar")
+        window.present()
+
+    def _on_notify_open_teams(self, _action, param):
+        self.activate()
+        window = self.props.active_window
+        if window is None:
+            return
+        account_id, _sep, _channel = param.get_string().partition("\x1f")
+        account = self.registry.get(account_id)
+        if account is not None:
+            window.open_account_tab(account, "teams")
         window.present()
 
     def _on_notify_join_meeting(self, _action, param):

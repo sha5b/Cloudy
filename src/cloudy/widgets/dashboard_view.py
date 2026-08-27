@@ -224,7 +224,14 @@ class DashboardView(Adw.Bin):
                         messages.extend((account, m) for m in p_msgs)
                         pinned.append((account, p, detail))
                     elif p.get("kind") == "channel":
-                        item = self._channel_activity(client, p)
+                        # With a notifier watermark the row only shows when the
+                        # channel has something genuinely new; without one (no
+                        # sweep yet) it degrades to the show-latest behaviour.
+                        notifier = getattr(app, "notifier", None)
+                        last_seen = (notifier.channel_last_seen(
+                            account.id, p.get("id", ""))
+                            if notifier is not None else "")
+                        item = self._channel_activity(client, p, last_seen)
                         if item is not None:
                             activity.append((account, item))
                 # Recent chats (work/school Microsoft only): one cheap call with
@@ -307,18 +314,39 @@ class DashboardView(Adw.Bin):
             return "", [], []
 
     @staticmethod
-    def _channel_activity(client, pin):
+    def _channel_activity(client, pin, last_seen=""):
         """Fetch a starred channel's latest post as an Activity item, or None.
-        ``when`` is the post (or newest reply) timestamp so the feed sorts right."""
+        ``when`` is the post (or newest reply) timestamp so the feed sorts right.
+        System event rows ("Call started", membership changes) and deleted
+        tombstones are skipped — they're bookkeeping, not posts, and a system
+        row used to surface as the snippet. With a notifier watermark
+        (``last_seen``) the channel only contributes when something on the page
+        is genuinely newer; without one it keeps the show-latest behaviour."""
         try:
             posts, _next = client.list_channel_messages_page(
                 pin.get("team_id", ""), pin["id"], limit=5)
         except Exception:  # noqa: BLE001 - channel may be inaccessible
             return None
-        if not posts:
+        latest = next((p for p in reversed(posts)
+                       if not p.get("system") and not p.get("deleted")), None)
+        if latest is None:
             return None
-        latest = posts[-1]  # page is oldest-last, so the last entry is newest
-        replies = latest.get("replies") or []
+        # The channel's newest content anywhere on the page (root posts and
+        # replies) — the same shape the notifier watermarks, so the "newer
+        # than last seen" check agrees with what badged/bannered.
+        newest = None
+        for p in posts:
+            for r in [p] + list(p.get("replies") or ()):
+                if r.get("system") or r.get("deleted"):
+                    continue
+                if newest is None or _stamp_after(r.get("sent", ""), newest):
+                    newest = r.get("sent", "")
+        if newest is None:
+            return None
+        if last_seen and not _stamp_after(newest, last_seen):
+            return None  # nothing the user hasn't already seen
+        replies = [r for r in (latest.get("replies") or [])
+                   if not r.get("system") and not r.get("deleted")]
         tip = replies[-1] if replies else latest
         snippet = (latest.get("subject") or latest.get("text") or "").strip()
         return {
@@ -351,9 +379,9 @@ class DashboardView(Adw.Bin):
         self._set_badge("mail", data.get("unread", 0))
         self._set_badge("files", len(data.get("files", [])))
         self._set_badge("pinned", len(data.get("pinned", [])))
-        # Activity badge = unread chats only. Starred channels have no newness
-        # signal behind them (the feed holds just their latest post), so
-        # counting them would pin the badge above zero forever.
+        # Activity badge = unread chats only. Starred channel rows are gated
+        # by the notifier's watermark, but their *unread* count drives the
+        # Teams tab badge — counting the ephemeral gate here would flicker.
         self._set_badge("activity", _unread_chats(data.get("chats", [])))
         self._render_section()
         return False
@@ -844,8 +872,19 @@ class DashboardView(Adw.Bin):
 
 def _unread_chats(chats) -> int:
     """Chats carrying an unread marker — the Activity badge / "New chats" stat.
-    Starred channels don't count: there is no newness signal behind them."""
+    Starred channels don't count here: their unread signal is the Teams tab
+    badge (notifier.channel_unread_count), not the chat list."""
     return sum(1 for c in chats if c.get("unread"))
+
+
+def _stamp_after(when: str, mark: str) -> bool:
+    """Whether ``when`` is strictly newer than ``mark`` (a notifier channel
+    watermark). Parsed as UTC when possible — Graph's fractional-second digits
+    (``…12.345Z``) break raw lexical order against whole-second stamps."""
+    a, b = parse_iso_utc(when), parse_iso_utc(mark)
+    if a is not None and b is not None:
+        return a > b
+    return when > mark
 
 
 def _iso_sort_key(start: str):

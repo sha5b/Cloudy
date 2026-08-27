@@ -8,7 +8,7 @@ RSVP buttons for meeting invites, then the event description rendered as HTML.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from gettext import gettext as _
 
 from gi.repository import Adw, Gio, Gtk, Pango
@@ -271,17 +271,61 @@ def _meta_row(icon: str, text: str) -> Gtk.Widget:
     return row
 
 
+def _short_day(day: str) -> str:
+    """'30 Aug' — the conversational month style ``format.relative_time``
+    uses, so multi-day spans read native next to the rest of the app."""
+    try:
+        return date.fromisoformat(day).strftime("%-d %b")
+    except ValueError:
+        return day
+
+
+def _multi_day_end(start: str, end: str, all_day: bool) -> str:
+    """The inclusive last day of a multi-day event; '' when the event stays
+    within one day or the stamps don't parse.
+
+    Inputs are the normalized naive-local strings the calendar views use.
+    All-day events use date-only strings — Google's end is the inclusive last
+    day, but Graph's ends at the midnight AFTER the last covered day
+    (iCal-style exclusive), so those step back one day. The same convention
+    ``month_grid.expand_days`` applies when spreading chips."""
+    first, last = (start or "")[:10], (end or "")[:10]
+    try:
+        d_first, d_last = date.fromisoformat(first), date.fromisoformat(last)
+    except ValueError:
+        return ""
+    if (all_day and d_last > d_first
+            and (end or "").partition("T")[2][:8] == "00:00:00"):
+        d_last -= timedelta(days=1)  # Graph's exclusive midnight END convention
+    return d_last.isoformat() if d_last > d_first else ""
+
+
+def _span_when(first: str, last: str, start_t: str, end_t: str) -> str:
+    """'30 Aug, 15:00 – 31 Aug, 09:00' — both days spelled out because the
+    times belong to different days."""
+    return _("%(day)s, %(from)s – %(end_day)s, %(to)s") % {
+        "day": _short_day(first), "from": start_t,
+        "end_day": _short_day(last), "to": end_t}
+
+
 def _format_when(start: str, end: str, all_day: bool) -> str:
     if not start:
         return ""
-    if "T" not in start:
-        return start
-    date, _sep, rest = start.partition("T")
+    first, has_time = start[:10], "T" in start
+    last = _multi_day_end(start, end, all_day)
+    if not has_time:
+        # Date-only (Google all-day) stamps: bare start on a single day, the
+        # pretty span when the event covers several.
+        return f"{_short_day(first)} – {_short_day(last)}" if last else start
     if all_day:
-        return _("%s · All day") % date
-    start_t = rest[:5]
+        if last:
+            return _("%s – %s · All day") % (_short_day(first), _short_day(last))
+        return _("%s · All day") % first
+    start_t = start.partition("T")[2][:5]
     end_t = end.partition("T")[2][:5] if end and "T" in end else ""
-    return f"{date} · {start_t}–{end_t}" if end_t else f"{date} · {start_t}"
+    if last:  # crosses midnight — spell out both days ("Aug 30, 15:00 – …")
+        return _span_when(first, last, start_t, end_t)
+    return f"{first} · {start_t}–{end_t}" if end_t else f"{first} · {start_t}"
 
 
 def _ical_dt(value: str) -> datetime | None:
@@ -304,12 +348,21 @@ def _ical_when(dtstart: str, dtend: str, all_day: bool) -> str:
     start = _ical_dt(dtstart)
     if start is None:
         return ""
-    date = start.strftime("%Y-%m-%d")
-    if all_day:
-        return _("%s · All day") % date
+    first = start.strftime("%Y-%m-%d")
     end = _ical_dt(dtend)
+    end_day = end.date() if end is not None else None
+    if all_day:
+        # RFC 5545: a DATE DTEND is the day AFTER the last covered day.
+        if end_day is not None and end_day > start.date():
+            end_day -= timedelta(days=1)
+        if end_day is not None and end_day > start.date():
+            return _("%s – %s · All day") % (
+                _short_day(first), end_day.strftime("%-d %b"))
+        return _("%s · All day") % first
     start_t = start.strftime("%H:%M")
     if end is None:
-        return f"{date} · {start_t}"
+        return f"{first} · {start_t}"
     end_t = end.strftime("%H:%M")
-    return f"{date} · {start_t}–{end_t}"
+    if end.date() > start.date():
+        return _span_when(first, end.strftime("%Y-%m-%d"), start_t, end_t)
+    return f"{first} · {start_t}–{end_t}"

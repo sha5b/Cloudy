@@ -11,6 +11,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (second wave)
+- **Teams channel notifications**: starred channels are polled for new posts
+  (watermarked, muted channels respected) — a banner deep-links to the Teams
+  tab via a new `app.notify-open-teams` action, and the tab carries a new-post
+  badge that clears when you read the channel.
+- **Chat**: search hits jump to the message; "(edited)" markers; reactions can
+  be toggled off.
+- **Privacy**: the mail reader blocks remote images by default with a
+  per-message "Load images" banner (cid:/data: images always render).
+- **Auth**: Google sign-in enforces a per-flow OAuth `state` (mismatches get a
+  403 and never exchange a code), and concurrent sign-ins can no longer
+  cross-contaminate their redirect results.
+
+### Fixed (second wave)
+- **Mail live refresh keeps pagination**: page 1 merges into the loaded list
+  ("Load older" pages, cursor, selection and scroll all survive) instead of
+  collapsing back to page 1.
+- **Calendar multi-day events show their full span** ("30 Aug – 2 Sep · All
+  day", "30 Aug, 15:00 – 31 Aug, 09:00") in event details and invite cards,
+  with provider-correct end-date handling; single-day output unchanged.
+- **OneNote drafts survive navigation**: the page editor moved from the
+  fragile inline swap into a non-modal window; failed saves keep the draft
+  for retry, and saving refreshes the section only if still on screen.
+- **Dashboard channel snippets** no longer surface system events ("Call
+  started") as the latest post, and only genuinely-new posts count.
+
 ### Added (safe test harness)
 - **Headless UI sweep suite** (`tests/unit/test_chat_sweep.py`,
   `test_mount_sweep.py`): drives the real Chat and Files views against a fake

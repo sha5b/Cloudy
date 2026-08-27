@@ -43,6 +43,23 @@ def _oneline(text: str) -> str:
     return _WS_RE.sub(" ", text or "").strip()
 
 
+def _merge_message_pages(existing: list, fresh: list) -> list:
+    """Merge a freshly-fetched newest page into the loaded list by id.
+
+    A live refresh only holds page 1, so replacing the list wholesale would
+    drop every older message already paged in (the visible list snapped back
+    to page one and the pagination cursor reset). The fresh page is
+    authoritative for its own window — its copies replace the cached ones and
+    brand-new mail lands on top — while cached mail older than the page's
+    oldest entry is kept. Same semantics as chat_view._merge_chat_pages."""
+    window_end = fresh[-1].get("received", "") if fresh else ""
+    page_ids = {m.get("id") for m in fresh}
+    older = [m for m in existing
+             if m.get("id") not in page_ids
+             and (m.get("received", "") or "") <= window_end]
+    return list(fresh) + older
+
+
 class MailView(Adw.Bin):
     __gtype_name__ = "CloudyMailView"
 
@@ -559,17 +576,11 @@ class MailView(Adw.Bin):
             # Merge the fresh newest page into the cached list instead of
             # replacing it: "Load older" pages live in the cache too, and a
             # live refresh used to clobber them (the visible list snapped back
-            # to page one and the pagination cursor reset). The page is
-            # authoritative for its own window; older cached mail is kept.
+            # to page one and the pagination cursor reset).
             cache = self._window.get_application().cache
             key = f"{self._account.id}:messages:{folder_id}"
             cached = cache.get(key)
-            base = list(cached[0]) if cached else []
-            page_ids = {m.get("id") for m in messages}
-            window_end = messages[-1].get("received", "") if messages else ""
-            older = [m for m in base if m.get("id") not in page_ids
-                     and (m.get("received", "") or "") <= window_end]
-            merged = messages + older
+            merged = _merge_message_pages(list(cached[0]) if cached else [], messages)
             cache.set(key, merged)
             if not stale:
                 # Adopt the page cursor only when no older pages are held —
@@ -584,6 +595,15 @@ class MailView(Adw.Bin):
         return False
 
     def _render(self, messages) -> None:
+        # A live-refresh re-render (the page-1 merge) must not move the list:
+        # anchor the scroll by its distance from the BOTTOM, so rows prepended
+        # above the viewport push it down instead of shuffling what's on
+        # screen (the same trick teams_view's conversation render uses). At
+        # the top (newest mail) there's nothing to hold — new messages should
+        # appear. First renders (`_has_data` False) always start at the top.
+        adj = self._list_scroll.get_vadjustment()
+        anchor = (None if not self._has_data or adj.get_value() < 48
+                  else adj.get_upper() - adj.get_value())
         if self._more_row is not None:
             self._list.remove(self._more_row)
             self._more_row = None
@@ -613,6 +633,15 @@ class MailView(Adw.Bin):
         self._messages_by_id = {m["id"]: m for m in messages}
         self._has_data = True
         self._sync_more_row()
+        if anchor is not None:
+            # After the next layout pass grows the list, put the viewport back
+            # the same distance from the bottom.
+            GLib.idle_add(self._restore_scroll, anchor)
+
+    def _restore_scroll(self, anchor: float) -> bool:
+        adj = self._list_scroll.get_vadjustment()
+        adj.set_value(max(0.0, adj.get_upper() - anchor))
+        return False
 
     # -- pagination ("Load older messages") -------------------------------
     def _sync_more_row(self) -> None:

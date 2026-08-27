@@ -92,6 +92,31 @@ class TestComposeHtml(unittest.TestCase):
 
 
 @_skip
+class TestMessageSignature(unittest.TestCase):
+    """_msg_sig feeds the adaptive poll — an edit flip must change it so the
+    stale bubble is rebuilt, while an identical message must not."""
+
+    @staticmethod
+    def _m(**extra):
+        base = {"id": "m1", "text": "hi", "attachments": [], "reactions": []}
+        base.update(extra)
+        return base
+
+    def test_edit_flip_changes_signature(self):
+        self.assertNotEqual(ChatView._msg_sig(self._m(edited=True)),
+                            ChatView._msg_sig(self._m(edited=False)))
+
+    def test_same_message_same_signature(self):
+        self.assertEqual(ChatView._msg_sig(self._m(edited=True)),
+                        ChatView._msg_sig(self._m(edited=True)))
+
+    def test_reaction_count_change_changes_signature(self):
+        self.assertNotEqual(
+            ChatView._msg_sig(self._m(reactions=[{"emoji": "👍", "count": 1}])),
+            ChatView._msg_sig(self._m(reactions=[{"emoji": "👍", "count": 2}])))
+
+
+@_skip
 class TestMergeChatPages(unittest.TestCase):
     def test_fresh_page_keeps_paged_in_older_chats(self):
         # A background refresh only holds page 1 — merging (not replacing)

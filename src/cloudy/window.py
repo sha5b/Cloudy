@@ -286,6 +286,9 @@ class CloudyWindow(Adw.ApplicationWindow):
             self._set_tab_badge("chat", notifier.chat_unread_count(account.id))
             self._set_tab_badge("calendar",
                                 notifier.pending_invites_count(account.id))
+            if hasattr(notifier, "channel_unread_count"):
+                self._set_tab_badge("teams",
+                                    notifier.channel_unread_count(account.id))
 
         # Re-open on the tab the user last left for this account.
         remembered = self._last_tab.get(account.id)

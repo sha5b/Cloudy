@@ -16,6 +16,7 @@ read-while-hidden, tombstone un-hiding, search-row leaks — plus render-time
 ceilings as freeze guards.
 """
 
+import copy
 import io
 import time
 import unittest
@@ -132,6 +133,8 @@ class FakeChatClient:
         self.hits = []
         self.marked_read = []
         self.reactions = []
+        self.unsets = []
+        self.fail_unset = False
         self.deleted = []
         self.edits = []
         self.sends = []
@@ -150,10 +153,13 @@ class FakeChatClient:
 
     # -- thread ---------------------------------------------------------
     def list_chat_messages_page(self, chat_id, *, limit=30, page_token=None):
+        # Deep-copy: the view mutates its cached message dicts in place
+        # (optimistic reactions), and a real server boundary never sees those
+        # writes — without the copy, optimistic edits would "stick" server-side.
         if page_token:
             older = self.older.get(chat_id)
-            return (list(older[0]), older[1]) if older else ([], None)
-        return list(self.pages.get(chat_id, [])), \
+            return (copy.deepcopy(older[0]), older[1]) if older else ([], None)
+        return copy.deepcopy(self.pages.get(chat_id, [])), \
             "older-token" if chat_id in self.older else None
 
     def send_chat_message(self, chat_id, text):
@@ -187,6 +193,11 @@ class FakeChatClient:
 
     def set_reaction(self, chat_id, message_id, emoji):
         self.reactions.append((chat_id, message_id, emoji))
+
+    def unset_reaction(self, chat_id, message_id, emoji):
+        if self.fail_unset:
+            raise RuntimeError("Graph 404 (fake unset)")
+        self.unsets.append((chat_id, message_id, emoji))
 
     def delete_chat_message(self, chat_id, message_id):
         self.deleted.append((chat_id, message_id))
@@ -499,6 +510,94 @@ class TestChatThreadSweep(_ChatSweepBase):
                 if isinstance(r, Gtk.ListBoxRow)]
         self.assertNotIn("hit:m9", keys)
         self.assertIn("c1", keys)
+
+    def test_search_hit_jumps_to_that_message(self):
+        self.client.chats_page1 = [_chat("c1", "Ann Peak")]
+        self.client.pages["c1"] = [_msg("m1", "first message"),
+                                   _msg("m3", "the needle lives here")]
+        self.client.hits = [{"chat_id": "c1", "message_id": "m3",
+                             "from": "Ann", "snippet": "the needle lives here",
+                             "sent": "2026-08-20T10:00:00Z"}]
+        self._reload_chats()
+        self.view._search.set_text("needle")
+        _pump(700)  # debounce + server search
+        row = next(r for r in _walk(self.view._list)
+                   if isinstance(r, Gtk.ListBoxRow)
+                   and getattr(r, "_patch_key", None) == "hit:m3")
+        # Activating the hit opens the chat AND lands on the hit's message via
+        # the pending-scroll machinery (flushed after the thread renders).
+        with unittest.mock.patch.object(self.view, "_scroll_to_message") as scroll:
+            self.view._on_chat_activated(None, row)
+            _pump(600)  # thread load + the 200ms flush timeout
+        scroll.assert_called_once_with("m3")
+        self.assertIsNone(self.view._pending_scroll_mid)  # consumed, one-shot
+
+    def test_edited_message_renders_indicator(self):
+        self.client.chats_page1 = [_chat("c1", "Ann")]
+        self.client.pages["c1"] = [
+            _msg("m1", "plain"),
+            _msg("m2", "fixed a typo", edited=True),
+        ]
+        self._reload_chats()
+        self.view.open_chat("c1")
+        _pump()
+        labels = [w.get_text() for w in _walk(self.view._thread)
+                  if isinstance(w, Gtk.Label)]
+        self.assertIn("(edited)", labels)  # dim caption beside m2's timestamp
+        # Only the edited bubble carries it.
+        self.assertEqual(labels.count("(edited)"), 1)
+
+    def test_reaction_toggle_unsets_own_reaction(self):
+        self.client.chats_page1 = [_chat("c1", "Ann")]
+        self.client.pages["c1"] = [
+            _msg("m1", "react to me", reactions=[{"emoji": "👍", "count": 2}]),
+            _msg("m2", "no reactions yet"),
+        ]
+        self._reload_chats()
+        self.view.open_chat("c1")
+        _pump()
+
+        def pills():
+            return [w.get_text() for w in _walk(self.view._thread)
+                    if isinstance(w, Gtk.Label)
+                    and "cloudy-reaction" in w.get_css_classes()]
+
+        # The message already carries 👍 → the popover click UNSETS (toggle).
+        m1 = next(m for m in self.view._cached_messages("c1")
+                  if m.get("id") == "m1")
+        self.view._react(m1, "👍")
+        _pump(300)
+        self.assertEqual(self.client.unsets, [("c1", "m1", "👍")])
+        self.assertEqual(self.client.reactions, [])
+        # count decremented optimistically (2→1 renders as the bare emoji)
+        self.assertEqual(pills(), ["👍"])
+
+        # A message without the emoji still SETS it.
+        m2 = next(m for m in self.view._cached_messages("c1")
+                  if m.get("id") == "m2")
+        self.view._react(m2, "❤️")
+        _pump(300)
+        self.assertEqual(self.client.reactions, [("c1", "m2", "❤️")])
+        self.assertIn("❤️", pills())
+
+    def test_failed_unset_rolls_back_the_pill(self):
+        self.client.chats_page1 = [_chat("c1", "Ann")]
+        self.client.pages["c1"] = [
+            _msg("m1", "react to me", reactions=[{"emoji": "👍", "count": 3}]),
+        ]
+        self._reload_chats()
+        self.view.open_chat("c1")
+        _pump()
+        self.client.fail_unset = True
+        m1 = next(m for m in self.view._cached_messages("c1")
+                  if m.get("id") == "m1")
+        self.view._react(m1, "👍")
+        _pump(400)  # optimistic decrement, then the error reload
+        pills = [w.get_text() for w in _walk(self.view._thread)
+                 if isinstance(w, Gtk.Label)
+                 and "cloudy-reaction" in w.get_css_classes()]
+        self.assertIn("👍 3", pills)  # server truth restored
+        self.assertTrue(any("Couldn't react" in t for t in self.window.toasts))
 
     def test_scroll_state_derivation(self):
         adj = self.view._thread_scroll.get_vadjustment()

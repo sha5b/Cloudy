@@ -116,16 +116,16 @@ A first attempt stopped poll/presence timers on `unrealize`, but `Adw.ViewStack`
 
 ## Biggest remaining wins — NOT done (architectural; need GUI/live-API testing, get sign-off)
 1. ~~**Lazy view construction**~~ — done (`window._build_tab`).
-2. **Gmail inbox is a serial N+1** (`google_client.list_messages_page`): one blocking GET per message. Parallelize with a ThreadPoolExecutor (pattern in `list_events`) or use the Gmail batch endpoint.
+2. ~~**Gmail inbox is a serial N+1**~~ — verified already parallelized at e7c7206 (ThreadPoolExecutor ≤8, order-preserving; regression-tested under random latency).
 3. **Image decode on the main thread** in chat/teams `done()` callbacks and `message_view.html_body_widget` (inline-image shrink+re-encode) — move decode into the worker thread.
 4. **Shared-helper dedup**: one image `texture_from_bytes` (4 copies: media_window/rich_editor/teams_view/chat_view), one `_attachment_chip` (2), one `_reply_quote` (2) — extract to a shared module.
-5. **Mail `refresh_live` collapses pagination**. (The Files nav race and the unbounded FUSE-folder render are fixed — see `_on_children`'s folder tag and `_RENDER_CAP`.)
+5. ~~**Mail `refresh_live` collapses pagination**~~ — FIXED (2026-08-27 second wave): page-1 merge via `_merge_message_pages`, cursor survives, scroll anchored.
 
 ---
 
 ## Known, deliberately NOT fixed (need live-API verification)
-- **Calendar display does not show an end date for multi-day / all-day spans.** `_format_when` prints only the start day. Cross-provider (MS + Google) change — must be tested against the live API before touching.
-- **Mail `refresh_live` collapses pagination**: a live refresh re-renders only page 1, discarding loaded "Load older" pages and resetting scroll.
+- ~~**Calendar display does not show an end date for multi-day spans**~~ — FIXED (second wave): `_format_when`/`_ical_when` render "30 Aug – 2 Sep · All day" / "30 Aug, 15:00 – 31 Aug, 09:00" style spans, provider-normalized; single-day output unchanged. Still worth a live eyeball.
+- ~~**Mail `refresh_live` collapses pagination**~~ — FIXED (second wave, see above).
 - ~~Files `_load`/`_toggle_expand` race; unbounded render~~ — fixed. `_scan` itself is still unbounded for a folder with very many entries (the *render* is capped, the directory read is not).
 - **Google Shared Drives UNTESTED on a real Workspace account** (user has only personal Google): `MountManager.list_google_shared_drives` spins a throwaway rclone `drive` remote and parses `rclone backend drives` JSON — the JSON shape + Shared Drives path need a Workspace account to confirm. Shared-with-me is testable on personal. Shared Drives only appear *after* the user has mounted something once (an rclone token must already exist; the app holds no Google Drive OAuth scope).
 
@@ -150,19 +150,20 @@ A first attempt stopped poll/presence timers on `unrealize`, but `Adw.ViewStack`
 
 ## Open bug backlog (from the full-app audit — triaged, NOT yet fixed)
 
-**Security / privacy (needs a deliberate decision — behavior change):**
-- **Google OAuth has no `state` parameter** (`core/auth/google_oauth.py`) — CSRF / auth-code-injection gap (PKCE covers token exchange, not session binding). Add a random `state`, validate on redirect.
-- **Google OAuth stores `code`/`error` on the _class_, not the instance** — two concurrent Google sign-ins race and cross-contaminate. Move result state onto the per-flow `HTTPServer` instance.
-- **OAuth loopback binds `127.0.0.1` but `redirect_uri` says `localhost`** — Google treats these as distinct, and `localhost` may resolve to IPv6 `::1`; can hang/fail sign-in. Use the same literal for both.
-- **Mail reader loads remote content** (`message_view.py`) — only JS disabled; external images load → tracking-pixel/IP leak on open. Consider blocking remote resources by default with a "load remote images" opt-in.
+**Security / privacy:**
+- ~~Google OAuth has no `state` parameter~~ — FIXED (2026-08-27 second wave): random per-flow state, in-handler 403 rejection + fail-closed check, injected codes never exchanged.
+- ~~Google OAuth stores `code`/`error` on the class~~ — FIXED: results live on the per-flow `HTTPServer` instance.
+- ~~OAuth loopback binds `127.0.0.1` but `redirect_uri` says `localhost`~~ — FIXED/verified: both use the literal `127.0.0.1`.
+- ~~Mail reader loads remote content~~ — FIXED: remote images/CSS blocked by default; per-message "Load images" banner in the reader (cid:/data: always render).
+- ⚠️ **Rotate the Google client secret** (it was pasted in chat during setup) — a Google Cloud Console action, not a code fix.
 
-**Correctness (safe to fix, not done):**
-- **No `@odata.nextLink` pagination** in `graph.py` for folders, groups, contacts, drives (OneNote and `calendarView` now paginate) — accounts with >`$top` items silently truncate. Loop on `@odata.nextLink`.
+**Correctness:**
+- ~~No `@odata.nextLink` pagination in `graph.py`~~ — verified FIXED at e7c7206 (all listings route through `_get_all`; `list_chat_members` joined them in the second wave).
 - ~~Mount success/failure mis-detected~~ — fixed earlier by `_await_mount` (polls the mount table after the `--daemon` fork).
 - ~~`recent_changes` inner-directory bounding~~ — verified already fixed (deadline/count checked inside the filenames loop; only a stuck `readdir` is uninterruptible, as documented).
 - ~~`respond_event` only blocks `group:` ids~~ — verified fixed (current code routes `shared:` via `/users/{address}/events/...`).
-- **Google `reply_all` drops CC/other recipients** (`google_client.py`) — only replies to the original sender even when `reply_all=True`.
-- **Unbounded dedup growth** (`notifications.py`) — `_seen_mail` / `_notified_events` only ever grow; cap/trim (matters in background mode).
+- ~~Google `reply_all` drops CC/other recipients~~ — verified FIXED at e7c7206 (To = sender + original To, Cc kept, deduped, self excluded; regression-tested).
+- **Unbounded dedup growth** (`notifications.py`) — `_seen_mail` / `_notified_events` only ever grow; `_trim_set` caps now exist, audit again if background mode long-runs matter.
 
 **Low / robustness:** `create_share_link` hardcodes `scope:"organization"` (invalid for consumer OneDrive); Google `get_event` `body_html` heuristic (`"<" in s and ">" in s`) false-positives plain text; cid-image strip regex in `message_view.py` over-matches on `>` in attribute values and misses unquoted `src=cid:`; `file_browser` rename/new-folder accept names with `/`/`..` (path traversal within the browser); EDS publish builds a bare `VEVENT` with a likely-wrong parent UID so may never publish.
 
@@ -173,6 +174,17 @@ A first attempt stopped poll/presence timers on `unrealize`, but `Adw.ViewStack`
 ---
 
 ## Changelog (reverse-chronological)
+
+### Second wave — open-items pass (2026-08-27)
+Closes everything actionable from the audit's open list. `make test` 4/4, **360 unit tests**, lint + ruff clean, headless instantiate smoke green. Not yet eyeballed in the GUI.
+- **Teams channel notifications (new)**: the notifier sweeps starred channels every ~240 s (one newest-page request per channel, in-flight guarded, MS work accounts only), watermarks the newest content row (roots + replies; system/deleted skipped) under `channel-seen:{account}` in the cache, and on a newer post from someone else badges the **Teams tab** (`window.set_account_channel_unread`, seeded on account show) and emits a NORMAL banner deep-linking via the new `app.notify-open-teams` action. Muted channels (`kind:"channel"` mutes) suppress banner + badge but still advance the watermark. Opening a channel in the Teams view calls `notifier.mark_channel_read` + `note_channel_seen` (root+replies newest), so on-screen reading clears the badge. Digest batching includes channel posts. Dashboard `_channel_activity` skips system/tombstone snippets and gates on the watermark.
+- **OneNote editor is a non-modal `EditorWindow`** (`NoteEditorWindow` in teams_view): navigation can no longer destroy a draft; Save PATCHes with the ids captured at open and reloads the section only if still on screen; failed saves keep the window open for retry.
+- **Mail**: `refresh_live` merges page 1 (`_merge_message_pages`) instead of collapsing "Load older" pages — cursor survives, scroll anchored, selection kept; the reader **blocks remote images by default** (cid:/data: always render) with a per-message "Load images" `Adw.Banner` (pop-out window gets it free).
+- **Calendar**: multi-day events show their span ("30 Aug – 2 Sep · All day" / "30 Aug, 15:00 – 31 Aug, 09:00"; `_format_when`/`_ical_when`, provider-normalized end handling, single-day output unchanged).
+- **Chat parity**: search hits jump to the message (`_pending_scroll_mid`); "(edited)" indicator (`lastEditedDateTime` → row flag → footer caption, in `_msg_sig`); reaction **un-react** toggle (`unset_reaction` + optimistic pill removal with rollback).
+- **Auth hardening**: Google OAuth `state` enforced in-handler (403 + fail-closed; injected codes never exchanged), per-flow result storage verified, `127.0.0.1` literal on both sides verified; 12 new tests.
+- **Verified already-fixed at e7c7206** (tests added, notes updated): `_get_all` pagination everywhere (plus `list_chat_members` now paginates), Google `reply_all` CC semantics, Gmail N+1 parallelization.
+- Tests 271 → 360 (`test_google_oauth`, `test_channel_notify`, `test_mail_sweep`, `test_message_view` blocking, calendar-span formatting, graph pagination/reactions, chat sweep extensions).
 
 ### Headless UI sweep harness (2026-08-27, same day)
 `tests/unit/test_chat_sweep.py` (13 tests) + `test_mount_sweep.py` (2): drive the **real ChatView/FilesView** headlessly against a `FakeChatClient` injected via the app's per-account client cache (`app.set_account_client`) and a simulated `MountState` snapshot — no network, no real chats, no real mounts. `_pump()` runs a short GLib main loop so `run_async` results deliver; the view must be parented in a `Gtk.Window` or the caller-root guard drops every callback. Covers list kinds/sections/presence/unread, every message shape (links, markup, reply/forward quotes, images, reactions, system rows, tombstones), send→adopt-by-id, failed-send cross-chat guard, composer clearing, load-older ordering, read-ack mapping, scroll state derivation, search keying, and render-time ceilings. **Two bugs it caught, both fixed**: (1) the "Loading chats…" placeholder row survived `patch_listbox` forever on a cold cache (`_render_filtered` now drops unkeyed rows); (2) a message delivered while the Chat tab was hidden was never acked even after returning to the tab (identical-content polls are signature no-ops) — `_on_mapped` now acks the backlog.

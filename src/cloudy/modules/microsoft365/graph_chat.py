@@ -400,15 +400,21 @@ class GraphChatMixin:
         self._post(f"/chats/{chat_id}/messages/{message_id}/setReaction",
                    {"reactionType": emoji}, SCOPES_CHAT)
 
+    def unset_reaction(self, chat_id: str, message_id: str, emoji: str) -> None:
+        """Remove one of YOUR emoji reactions from a chat message (the toggle
+        partner of :meth:`set_reaction` — same request shape, unsetReaction)."""
+        self._post(f"/chats/{chat_id}/messages/{message_id}/unsetReaction",
+                   {"reactionType": emoji}, SCOPES_CHAT)
+
     def list_chat_members(self, chat_id: str) -> list[dict]:
         """Members of a chat as ``[{id, name, membership_id, email}]``.
 
         Source for @mentions, presence and the people roster; ``membership_id``
         (the conversationMember id, distinct from the AAD user id) is what
         :meth:`remove_chat_member` deletes."""
-        data = self._get(f"/me/chats/{chat_id}/members", SCOPES_CHAT)
+        data = self._get_all(f"/me/chats/{chat_id}/members", SCOPES_CHAT)
         out = []
-        for m in data.get("value", []):
+        for m in data:
             uid, name = m.get("userId"), m.get("displayName", "")
             if uid and name:
                 out.append({

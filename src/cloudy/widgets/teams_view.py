@@ -19,12 +19,14 @@ from __future__ import annotations
 
 import html
 import re
+import weakref
 from gettext import gettext as _
 
 from gi.repository import Adw, Gdk, GLib, Gtk, Pango
 
 from ..core.auth.msal_graph import SCOPES_CHANNELS
 from ..modules.microsoft365.graph_markup import html_to_pango, strip_html
+from .editor_window import EditorWindow
 from .format import esc, relative_time
 from .imaging import shrink_image_bytes, texture_from_png_bytes
 from .source_nav import (
@@ -48,6 +50,108 @@ from .source_nav import (
 _TEAMS_SCOPE_HINT = _(
     "Cloudy needs extra permissions for teams and channels — "
     "sign out and back in to grant them.")
+
+
+class NoteEditorWindow(EditorWindow):
+    """OneNote page editor — its own non-modal window (the repo-wide
+    editor-surface convention), never an inline Notes-pane form.
+
+    The inline form used to be swapped into ``_page_content``, so opening any
+    other channel/section while editing destroyed it — and the draft with it.
+    The window instead captures everything Save needs at open time (team,
+    section, page id, original title), so a mid-edit navigation changes
+    nothing: Save PATCHes the captured ids and the post-save reload is guarded
+    by :meth:`TeamsView._on_note_saved`. ``page=None`` creates a new page in
+    the captured section."""
+
+    def __init__(self, view, page, content_html: str = ""):
+        original_title = "" if page is None else (page.get("title") or "")
+        super().__init__(view._window,
+                         title=original_title or _("New page"),
+                         primary_label=_("Save"))
+        self._view = weakref.ref(view)  # the window can outlive the view
+        self._main_window = view._window
+        self._account = view._account
+        self._app = (view._window.get_application()
+                     if hasattr(view._window, "get_application") else None)
+        self._team_id = view._team_id
+        self._section_id = view._section_id
+        self._page = page
+        self._original_title = original_title
+
+        from .message_view import _to_text  # plain-text fold of the page HTML
+        from .rich_editor import RichTextEditor
+
+        self._title_entry = Gtk.Entry(
+            hexpand=True, placeholder_text=_("Page title"), text=original_title)
+        self._editor = RichTextEditor()
+        if page is not None and content_html:
+            # The editor seeds from plain text, so existing formatting is not
+            # preserved on edit (a known v1 limitation noted to the user).
+            try:
+                self._editor.set_plain_text(_to_text(content_html).strip())
+            except Exception:  # noqa: BLE001
+                pass
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self._title_entry.set_margin_top(8)
+        self._title_entry.set_margin_bottom(8)
+        self._title_entry.set_margin_start(12)
+        self._title_entry.set_margin_end(12)
+        box.append(self._title_entry)
+        box.append(Gtk.Separator())
+        self._editor.set_margin_top(8)
+        self._editor.set_margin_bottom(8)
+        self._editor.set_margin_start(12)
+        self._editor.set_margin_end(12)
+        self._editor.set_vexpand(True)
+        box.append(self._editor)
+        self.set_body(box)
+        self.connect("map", lambda *_a: self._title_entry.grab_focus())
+
+    # -- save --------------------------------------------------------------
+    def on_primary(self) -> None:
+        title = self._title_entry.get_text().strip() or _("Untitled page")
+        try:
+            body_html, _imgs = self._editor.get_html()
+        except Exception:  # noqa: BLE001 - fall back to plain text on editor error
+            body_html = esc(self._editor.get_plain_text())
+        page_id = None if self._page is None else self._page.get("id")
+        original_title = self._original_title
+        team_id, section_id = self._team_id, self._section_id
+        app, account = self._app, self._account
+
+        def work():
+            from .clients import build_account_client
+
+            client = build_account_client(app, account)
+            if page_id is None:
+                client.create_note_page(team_id, section_id, title, body_html)
+            else:
+                client.update_note_page(team_id, page_id, body_html,
+                                        title=title,
+                                        original_title=original_title)
+            return True
+
+        self.primary_btn.set_sensitive(False)
+        self.toast(_("Saving…"))
+        run_async(work, lambda _r, err: self._on_saved(err))
+
+    def _on_saved(self, error) -> bool:
+        if error is not None:
+            # Keep the window (and the draft) open for a retry.
+            self.primary_btn.set_sensitive(True)
+            self.toast(_("Couldn't save: %s") % friendly_error(error))
+            return False
+        self._main_window.add_toast(_("Saved — it may take a moment to appear"))
+        self.close()
+        # Refresh the section only when the view still shows it. The view can
+        # be gone entirely (account removed while the editor was open), so go
+        # through the weakref and the GTK rooting, never a strong capture.
+        view = self._view()
+        if view is not None and view.get_root() is not None:
+            view._on_note_saved(self._team_id, self._section_id)
+        return False
 
 
 class TeamsView(Adw.Bin):
@@ -565,6 +669,25 @@ class TeamsView(Adw.Bin):
         merged = self._merge_posts(self._cached_posts(), posts)
         self._cache.set(self._conv_key(), merged)
         self._render_posts(merged)
+        # Reading the channel clears its new-post badge and advances the
+        # notifier's watermark (same content-row shape it watermarks: root
+        # posts and replies, system/deleted rows skipped).
+        notifier = getattr(self._window.get_application(), "notifier", None)
+        if notifier is not None and hasattr(notifier, "mark_channel_read"):
+            newest = ""
+            for p in merged:
+                if p.get("system") or p.get("deleted"):
+                    continue
+                rows = [p, *(p.get("replies") or [])]
+                for r in rows:
+                    if r.get("system") or r.get("deleted"):
+                        continue
+                    sent = r.get("sent", "") or ""
+                    if sent > newest:
+                        newest = sent
+            notifier.mark_channel_read(self._account.id, channel_id)
+            if newest:
+                notifier.note_channel_seen(self._account.id, channel_id, newest)
         return False
 
     def _render_posts(self, posts) -> None:
@@ -1288,93 +1411,24 @@ class TeamsView(Adw.Bin):
             return
         self._edit_page(None, "")
 
-    def _edit_page(self, page, content_html: str) -> None:
-        from .rich_editor import RichTextEditor
-        from .message_view import _to_text  # plain-text fold of the page HTML
+    def _edit_page(self, page, content_html: str = "") -> NoteEditorWindow:
+        """Open the page editor in its own non-modal window (never an inline
+        Notes-pane form: the navigation reloads swap ``_page_content`` and
+        would destroy the editor mid-draft). Returns the window for tests."""
+        editor = NoteEditorWindow(self, page, content_html)
+        editor.present()
+        return editor
 
-        title_entry = Gtk.Entry(
-            hexpand=True, placeholder_text=_("Page title"),
-            text=("" if page is None else page.get("title", "")))
-        editor = RichTextEditor()
-        if page is not None and content_html:
-            # The editor seeds from plain text, so existing formatting is not
-            # preserved on edit (a known v1 limitation noted to the user).
-            try:
-                editor.set_plain_text(_to_text(content_html).strip())
-            except Exception:  # noqa: BLE001
-                pass
-
-        cancel = Gtk.Button(label=_("Cancel"))
-        cancel.add_css_class("flat")
-        save = Gtk.Button(label=_("Save"))
-        save.add_css_class("suggested-action")
-        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
-                     margin_top=8, margin_bottom=8, margin_start=12, margin_end=12)
-        bar.append(title_entry)
-        bar.append(cancel)
-        bar.append(save)
-
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        box.append(bar)
-        box.append(Gtk.Separator())
-        editor.set_margin_top(8)
-        editor.set_margin_bottom(8)
-        editor.set_margin_start(12)
-        editor.set_margin_end(12)
-        editor.set_vexpand(True)
-        box.append(editor)
-        self._page_content.set_child(box)
-
-        cancel.connect("clicked", lambda *_a: self._after_notes_change(page))
-        save.connect("clicked",
-                    lambda *_a: self._save_page(page, title_entry, editor))
-
-    def _save_page(self, page, title_entry, editor) -> None:
-        title = title_entry.get_text().strip() or _("Untitled page")
-        original_title = "" if page is None else (page.get("title") or "")
-        try:
-            body_html, _imgs = editor.get_html()
-        except Exception:  # noqa: BLE001 - fall back to plain text on editor error
-            body_html = esc(editor.get_plain_text())
-        team_id = self._team_id
-        section_id = self._section_id
-        page_id = None if page is None else page.get("id")
-
-        def work():
-            client = self._client()
-            if page_id is None:
-                client.create_note_page(team_id, section_id, title, body_html)
-            else:
-                client.update_note_page(team_id, page_id, body_html,
-                                        title=title,
-                                        original_title=original_title)
-            return True
-
-        self._page_content.set_child(loading_box(_("Saving…")))
-        run_async(work,
-                  lambda _r, err: self._on_page_saved(page, section_id, err))
-
-    def _on_page_saved(self, page, section_id, error) -> bool:
-        if error is not None:
-            self._window.add_toast(_("Couldn't save: %s") % friendly_error(error))
-            self._after_notes_change(page)
-            return False
-        # OneNote writes are async; give the service a moment, then refresh.
-        # Reload only when the section still on screen is the one saved into —
-        # the user may have switched sections (or teams) mid-save.
-        self._window.add_toast(_("Saved — it may take a moment to appear"))
-        self._after_notes_change(None)
-        if section_id == self._section_id:
+    def _on_note_saved(self, team_id: str, section_id: str) -> None:
+        """A NoteEditorWindow saved successfully: refresh the section on
+        screen only if it is still the one saved into — never yank the Notes
+        pane out from under a user who navigated away mid-save. Notes reads
+        aren't cached today (every open refetches), so the far branch's
+        invalidation is a no-op safety net for a future page cache."""
+        if team_id == self._team_id and section_id == self._section_id:
             self._load_pages()
-        return False
-
-    def _after_notes_change(self, page) -> None:
-        if page is not None:
-            self._open_page(page)
         else:
-            self._page_content.set_child(status_page(
-                "accessories-text-editor-symbolic", _("Notes"),
-                _("Select a page to read it.")))
+            self._cache.invalidate(prefix=f"{self._account.id}:notepages")
 
     # ------------------------------------------------------------------ #
     # Small shared widgets

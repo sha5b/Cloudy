@@ -370,5 +370,129 @@ class TestUserBind(unittest.TestCase):
                         .endswith("/users('o''brien@x.com')"))
 
 
+@_skip
+class TestCollectionPagination(unittest.TestCase):
+    """The full-enumeration listings (folders/groups/contacts/drives) must
+    follow ``@odata.nextLink`` — Graph silently truncates at ``$top``/its
+    default page otherwise (the audit backlog item). A FIFO fake ``_get``
+    scripts the two-page responses; an empty queue afterwards proves every
+    page was consumed."""
+
+    @staticmethod
+    def _client(responses):
+        client = GraphClient.__new__(GraphClient)
+        queue = list(responses)
+        client._get = lambda path, scopes, headers=None: queue.pop(0)
+        return client, queue
+
+    def test_folders_follow_nextlink(self):
+        def f(fid, name, unread=0):
+            return {"id": fid, "displayName": name,
+                    "unreadItemCount": unread, "childFolderCount": 0}
+
+        client, queue = self._client([
+            {"value": [f("F1", "Inbox", 2)],
+             "@odata.nextLink":
+                 "https://graph.microsoft.com/v1.0/me/mailFolders?$skiptoken=2"},
+            {"value": [f("F2", "Archive")]},
+            {"id": "F1"},   # well-known alias probes (inbox/drafts)
+            {"id": "none"},
+        ])
+        folders = client.list_folders()
+        # Both pages' folders present; priority sort puts Inbox before Archive.
+        self.assertEqual([x["id"] for x in folders], ["F1", "F2"])
+        self.assertEqual(folders[0]["unread"], 2)
+        self.assertEqual(folders[0]["well_known"], "inbox")
+        self.assertEqual(queue, [])
+
+    def test_groups_follow_nextlink(self):
+        def g(gid, name):
+            return {"id": gid, "displayName": name, "groupTypes": ["Unified"],
+                    "@odata.type": "#microsoft.graph.group"}
+
+        client, queue = self._client([
+            {"value": [g("G1", "Zebra"),
+                       {"@odata.type": "#microsoft.graph.user"}],  # non-group
+             "@odata.nextLink":
+                 "https://graph.microsoft.com/v1.0/me/memberOf?$skiptoken=2"},
+            {"value": [g("G2", "alpha")]},
+        ])
+        groups = client.list_groups()
+        self.assertEqual([x["id"] for x in groups], ["G2", "G1"])  # name sort
+        self.assertEqual(queue, [])
+
+    def test_contacts_follow_nextlink(self):
+        def p(pid, addr):
+            return {"displayName": pid,
+                    "scoredEmailAddresses": [{"address": addr}]}
+
+        client, queue = self._client([
+            {"value": [p("A", "a@x.com")],
+             "@odata.nextLink":
+                 "https://graph.microsoft.com/v1.0/me/people?$skiptoken=2"},
+            {"value": [p("B", "b@x.com"), p("A2", "a@x.com")]},  # dupe addr
+            {"value": [{"displayName": "C",
+                        "emailAddresses": [{"address": "c@x.com"}]}],
+             "@odata.nextLink":
+                 "https://graph.microsoft.com/v1.0/me/contacts?$skiptoken=2"},
+            {"value": [{"displayName": "D",
+                        "emailAddresses": [{"address": "d@x.com"}]}]},
+        ])
+        contacts = client.list_contacts()
+        self.assertEqual([c["email"] for c in contacts],
+                         ["a@x.com", "b@x.com", "c@x.com", "d@x.com"])
+        self.assertEqual(queue, [])
+
+    def test_drives_follow_nextlink(self):
+        client, queue = self._client([
+            {"value": [{"id": "D1", "name": "OneDrive", "driveType": "personal",
+                        "webUrl": "https://d1"}],
+             "@odata.nextLink":
+                 "https://graph.microsoft.com/v1.0/me/drives?$skiptoken=2"},
+            {"value": [{"id": "D2", "name": "Docs", "driveType": "business",
+                        "webUrl": "https://d2"}]},
+        ])
+        drives = client.list_drives()
+        self.assertEqual([d.id for d in drives], ["D1", "D2"])
+        self.assertEqual(drives[1].name, "Docs")
+        self.assertEqual(queue, [])
+
+    def test_get_all_caps_runaway_cursor(self):
+        # A server that always answers with another nextLink must stop at
+        # max_pages, not loop forever.
+        client = GraphClient.__new__(GraphClient)
+        client._get = lambda *_a: {"value": [1], "@odata.nextLink": "more"}
+        self.assertEqual(client._get_all("/x", [], max_pages=5), [1] * 5)
+
+
+@_skip
+class TestChatMessageRow(unittest.TestCase):
+    @staticmethod
+    def _row(**extra):
+        m = {"id": "m1", "from": {"user": {"id": "u1", "displayName": "Ann"}},
+             "body": {"contentType": "text", "content": "hi"},
+             "createdDateTime": "2026-08-20T10:00:00Z"}
+        m.update(extra)
+        return GraphClient._chat_message_row(m, "me-id", "c1")
+
+    def test_edited_flag_from_last_edited(self):
+        row = self._row(lastEditedDateTime="2026-08-20T11:00:00Z")
+        self.assertTrue(row["edited"])
+
+    def test_unedited_when_never_touched(self):
+        self.assertFalse(self._row()["edited"])
+
+
+@_skip
+class TestReactions(unittest.TestCase):
+    def test_unset_reaction_posts_unsetreaction(self):
+        client = GraphClient.__new__(GraphClient)
+        with unittest.mock.patch.object(client, "_post") as post:
+            client.unset_reaction("c1", "m1", "👍")
+        path, body = post.call_args.args[0], post.call_args.args[1]
+        self.assertEqual(path, "/chats/c1/messages/m1/unsetReaction")
+        self.assertEqual(body, {"reactionType": "👍"})
+
+
 if __name__ == "__main__":
     unittest.main()

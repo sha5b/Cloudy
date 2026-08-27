@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Shahab Nedaei
 """Teams-tab logic tests: channel-message shaping (graph_teams), the
-fetch_bytes scope override (graph_http), OneNote title patching, and the
-TeamsView poll fingerprint / older-post merge / failed-send restore."""
+fetch_bytes scope override (graph_http), OneNote title patching, the
+TeamsView poll fingerprint / older-post merge / failed-send restore, and the
+OneNote page editor living in its own non-modal EditorWindow."""
 
+import time
 import unittest
 import unittest.mock
 import urllib.request
@@ -379,6 +381,147 @@ class TestTeamsViewSmoke(unittest.TestCase):
         self.assertEqual(view._image_cache, {})
         self.assertEqual(view._conv_tokens, {})
         self.assertFalse(view._conv_loading)
+
+
+@_skip_view
+class TestNoteEditorWindow(unittest.TestCase):
+    """The OneNote page editor must be its own non-modal EditorWindow — the
+    old inline form was swapped into the Notes pane (``_page_content``), so
+    any navigation (channel, section, notebook reload) destroyed it and the
+    draft with it."""
+
+    PAGE = {"id": "p1", "title": "Agenda", "web_url": ""}
+
+    def _view(self):
+        from gi.repository import Gtk
+
+        from cloudy.core.cache import MemoryCache
+        from cloudy.widgets.teams_view import TeamsView as View
+
+        Gtk.init_check()
+
+        # A real Gtk.Application (never started): EditorWindow's
+        # set_application() type-checks, and the view needs app.cache.
+        app = Gtk.Application()
+        app.cache = MemoryCache(ttl=90)
+
+        class Window:
+            def get_application(self):
+                return app
+
+            def add_toast(self, _msg):
+                pass
+
+        account = unittest.mock.Mock()
+        account.id = "a1"
+        account.provider = "microsoft"
+        view = View(Window(), account)
+        view._team_id = "t1"
+        view._section_id = "s1"
+        # Root the view in a hidden toplevel: the editor window's post-save
+        # liveness guard checks get_root(), and this presents nothing on the
+        # developer's desktop.
+        root = Gtk.Window()
+        root.set_child(view)
+        return view
+
+    def _edit(self, view, page=None, html=""):
+        from cloudy.widgets.teams_view import NoteEditorWindow
+
+        with unittest.mock.patch.object(NoteEditorWindow, "present"):
+            return view._edit_page(page, html)
+
+    def test_edit_opens_non_modal_editor_window_with_current_content(self):
+        from gi.repository import Adw
+
+        from cloudy.widgets.editor_window import EditorWindow
+        from cloudy.widgets.teams_view import NoteEditorWindow
+
+        view = self._view()
+        win = self._edit(view, dict(self.PAGE),
+                         "<html><body><p>old body</p></body></html>")
+        self.assertIsInstance(win, NoteEditorWindow)
+        self.assertIsInstance(win, EditorWindow)
+        self.assertFalse(win.get_modal())
+        self.assertEqual(win.get_title(), "Agenda")
+        self.assertEqual(win._title_entry.get_text(), "Agenda")
+        self.assertIn("old body", win._editor.get_plain_text())
+        # No inline swap: the Notes pane still shows its reader placeholder.
+        self.assertIsInstance(view._page_content.get_child(), Adw.StatusPage)
+
+    def test_mid_edit_navigation_leaves_editor_untouched(self):
+        view = self._view()
+        win = self._edit(view, dict(self.PAGE), "<p>seed</p>")
+        win._title_entry.set_text("Draft title")
+        win._editor.set_plain_text("draft words")
+        # The exact paths that used to destroy the inline editor by swapping
+        # _page_content's child under it.
+        view._channel_id = "c1"
+        view._section_id = "s2"
+        view._load_pages()
+        view._notes_loaded_for = ""
+        view._ensure_notes_loaded()
+        view._load_notebook()
+        self.assertEqual(win._title_entry.get_text(), "Draft title")
+        self.assertEqual(win._editor.get_plain_text(), "draft words")
+        self.assertIs(win._editor.get_root(), win)  # still inside the window
+        self.assertTrue(win.primary_btn.get_sensitive())
+
+    def test_save_patches_captured_ids_after_section_switch(self):
+        view = self._view()
+        win = self._edit(view, dict(self.PAGE), "<p>seed</p>")
+        win._title_entry.set_text("Renamed")
+        view._section_id = "s2"  # the user navigated away mid-edit
+        client = unittest.mock.Mock()
+        with unittest.mock.patch(
+                "cloudy.widgets.clients.build_account_client",
+                return_value=client):
+            win.on_primary()
+            deadline = time.monotonic() + 5
+            while not client.update_note_page.called \
+                    and time.monotonic() < deadline:
+                time.sleep(0.01)
+        client.update_note_page.assert_called_once_with(
+            "t1", "p1", unittest.mock.ANY,
+            title="Renamed", original_title="Agenda")
+
+    def test_new_page_creates_in_captured_section(self):
+        view = self._view()
+        win = self._edit(view, None, "")
+        self.assertEqual(win.get_title(), "New page")
+        view._section_id = "s2"  # navigated away before saving
+        client = unittest.mock.Mock()
+        with unittest.mock.patch(
+                "cloudy.widgets.clients.build_account_client",
+                return_value=client):
+            win.on_primary()
+            deadline = time.monotonic() + 5
+            while not client.create_note_page.called \
+                    and time.monotonic() < deadline:
+                time.sleep(0.01)
+        client.create_note_page.assert_called_once_with(
+            "t1", "s1", "Untitled page", unittest.mock.ANY)
+
+    def test_failed_save_keeps_window_open_for_retry(self):
+        view = self._view()
+        win = self._edit(view, dict(self.PAGE), "<p>seed</p>")
+        win._on_saved("boom")
+        self.assertTrue(win.primary_btn.get_sensitive())
+        self.assertIs(win._editor.get_root(), win)  # draft not torn down
+
+    def test_saved_reload_only_for_the_section_still_on_screen(self):
+        view = self._view()
+        win = self._edit(view, dict(self.PAGE), "<p>seed</p>")
+        with unittest.mock.patch.object(view, "_load_pages") as reload:
+            win._on_saved(None)
+        reload.assert_called_once()
+        # Navigated to another section (and team) mid-save: no reload, and no
+        # crash — just the notepages cache-prefix drop.
+        for team_id, section_id in (("t1", "s9"), ("t9", "s1")):
+            view._team_id, view._section_id = team_id, section_id
+            with unittest.mock.patch.object(view, "_load_pages") as reload:
+                view._on_note_saved("t1", "s1")
+            reload.assert_not_called()
 
 
 if __name__ == "__main__":

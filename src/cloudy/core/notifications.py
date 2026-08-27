@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Shahab Nedaei
-"""Desktop notifications for new mail and upcoming events.
+"""Desktop notifications for new mail, upcoming events and channel posts.
 
 A small background poller that runs on the GTK main loop (network work is
 off-loaded to threads) and raises ``Gio.Notification``s through the application.
@@ -40,6 +40,13 @@ _INVITE_POLL_SECONDS = 600
 # pinging per message (Iqbal & Bailey 2008 breakpoint deferral). Only active at
 # notify-level 'digest'; the queue is held while DND/quiet hours are on.
 _DIGEST_SECONDS = 600
+# Starred-channel sweep: Teams channel posts are starred-channel-scoped ambient
+# chatter, less time-critical than 1:1 chats, so the sweep piggybacks on the
+# steady _tick cadence behind its own slower throttle (the same shape as the
+# invite sweep) — one newest-page request per starred channel per cycle, which
+# stays bounded by how many channels the user starred and keeps clear of
+# Graph's aggressive channel-message throttling.
+_CHANNEL_POLL_SECONDS = 240
 
 
 # One parser/formatter for the whole app: format.parse_iso_utc handles Graph's
@@ -47,6 +54,36 @@ _DIGEST_SECONDS = 600
 # reminder for all-day events); sender_name normalizes 'Name <addr>'.
 _parse_dt = parse_iso_utc
 _short_sender = sender_name
+
+
+def _stamp_newer(a: str, b: str) -> bool:
+    """Whether ISO stamp ``a`` is strictly newer than ``b``. Parsed as UTC
+    where possible — Graph's fractional-second digits (``…12.345Z``) break raw
+    lexical order against whole-second stamps (``…12Z``); an unparseable ``a``
+    falls back to a string compare, an empty one is never newer."""
+    da = _parse_dt(a)
+    if da is None:
+        return bool(a) and a > b
+    db = _parse_dt(b)
+    return db is None or da > db
+
+
+def _newest_post(posts) -> dict | None:
+    """The newest content row on a channel page — root posts *and* their
+    replies (a fresh reply under an older thread is still new activity) —
+    skipping system event rows ("Call started", membership changes) and
+    deleted tombstones: those are bookkeeping and must neither watermark
+    nor announce. The page is oldest-last, but we compare stamps so a newer
+    reply on an older root post wins too."""
+    tip = None
+    for p in posts:
+        for r in [p] + list(p.get("replies") or ()):
+            if r.get("system") or r.get("deleted"):
+                continue
+            if tip is None or _stamp_newer(r.get("sent", ""),
+                                           tip.get("sent", "")):
+                tip = r
+    return tip
 
 
 class NotificationManager:
@@ -69,6 +106,9 @@ class NotificationManager:
         self._invite_polled: dict[str, float] = {}  # account id -> last sweep (monotonic)
         self._seen_chat: dict[str, dict] = {}     # account id -> {chat id: last_at}
         self._chat_unread: dict[str, set] = {}    # account id -> {chat id with new msgs}
+        self._channel_polled: dict[str, float] = {}  # account id -> last sweep (monotonic)
+        self._channel_seen: dict[str, dict] = {}  # account id -> {channel id: last sent}
+        self._channel_unread: dict[str, set] = {}  # account id -> {channel id w/ new posts}
         self._digest: dict[str, dict] = {}        # account id -> pending tier-2 summary
         self._busy: set = set()                   # "{kind}:{account id}" polls in flight
         self._open_chat: tuple | None = None      # (account id, chat id) on screen
@@ -151,6 +191,43 @@ class NotificationManager:
         win = self._main_window()
         if win is not None and hasattr(win, "set_account_chat_unread"):
             win.set_account_chat_unread(account_id, self.chat_unread_count(account_id))
+
+    def channel_unread_count(self, account_id: str) -> int:
+        """Number of starred channels with unseen new posts (0 until the first
+        sweep). Drives the Teams tab badge."""
+        return len(self._channel_unread.get(account_id, ()))
+
+    def channel_last_seen(self, account_id: str, channel_id: str) -> str:
+        """A channel's watermark: the newest post timestamp seen for it
+        ("" when none exists yet — callers degrade gracefully). Lets the
+        Dashboard's Activity feed tell genuinely new posts from old ones."""
+        return self._channel_watermarks(account_id).get(channel_id, "")
+
+    def mark_channel_read(self, account_id: str, channel_id: str) -> None:
+        """Clear a channel's "new post" mark (for the Teams view to call when
+        the user opens the channel, mirroring mark_chat_read)."""
+        unread = self._channel_unread.get(account_id)
+        if unread and channel_id in unread:
+            unread.discard(channel_id)
+            self._push_channel_badge(account_id)
+
+    def note_channel_seen(self, account_id: str, channel_id: str, sent: str) -> None:
+        """Record that the user has laid eyes on the channel up to ``sent``
+        (its newest post's timestamp), advancing the watermark so a later
+        sweep doesn't badge what was already read on screen."""
+        if not sent:
+            return
+        marks = self._channel_watermarks(account_id)
+        if not _stamp_newer(sent, marks.get(channel_id, "")):
+            return
+        marks[channel_id] = sent
+        self._save_channel_seen(account_id, marks)
+
+    def _push_channel_badge(self, account_id: str) -> None:
+        win = self._main_window()
+        if win is not None and hasattr(win, "set_account_channel_unread"):
+            win.set_account_channel_unread(
+                account_id, self.channel_unread_count(account_id))
 
     # -- lifecycle --------------------------------------------------------
     def start(self) -> None:
@@ -269,7 +346,8 @@ class NotificationManager:
     def _digest_bucket(self, account) -> dict:
         bucket = self._digest.get(account.id)
         if bucket is None:
-            bucket = {"name": account.display_name, "chats": {}, "msgs": 0, "mail": 0}
+            bucket = {"name": account.display_name, "chats": {}, "msgs": 0,
+                      "mail": 0, "channels": {}, "chan_msgs": 0}
             self._digest[account.id] = bucket
         return bucket
 
@@ -277,6 +355,12 @@ class NotificationManager:
         bucket = self._digest_bucket(account)
         bucket["chats"][chat["id"]] = chat.get("name", "") or _("Chat")
         bucket["msgs"] += 1
+
+    def _enqueue_channel(self, account, pin) -> None:
+        bucket = self._digest_bucket(account)
+        bucket["channels"][pin.get("id", "")] = (
+            f"#{pin.get('name', '') or _('Channel')}")
+        bucket["chan_msgs"] += 1
 
     def _enqueue_mail(self, account) -> None:
         self._digest_bucket(account)["mail"] += 1
@@ -307,6 +391,15 @@ class NotificationManager:
                 "msgs": ngettext("%d new message", "%d new messages", msgs) % msgs,
                 "chats": ngettext("%d chat", "%d chats", chats) % chats,
             })
+        if bucket.get("chan_msgs"):
+            msgs = bucket["chan_msgs"]
+            chans = len(bucket.get("channels", {}))
+            parts.append(_("%(msgs)s in %(chans)s") % {
+                "msgs": ngettext("%d new channel post",
+                                 "%d new channel posts", msgs) % msgs,
+                "chans": ngettext("%d starred channel",
+                                  "%d starred channels", chans) % chans,
+            })
         if bucket["mail"]:
             mail = bucket["mail"]
             parts.append(ngettext("%d new email", "%d new emails", mail) % mail)
@@ -318,7 +411,9 @@ class NotificationManager:
         note.set_priority(Gio.NotificationPriority.LOW)
         # An empty id routes to the relevant tab (no single message to deep-link).
         payload = GLib.Variant("s", f"{account_id}\x1f")
-        action = "app.notify-open-chat" if bucket["chats"] else "app.notify-open-mail"
+        action = ("app.notify-open-chat"
+                  if bucket["chats"] or bucket.get("channels")
+                  else "app.notify-open-mail")
         note.set_default_action(Gio.Action.print_detailed_name(action, payload))
         return note
 
@@ -358,6 +453,12 @@ class NotificationManager:
                     pass
             if "chat" in caps:
                 self._poll_chat(account)
+            # Starred-channel sweep: Teams work/school accounts only. Consumer
+            # tenants have no Teams (is_personal), and Google's module carries
+            # no "teams" capability, so the caps check already excludes it.
+            if ("teams" in caps and account.provider == "microsoft"
+                    and not account.is_personal):
+                self._poll_channels(account)
         return True  # keep the timer alive
 
     def _poll_mail(self, account) -> None:
@@ -719,6 +820,134 @@ class NotificationManager:
         note.set_default_action(
             Gio.Action.print_detailed_name("app.notify-open-chat", payload))
         self._app.send_notification(f"chat-{account.id}-{chat['id']}", note)
+
+    # -- starred channels (Teams) ----------------------------------------
+    # Watermarks ("the newest post the user has seen") live in a notifier-side
+    # dict rather than inside the pin entries: the registry's only update path
+    # (registry.update) emits "changed", which rebuilds the whole sidebar —
+    # far too heavy to fire on every new channel post. The dict is persisted
+    # through the app cache instead. The key deliberately leads with
+    # "channel-seen" (not "{account}:channel-seen"): Teams reloads and account
+    # refreshes invalidate cache keys by the bare account-id prefix, which
+    # would wipe the watermarks and force a full re-baseline.
+    def _channel_watermarks(self, account_id: str) -> dict:
+        """The account's {channel id: newest seen stamp}, seeded from the
+        persisted cache on first use (the in-memory dict is authoritative
+        for the rest of the session)."""
+        marks = self._channel_seen.get(account_id)
+        if marks is None:
+            marks = {}
+            cache = getattr(self._app, "cache", None)
+            if cache is not None:
+                stored = cache.get(f"channel-seen:{account_id}")
+                if stored is not None and isinstance(stored[0], dict):
+                    marks = dict(stored[0])
+            self._channel_seen[account_id] = marks
+        return marks
+
+    def _save_channel_seen(self, account_id: str, marks: dict) -> None:
+        cache = getattr(self._app, "cache", None)
+        if cache is not None:
+            cache.set(f"channel-seen:{account_id}", dict(marks))
+
+    def _poll_channels(self, account) -> None:
+        now_mono = time.monotonic()
+        if now_mono - self._channel_polled.get(account.id, 0.0) < _CHANNEL_POLL_SECONDS:
+            return
+        self._channel_polled[account.id] = now_mono
+        pins = [p for p in (account.pinned_sources or [])
+                if p.get("kind") == "channel" and p.get("id")]
+        if not pins:
+            return
+
+        def work():
+            from ..widgets.clients import build_account_client
+
+            client = build_account_client(self._app, account)
+            pages = []
+            for p in pins:  # bounded: exactly one newest-page call per channel
+                try:
+                    posts, _next = client.list_channel_messages_page(
+                        p.get("team_id", ""), p["id"], limit=5)
+                except Exception:  # noqa: BLE001 - one dead/inaccessible channel
+                    continue       # must not sink the rest of the sweep
+                pages.append((p, posts))
+            return pages
+
+        self._spawn(f"channels:{account.id}", work,
+                    lambda r, e: self._on_channels(account, r, e))
+
+    def _on_channels(self, account, pages, error) -> bool:
+        if error or pages is None:
+            return False
+        marks = self._channel_watermarks(account.id)
+        unread = self._channel_unread.setdefault(account.id, set())
+        muted = self._muted_ids(account, "channel")
+        starred = set()
+        badge_changed = False
+        any_new = False
+        to_notify = []
+        for pin, posts in pages:
+            cid = pin.get("id", "")
+            starred.add(cid)
+            tip = _newest_post(posts)
+            sent = tip.get("sent", "") if tip is not None else ""
+            if not cid or not sent:
+                continue
+            if cid not in marks:  # first sight (app start / newly starred):
+                marks[cid] = sent  # baseline only — learn, don't announce
+                any_new = True
+                continue
+            if not _stamp_newer(sent, marks[cid]):
+                continue  # nothing newer than the watermark
+            marks[cid] = sent  # advance the watermark (always, muted or not)
+            any_new = True
+            if tip.get("is_mine"):
+                continue  # your own just-sent post: no ping
+            if cid in muted:
+                continue  # silenced: no badge, no banner
+            unread.add(cid)  # light up the badge (always, even in DND)
+            badge_changed = True
+            # Channel chatter is ambient (tier 2) — batched at 'digest'.
+            if self._allowed(2):
+                to_notify.append((pin, tip))
+            elif self._digest_active():
+                self._enqueue_channel(account, pin)
+        # Drop flags for channels unstarred mid-cycle so the count can't drift.
+        if not starred.issuperset(unread):
+            unread.intersection_update(starred)
+            badge_changed = True
+        if any_new:
+            self._save_channel_seen(account.id, marks)
+            # The Dashboard folds channel rows into its aggregate; drop the
+            # cached copy so it refetches with the new watermark gating.
+            cache = getattr(self._app, "cache", None)
+            if cache is not None:
+                cache.invalidate(prefix="dashboard:")
+            win = self._main_window()
+            if win is not None and hasattr(win, "refresh_account_activity"):
+                win.refresh_account_activity(account.id)
+        if badge_changed:
+            self._push_channel_badge(account.id)
+        for pin, tip in to_notify[:_MAX_MAIL_PER_TICK]:
+            self._notify_channel(account, pin, tip)
+        return False
+
+    def _notify_channel(self, account, pin, tip) -> None:
+        channel = pin.get("name", "") or _("Channel")
+        team = pin.get("team_name", "") or _("Teams")
+        sender = (tip.get("from", "") or "").strip()
+        snippet = (tip.get("subject") or tip.get("text") or "").strip()
+        body = (f"{sender}: {snippet}" if sender and snippet
+                else sender or snippet or _("New post"))
+        note = Gio.Notification.new(_("New post in #%s · %s") % (channel, team))
+        note.set_body(body)
+        note.set_icon(self._type_icon("system-users-symbolic"))
+        note.set_priority(Gio.NotificationPriority.NORMAL)
+        payload = GLib.Variant("s", f"{account.id}\x1f{pin.get('id', '')}")
+        note.set_default_action(
+            Gio.Action.print_detailed_name("app.notify-open-teams", payload))
+        self._app.send_notification(f"channel-{account.id}-{pin.get('id', '')}", note)
 
     @staticmethod
     def _trim_set(s: set, max_size: int) -> None:

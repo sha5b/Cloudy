@@ -315,6 +315,96 @@ class TestMessagePageTolerance(unittest.TestCase):
             _PageGC(fail={"m2"}, status=403).list_messages_page("INBOX")
 
 
+class TestMessagePageOrder(unittest.TestCase):
+    def test_order_preserved_under_random_latency(self):
+        # The per-message GETs run in a thread pool; however they COMPLETE,
+        # the page must come back in the id list's order.
+        import random
+        import time
+
+        ids = [f"m{i:02d}" for i in range(12)]
+        rng = random.Random(42)
+
+        class SlowGC(GoogleClient):
+            def __init__(self):
+                super().__init__(lambda scopes: "token")
+
+            def _get(self, url, scopes):
+                if "/messages?" in url:
+                    return {"messages": [{"id": i} for i in ids]}
+                time.sleep(rng.uniform(0, 0.03))
+                mid = url.split("/messages/")[1].split("?")[0]
+                return {"id": mid, "payload": {"headers": []}}
+
+        msgs, _ = SlowGC().list_messages_page("INBOX")
+        self.assertEqual([m["id"] for m in msgs], ids)
+
+
+class TestReplyRecipients(unittest.TestCase):
+    """reply_all must carry the original To + Cc (minus self, deduped) —
+    the bug where it went only to the original sender."""
+
+    @staticmethod
+    def _sent_headers(headers, me="me@x.com", **reply_kwargs):
+        class GC(GoogleClient):
+            def _get(self, url, scopes):
+                assert "/messages/" in url, f"unexpected GET {url}"
+                return {"threadId": "t1",
+                        "payload": {"headers": [
+                            {"name": k, "value": v} for k, v in headers.items()]}}
+
+            def _post(self, url, body, scopes):
+                self.sent = body
+                return {}
+
+        gc = GC(lambda s: "t")
+        gc._email = me  # skip the profile lookup
+        gc.reply_mail("m1", "hi there", **reply_kwargs)
+        from email import message_from_bytes
+
+        raw = gc.sent["raw"]
+        padded = raw + "=" * (-len(raw) % 4)
+        msg = message_from_bytes(base64.urlsafe_b64decode(padded))
+        return msg, gc.sent
+
+    def test_reply_all_includes_to_and_cc(self):
+        msg, sent = self._sent_headers({
+            "Subject": "Planning",
+            "From": "Ann <ann@x.com>",
+            "To": "me@x.com, Bob <bob@x.com>",
+            "Cc": "Carol <carol@x.com>, ann@x.com",
+        }, reply_all=True)
+        to = (msg["To"] or "").lower()
+        self.assertIn("ann@x.com", to)         # original sender
+        self.assertIn("bob@x.com", to)         # original To survives
+        self.assertNotIn("me@x.com", to)       # never To: myself
+        # Cc carries the original cc only — ann is deduped against To and our
+        # own address never appears.
+        self.assertEqual(msg["Cc"], "Carol <carol@x.com>")
+        self.assertEqual(sent["threadId"], "t1")  # stays on the thread
+        self.assertEqual(msg["Subject"], "Re: Planning")
+
+    def test_reply_all_dedupes_across_buckets(self):
+        # The sender reappears in To — one copy total.
+        msg, _ = self._sent_headers({
+            "From": "ann@x.com",
+            "To": "Ann <ann@x.com>, Bob <bob@x.com>",
+        }, reply_all=True)
+        to = msg["To"].lower()
+        self.assertEqual(to.count("ann@x.com"), 1)
+        self.assertIn("bob@x.com", to)
+
+    def test_plain_reply_goes_to_sender_only(self):
+        msg, _ = self._sent_headers({
+            "From": "Ann <ann@x.com>",
+            "To": "Bob <bob@x.com>",
+            "Cc": "Carol <carol@x.com>",
+        })
+        self.assertEqual([a.strip() for a in msg["To"].split(",")],
+                         ["Ann <ann@x.com>"])
+        self.assertIsNone(msg["Cc"])
+
+
 class TestChatSpaces(unittest.TestCase):
     def test_last_at_from_last_active_time(self):
         class GC(GoogleClient):

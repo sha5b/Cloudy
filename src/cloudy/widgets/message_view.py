@@ -52,19 +52,23 @@ _CID_IMG_RE = re.compile(r"<img\b[^>]*\bsrc\s*=\s*[\"']cid:[^>]*>", re.IGNORECAS
 _CID_SRC_RE = re.compile(r"""src\s*=\s*["']cid:([^"']+)["']""", re.IGNORECASE)
 
 # Remote image sources are blocked by default to prevent tracking pixels / IP
-# leaks. Only http(s) image URLs are replaced; cid: (resolved to data:) and
-# other schemes are left alone. A future toggle can pass load_remote=True.
+# leaks. Only http(s) image URLs are replaced (with a transparent inline
+# placeholder, plus a ``data-cloudy-blocked`` marker); cid: (resolved to
+# data:) and other schemes are left alone. The reader's "Load images" opt-in
+# re-renders the same body with ``load_remote=True``.
 _REMOTE_IMG_RE = re.compile(
-    r"(<img\b[^>]*\bsrc\s*=\s*['\"])(https?://[^'\"]+)(['\"][^>]*>)",
+    r"(<img\b[^>]*?(?<![\w-])src\s*=\s*(['\"]))(https?://[^'\"]+)\2([^>]*)>",
     re.IGNORECASE,
 )
 _REMOTE_BG_RE = re.compile(
     r"(background(?:-image)?\s*:\s*[^;]*url\s*\(\s*['\"]?)(https?://[^'\"\)]+)(['\"]?\s*\))",
     re.IGNORECASE,
 )
+# A 1x1 transparent GIF: blocked images collapse out of sight instead of
+# littering the message with broken-image glyphs; the banner below the
+# header says why and offers to load them.
 _REMOTE_IMG_PLACEHOLDER = (
-    "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' "
-    "height='24'%3E%3Ctext x='4' y='17' font-size='12' fill='%23999'%3E?%3C/text%3E%3C/svg%3E"
+    "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
 )
 
 
@@ -115,10 +119,27 @@ def _resolve_cids(content: str, inline_images) -> str:
 
 
 def _block_remote_images(body: str) -> str:
-    """Replace remote image URLs with a local placeholder."""
-    body = _REMOTE_IMG_RE.sub(r"\1" + _REMOTE_IMG_PLACEHOLDER + r"\3", body)
+    """Replace remote image URLs with a transparent inline placeholder and
+    mark the tag ``data-cloudy-blocked`` (idempotent, and lets tests / styling
+    find neutralized images). css ``url(http…)`` backgrounds are swapped too."""
+    body = _REMOTE_IMG_RE.sub(_blocked_img_tag, body)
     body = _REMOTE_BG_RE.sub(r"\1" + _REMOTE_IMG_PLACEHOLDER + r"\3", body)
     return body
+
+
+def _blocked_img_tag(match) -> str:
+    if "data-cloudy-blocked" in match.group(0):
+        return match.group(0)  # already neutralized — leave it alone
+    return (match.group(1) + _REMOTE_IMG_PLACEHOLDER + match.group(2)
+            + ' data-cloudy-blocked="1"' + match.group(4) + ">")
+
+
+def _has_remote_images(body: str) -> bool:
+    """True when the HTML body references at least one remote image — i.e.
+    rendering it will neutralize something worth offering the "Load images"
+    opt-in for."""
+    body = body or ""
+    return bool(_REMOTE_IMG_RE.search(body) or _REMOTE_BG_RE.search(body))
 
 
 def _wrap_html(content: str, is_html: bool, inline_images=None,
@@ -156,7 +177,7 @@ def _wrap_html(content: str, is_html: bool, inline_images=None,
 <body>{body}</body></html>"""
 
 
-def _body_widget(msg: dict) -> Gtk.Widget:
+def _body_widget(msg: dict, *, load_remote: bool = False) -> Gtk.Widget:
     body = msg.get("body", "") or ""
     inline = msg.get("inline_images") or []
     has_images = bool(inline) or "<img" in body.lower()
@@ -170,7 +191,8 @@ def _body_widget(msg: dict) -> Gtk.Widget:
         preview = (msg.get("preview") or "").strip()
         if preview:
             return html_body_widget(preview, False)
-    return html_body_widget(body, msg.get("body_html", False), inline)
+    return html_body_widget(body, msg.get("body_html", False), inline,
+                            load_remote=load_remote)
 
 
 def _meeting_response_card(msg: dict) -> Gtk.Widget:
@@ -204,10 +226,13 @@ def _meeting_response_card(msg: dict) -> Gtk.Widget:
     return box
 
 
-def html_body_widget(content: str, is_html: bool, inline_images=None) -> Gtk.Widget:
+def html_body_widget(content: str, is_html: bool, inline_images=None,
+                     *, load_remote: bool = False) -> Gtk.Widget:
     """A WebKit view of an HTML/plain body (links open externally), or a
     plain-text label fallback if WebKitGTK isn't available. Reused by the mail
-    reader and the calendar event detail."""
+    reader and the calendar event detail. ``load_remote`` opts this one render
+    into fetching http(s) images (the reader's "Load images" button); the
+    default neutralizes them."""
     content = content or ""
     # Empty body → a clear placeholder instead of a blank white page (covers
     # meeting notifications and any content-less message/event). Inline images
@@ -215,7 +240,8 @@ def html_body_widget(content: str, is_html: bool, inline_images=None) -> Gtk.Wid
     has_images = bool(inline_images) or "<img" in content.lower()
     if not _to_text(content).strip() and not has_images:
         return _empty_placeholder()
-    view = _build_webview(_wrap_html(content, is_html, inline_images))
+    view = _build_webview(
+        _wrap_html(content, is_html, inline_images, load_remote))
     return view if view is not None else _text_fallback(content)
 
 
@@ -430,5 +456,32 @@ def build_message_content(msg: dict, on_open_attachment=None, on_rsvp=None) -> G
         box.append(Gtk.Separator())
         box.append(_attachments_bar(attachments, on_open_attachment))
     box.append(Gtk.Separator())
-    box.append(_body_widget(msg))
+    box.append(_reader_body(msg))
     return box
+
+
+def _reader_body(msg: dict) -> Gtk.Widget:
+    """The message body plus, when remote images were neutralized in it, a
+    slim banner offering to load them — for THIS message only (no global
+    setting): the button just re-renders the same body with remote content
+    allowed."""
+    body = msg.get("body", "") or ""
+    if not (msg.get("body_html", False) and _has_remote_images(body)):
+        return _body_widget(msg)
+    holder = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+    banner = Adw.Banner(
+        title=_("Some images were blocked to protect your privacy"),
+        button_label=_("Load images"), revealed=True)
+    body_view = _body_widget(msg)  # remote content neutralized
+    holder.append(banner)
+    holder.append(body_view)
+
+    def _load(_banner) -> None:
+        nonlocal body_view
+        banner.set_revealed(False)
+        holder.remove(body_view)
+        body_view = _body_widget(msg, load_remote=True)
+        holder.append(body_view)
+
+    banner.connect("button-clicked", _load)
+    return holder

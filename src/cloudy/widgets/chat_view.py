@@ -1053,6 +1053,12 @@ class ChatView(Adw.Bin):
         cid = getattr(row, "_chat_id", None)
         if cid:  # search hits can carry an empty chat_id — never open_chat("")
             self.open_chat(cid, getattr(row, "_chat_name", ""))
+            # A search hit targets one message: land on (and flash) it once the
+            # thread loads, reusing the forward-jump machinery. Set AFTER
+            # open_chat, which resets the pending scroll on entry.
+            mid = getattr(row, "_message_id", None)
+            if mid:
+                self._pending_scroll_mid = mid
 
     # -- new chat ---------------------------------------------------------
     def _on_new_chat(self, _btn) -> None:
@@ -1472,10 +1478,11 @@ class ChatView(Adw.Bin):
 
     @staticmethod
     def _msg_sig(m):
-        """A cheap fingerprint of one message — changes when its text,
-        attachments or reactions change (edited/reacted), so a stale bubble is
-        detected and rebuilt."""
-        return (m.get("id"), m.get("text"), len(m.get("attachments") or []),
+        """A cheap fingerprint of one message — changes when its text, edit
+        state, attachments or reactions change (edited/reacted), so a stale
+        bubble is detected and rebuilt."""
+        return (m.get("id"), m.get("text"), bool(m.get("edited")),
+                len(m.get("attachments") or []),
                 tuple(sorted((r.get("emoji"), r.get("count"))
                              for r in (m.get("reactions") or []))))
 
@@ -1945,6 +1952,14 @@ class ChatView(Adw.Bin):
                 when.add_css_class("dim-label")
                 when.add_css_class("caption")
                 foot.append(when)
+                if msg.get("edited"):
+                    # Teams-style subtle edit marker beside the timestamp
+                    # (system rows/tombstones never set `edited`).
+                    edited = Gtk.Label(label=_("(edited)"),
+                                       xalign=1 if mine else 0)
+                    edited.add_css_class("dim-label")
+                    edited.add_css_class("caption")
+                    foot.append(edited)
             if mine:
                 sic = Gtk.Image.new_from_icon_name("object-select-symbolic")
                 sic.set_pixel_size(12)
@@ -2667,6 +2682,8 @@ class ChatView(Adw.Bin):
     def _search_row(self, hit) -> Gtk.ListBoxRow:
         row = Gtk.ListBoxRow(activatable=True)
         row._chat_id = hit.get("chat_id")
+        # The hit's message id powers the jump-to-message on activation.
+        row._message_id = hit.get("message_id")
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2,
                       margin_top=8, margin_bottom=8, margin_start=12, margin_end=12)
         top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -3030,16 +3047,27 @@ class ChatView(Adw.Bin):
         chat_id, mid = self._chat_id, msg.get("id")
         if not mid:
             return
-        # Optimistic: show the reaction immediately (preserving scroll), then
+        # Toggle: if the message already carries this emoji, the click removes
+        # OUR reaction (unsetReaction) instead of stacking another one. The row
+        # only aggregates {emoji: count}, so this is a heuristic — an unset for
+        # a reaction we never added fails server-side and rolls back via
+        # _on_react_done's reload, which is honest without per-user data.
+        already = any(r.get("emoji") == emoji for r in (msg.get("reactions") or []))
+        # Optimistic: apply the change immediately (preserving scroll), then
         # send it. The adaptive poll reconciles the authoritative count; a full
         # reload here would scroll the thread back to the bottom.
-        self._add_local_reaction(chat_id, mid, emoji)
+        if already:
+            self._remove_local_reaction(chat_id, mid, emoji)
+            op = "unset_reaction"
+        else:
+            self._add_local_reaction(chat_id, mid, emoji)
+            op = "set_reaction"
 
         def work():
             from .clients import build_account_client
 
             client = build_account_client(self._window.get_application(), self._account)
-            return client.set_reaction(chat_id, mid, emoji)
+            return getattr(client, op)(chat_id, mid, emoji)
 
         run_async(work, lambda _r, error: self._on_react_done(chat_id, error))
 
@@ -3063,6 +3091,31 @@ class ChatView(Adw.Bin):
         cache.set(self._msg_key(chat_id), messages)
         # Rebuild ONLY that bubble in place — re-rendering the whole thread would
         # reorder nothing but reload every image and disturb the scroll position.
+        if chat_id == self._chat_id and target is not None:
+            self._update_one_bubble(target)
+
+    def _remove_local_reaction(self, chat_id, mid, emoji) -> None:
+        """The optimistic partner of an unsetReaction: drop one count of
+        ``emoji`` from the cached message (removing the pill at zero) and swap
+        just that bubble in place — mirroring :meth:`_add_local_reaction`."""
+        cache = self._cache()
+        cached = cache.get(self._msg_key(chat_id))
+        if not cached:
+            return
+        messages = cached[0]
+        target = None
+        for m in messages:
+            if m.get("id") == mid:
+                reactions = m.setdefault("reactions", [])
+                hit = next((r for r in reactions if r.get("emoji") == emoji), None)
+                if hit:
+                    if hit.get("count", 1) > 1:
+                        hit["count"] = hit.get("count", 1) - 1
+                    else:
+                        reactions.remove(hit)
+                target = m
+                break
+        cache.set(self._msg_key(chat_id), messages)
         if chat_id == self._chat_id and target is not None:
             self._update_one_bubble(target)
 
