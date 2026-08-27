@@ -155,6 +155,12 @@ class CloudyWindow(Adw.ApplicationWindow):
         if account_id == getattr(self, "_account_shown", None):
             self._set_tab_badge("calendar", count)
 
+    def set_account_channel_unread(self, account_id: str, count: int) -> None:
+        """Update the Teams tab badge with the number of new posts in starred
+        channels (called by the notifier's starred-channel sweep)."""
+        if account_id == getattr(self, "_account_shown", None):
+            self._set_tab_badge("teams", count)
+
     def set_account_chat_unread(self, account_id: str, count: int) -> None:
         """Update an account row's red chat badge (called by the notifier)."""
         badge = self._account_chat_badges.get(account_id)

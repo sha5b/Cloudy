@@ -345,6 +345,9 @@ class GraphChatMixin:
             "markup": html_to_pango(content) if is_html else "",
             "from": html.unescape(user.get("displayName", "") or ""),
             "sent": m.get("createdDateTime", ""),
+            # lastEditedDateTime is set when the sender edited the message —
+            # the view renders a dim "(edited)" marker next to the timestamp.
+            "edited": bool(m.get("lastEditedDateTime")),
             "is_mine": bool(user.get("id")) and user.get("id") == me_id,
             "attachments": attachments,
             "reactions": [{"emoji": e, "count": c} for e, c in reactions.items()],

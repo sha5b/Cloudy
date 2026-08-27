@@ -62,6 +62,9 @@ SCOPES_CHAT = [
 ]
 
 _TOKEN_KIND = "google-token"
+# Surfaced both to the browser (4xx) and into the sign-in flow when the
+# loopback redirect does not carry the state this attempt issued.
+_STATE_MISMATCH = "state mismatch — sign-in aborted (possible CSRF)"
 
 
 class AuthError(Exception):
@@ -70,6 +73,29 @@ class AuthError(Exception):
 
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def _state_matches(expected: str | None, received: str | None) -> bool:
+    """Session-binding check for the OAuth ``state`` parameter.
+
+    True only when the redirect carries back the exact random value this
+    sign-in attempt put in the authorization URL. A missing or different
+    ``state`` means the redirect did not originate from this flow (CSRF /
+    authorization-code injection) — PKCE protects the token exchange but
+    does not bind the browser session, so this check must fail closed.
+    """
+    return bool(expected) and expected == received
+
+
+def _record_redirect(server, params: dict) -> None:
+    """Store a redirect's OAuth result on the flow's *server instance*.
+
+    Kept as a standalone function so the per-flow storage is unit-testable
+    with a plain fake server object (no sockets, no network).
+    """
+    server.auth_code = params.get("code", [None])[0]
+    server.auth_error = params.get("error", [None])[0]
+    server.auth_state = params.get("state", [None])[0]
 
 
 class _CodeHandler(http.server.BaseHTTPRequestHandler):
@@ -83,16 +109,34 @@ class _CodeHandler(http.server.BaseHTTPRequestHandler):
         # unconditional assignment let that wipe the just-received code
         # (intermittent "no authorization code" / false state-mismatch).
         if "code" in params or "error" in params:
-            self.server.auth_code = params.get("code", [None])[0]
-            self.server.auth_error = params.get("error", [None])[0]
-            self.server.auth_state = params.get("state", [None])[0]
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html")
-        self.end_headers()
-        self.wfile.write(
+            state = params.get("state", [None])[0]
+            # getattr: fail closed if this server has no expected state.
+            if not _state_matches(getattr(self.server, "expected_state", None),
+                                  state):
+                # The redirect was not initiated by this sign-in attempt.
+                # Reject it in the browser AND surface a clear error into
+                # the sign-in flow; the (possibly injected) code is never
+                # recorded, so it can never be exchanged.
+                self.server.auth_error = _STATE_MISMATCH
+                self._respond(
+                    403,
+                    b"<html><body><h2>Cloudy</h2>"
+                    b"<p>Sign-in rejected (state mismatch). "
+                    b"Close this tab and try again.</p></body></html>",
+                )
+                return
+            _record_redirect(self.server, params)
+        self._respond(
+            200,
             b"<html><body><h2>Cloudy</h2>"
             b"<p>Sign-in complete. You can close this tab.</p></body></html>"
         )
+
+    def _respond(self, status: int, body: bytes) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html")
+        self.end_headers()
+        self.wfile.write(body)
 
     def log_message(self, *_args):  # silence the default stderr logging
         pass
@@ -135,6 +179,8 @@ class GoogleAuth:
         server = http.server.HTTPServer(("127.0.0.1", 0), _CodeHandler)
         server.allow_reuse_address = True
         server.auth_code = server.auth_error = server.auth_state = None
+        # The handler validates the redirect against exactly this value.
+        server.expected_state = state
         port = server.server_address[1]
         # Bind and redirect on the SAME literal (127.0.0.1) — Google treats
         # 127.0.0.1 and localhost as distinct, and localhost can resolve to IPv6
@@ -181,8 +227,10 @@ class GoogleAuth:
 
         if server.auth_error or not server.auth_code:
             raise AuthError(server.auth_error or "no authorization code received")
+        # Defense in depth: the handler already rejected mismatched states,
+        # so anything recorded here must match — enforce it regardless.
         if server.auth_state != state:
-            raise AuthError("state mismatch — sign-in aborted (possible CSRF)")
+            raise AuthError(_STATE_MISMATCH)
 
         token = self._exchange_code(server.auth_code, verifier, redirect_uri)
         self._token = token
