@@ -48,21 +48,17 @@ class TestResolvePath(unittest.TestCase):
         self.root = Path(self.tempdir.name)
         self.addCleanup(self.tempdir.cleanup)
         _isolate_state_file(self)
-        self.patch_root = unittest.mock.patch(
-            "cloudy.modules.microsoft365.files.mount_root", return_value=self.root
-        )
-        self.patch_root.start()
-        self.addCleanup(self.patch_root.stop)
         _save_mount_records([])
 
-    def _record(self, account_id, drive_name, drive_id, mountpoint):
+    def _record(self, account_id, drive_name, drive_id, mountpoint, base=None):
         recs = load_mount_records()
         recs.append({
             "account_id": account_id,
             "drive_name": drive_name,
             "drive_id": drive_id,
             "drive_kind": "documentLibrary",
-            "mountpoint": str(mountpoint),
+            "mountpoint": str(mountpoint) if mountpoint else None,
+            "base": str(base) if base else "",
         })
         _save_mount_records(recs)
 
@@ -80,6 +76,22 @@ class TestResolvePath(unittest.TestCase):
         calls = files._graph.calls
         self.assertEqual(calls[0], ("item_by_path", "DRIVEA", "folder/doc.txt"))
         self.assertEqual(calls[1][:3], ("create_share_link", "DRIVEA", "ITEM1"))
+
+    def test_share_link_falls_back_to_recorded_base(self):
+        # A record without a mountpoint (legacy/partial) but with the
+        # remembered per-account base still resolves to the right drive —
+        # the base derives from the display name, so it must come from the
+        # record, not be guessed from the account id.
+        base = self.root / "user_corp_com"
+        file = base / "Team Docs" / "spec.pdf"
+        file.parent.mkdir(parents=True)
+        file.write_text("x")
+        self._record("acc1", "Team Docs", "DRIVEB", None, base=base)
+
+        files = OneDriveFiles(_StubGraph())
+        files.create_share_link(str(file))
+        self.assertEqual(
+            files._graph.calls[0], ("item_by_path", "DRIVEB", "spec.pdf"))
 
     def test_share_link_falls_back_to_default_drive(self):
         home = Path.home()
@@ -191,6 +203,14 @@ class TestReconcile(unittest.TestCase):
             MountManager, "preferred_backend", return_value=mounts_mod.RCLONE)
         p.start()
         self.addCleanup(p.stop)
+        # Nothing is mounted: stub the two raw system probes so the shared
+        # snapshot reconcile_mounts refreshes reports an empty mount table
+        # instead of reading this machine's real one.
+        for target, ret in (("read_mount_table", set()),
+                            ("read_process_cmdlines", "")):
+            p = unittest.mock.patch.object(mounts_mod, target, return_value=ret)
+            p.start()
+            self.addCleanup(p.stop)
 
         self.account = Account.from_dict(
             {"id": "ms-1", "display_name": "user@corp.com", "provider": "microsoft"})
@@ -218,8 +238,7 @@ class TestReconcile(unittest.TestCase):
         ])
         dump = {"MyLib": {"type": "onedrive", "drive_id": "D1",
                           "drive_type": "documentLibrary"}}
-        with unittest.mock.patch.object(MountManager, "config_dump", return_value=dump), \
-             unittest.mock.patch.object(MountManager, "is_mounted", return_value=False):
+        with unittest.mock.patch.object(MountManager, "config_dump", return_value=dump):
             counts = reconcile_mounts(self.registry)
 
         self.assertEqual(counts["adopted"], 1)
@@ -236,11 +255,29 @@ class TestReconcile(unittest.TestCase):
         self.assertIn("Documents", kept)
         self.assertNotIn("Ghost", kept)
 
+    def test_adopts_via_account_scoped_remote_name(self):
+        # Remotes are account-scoped ("<drive>--<account_id>"); the adoption
+        # gate must accept the scoped name or every healed bookmark would be
+        # deleted as "no remote" instead of adopted.
+        live = self.base / "MyLib"
+        self._write_bookmarks([f"{self._uri(live)} MyLib"])
+        dump = {f"MyLib--{self.account.id}": {
+            "type": "onedrive", "drive_id": "D1",
+            "drive_type": "documentLibrary"}}
+        with unittest.mock.patch.object(MountManager, "config_dump", return_value=dump):
+            counts = reconcile_mounts(self.registry)
+        self.assertEqual(counts["adopted"], 1)
+        self.assertEqual(counts["removed"], 0)
+        recs = load_mount_records()
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["account_id"], "ms-1")
+        self.assertEqual(recs[0]["mountpoint"], str(live))
+        self.assertEqual(recs[0]["base"], str(self.base))
+
     def test_leaves_non_cloudy_bookmarks_alone(self):
         other = Path.home() / "Music"
         self._write_bookmarks([f"{self._uri(other)} Music"])
-        with unittest.mock.patch.object(MountManager, "config_dump", return_value={}), \
-             unittest.mock.patch.object(MountManager, "is_mounted", return_value=False):
+        with unittest.mock.patch.object(MountManager, "config_dump", return_value={}):
             counts = reconcile_mounts(self.registry)
         self.assertEqual(counts, {"adopted": 0, "recorded": 0, "removed": 0})
         self.assertIn("Music", self.bookmarks.read_text())

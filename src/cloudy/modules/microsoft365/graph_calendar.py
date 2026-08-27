@@ -178,6 +178,9 @@ class GraphCalendarMixin:
                 "email": ea.get("address", ""),
                 # none|organizer|tentativelyAccepted|accepted|declined|notResponded
                 "response": (a.get("status") or {}).get("response", "none"),
+                # required|optional|resource — carried so a re-save doesn't
+                # clobber optional attendees back to required.
+                "type": a.get("type") or "required",
             })
         body = data.get("body") or {}
         response = (data.get("responseStatus") or {}).get("response", "none")
@@ -257,12 +260,20 @@ class GraphCalendarMixin:
             event["body"] = {"contentType": "HTML" if html else "Text", "content": body}
         if attendees:
             event["attendees"] = [
-                {"emailAddress": {"address": a}, "type": "required"}
-                for a in attendees if a
-            ]
+                slot for slot in map(self._attendee_slot, attendees) if slot]
         if source == "shared" and address:
             return self._post(f"/users/{address}/events", event, SCOPES_MAIL_SHARED)
         return self._post("/me/events", event, SCOPES_MAIL)
+
+    @staticmethod
+    def _attendee_slot(a) -> dict | None:
+        """One attendee entry — ``"a@b.c"`` (→ required) or ``{"email": …,
+        "type": required|optional|resource}`` — as the Graph attendee JSON,
+        or ``None`` for an empty entry."""
+        email, typ = a, "required"
+        if isinstance(a, dict):
+            email, typ = a.get("email", ""), a.get("type") or "required"
+        return {"emailAddress": {"address": email}, "type": typ} if email else None
 
     def update_event(self, event_id: str, *, subject: str, start_iso: str,
                      end_iso: str, location: str = "", body: str = "",
@@ -284,11 +295,11 @@ class GraphCalendarMixin:
             event["body"] = {"contentType": "HTML" if html else "Text", "content": body}
         # attendees: ``None`` = leave untouched; a list (even empty) = set it, so
         # removing every attendee in the editor actually clears them server-side.
+        # Entries are emails or ``{"email":…, "type": required|optional|resource}``
+        # dicts (the editor preserves each attendee's original type).
         if attendees is not None:
             event["attendees"] = [
-                {"emailAddress": {"address": a}, "type": "required"}
-                for a in attendees if a
-            ]
+                slot for slot in map(self._attendee_slot, attendees) if slot]
         if event_id.startswith("shared:"):
             _, address, eid = _split_id(event_id, 3)
             return self._patch(f"/users/{address}/events/{eid}", event, SCOPES_MAIL_SHARED)

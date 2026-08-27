@@ -584,6 +584,25 @@ class NotificationManager:
         self._trim_set(seen, self._MAX_SEEN_EVENTS)
         return False
 
+    def refresh_invites(self, account_id: str) -> None:
+        """Re-run the pending-invite sweep for one account soon.
+
+        Called after the user answers an invite (e.g. from the event window)
+        so the Calendar tab badge and banner state catch up immediately,
+        instead of waiting out the slow invite cadence. One-shot, best-effort;
+        unknown/signed-out accounts are ignored."""
+        for account in self._app.registry.accounts():
+            if account.id == account_id:
+                break
+        else:
+            return
+        if not account.signed_in:
+            return
+        # Drop the per-account throttle so the sweep actually runs, and let
+        # _spawn's busy-key collapse it into any sweep already in flight.
+        self._invite_polled.pop(account_id, None)
+        GLib.timeout_add_seconds(2, self._poll_invites, account)
+
     def _notify_invite(self, account, ev) -> None:
         subject = ev.get("subject", "") or _("(no title)")
         start = _parse_dt(ev.get("start", ""))

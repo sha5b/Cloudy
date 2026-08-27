@@ -18,7 +18,7 @@ sandboxed Cloudy app over **D-Bus** (`io.github.sha5b.Cloudy`).
 
 ## Requirements
 
-- `python3-nautilus` (the **4.x** bindings — Nautilus 43+/GTK4).
+- `nautilus-python` (the **4.x** bindings — Nautilus 43+/GTK4).
   On Fedora: `sudo dnf install nautilus-python`.
 
 ## Install

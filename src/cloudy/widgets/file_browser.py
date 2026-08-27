@@ -416,6 +416,17 @@ class FileBrowserPane(Adw.Bin):
             return entries
         return [e for e in entries if self._filter in e["name"].lower()]
 
+    #: Most rows/tiles built in one render. Every entry becomes a widget tree on
+    #: the GTK thread, so a SharePoint folder holding tens of thousands of files
+    #: would lock the app up for as long as it takes to build them all. Beyond
+    #: this the user gets a "narrow it down" note and the search box.
+    _RENDER_CAP = 500
+
+    def _capped(self, entries) -> tuple[list[dict], int]:
+        """``(rows to build, how many were left out)``."""
+        shown = self._sort(self._filtered(entries))
+        return shown[:self._RENDER_CAP], max(0, len(shown) - self._RENDER_CAP)
+
     def _render_entries(self) -> None:
         if not self._entries:
             self._show_status("folder-symbolic", _("Empty folder"),
@@ -432,24 +443,46 @@ class FileBrowserPane(Adw.Bin):
             self._render_list()
             self._stack.set_visible_child_name("list")
 
+    def _more_label(self, hidden: int) -> Gtk.Label:
+        return self._caption(
+            _("%d more not shown — use search to narrow this folder down.")
+            % hidden)
+
     def _render_grid(self) -> None:
         self._clear(self._flow)
-        for entry in self._sort(self._filtered(self._entries)):
+        entries, hidden = self._capped(self._entries)
+        for entry in entries:
             self._flow.append(self._grid_item(entry))
+        if hidden:
+            child = Gtk.FlowBoxChild(focusable=False)
+            child.set_child(self._more_label(hidden))
+            self._flow.append(child)
 
     def _render_list(self) -> None:
         self._clear(self._list)
         self._list.append(self._list_header_row())
+        built = total = 0
 
         def walk(entries, depth):
+            # Counting is cheap; building the row is what costs. So walk the
+            # whole tree to report an honest total, but stop making widgets at
+            # the cap. Inline-expanded children share the same budget.
+            nonlocal built, total
             for entry in self._sort(self._filtered(entries)):
-                self._list.append(self._list_row(entry, depth))
+                total += 1
+                if built < self._RENDER_CAP:
+                    built += 1
+                    self._list.append(self._list_row(entry, depth))
                 if entry["is_dir"] and entry["path"] in self._expanded:
                     children = self._child_cache.get(entry["path"])
                     if children:
                         walk(children, depth + 1)
 
         walk(self._entries, 0)
+        if total > built:
+            row = Gtk.ListBoxRow(activatable=False, selectable=False)
+            row.set_child(self._more_label(total - built))
+            self._list.append(row)
 
     @staticmethod
     def _clear(container) -> None:
@@ -563,11 +596,18 @@ class FileBrowserPane(Adw.Bin):
             return
         self._expanded.add(path)
         if path not in self._child_cache:
+            # Tag the scan with the folder it belongs to. Scanning a subfolder on
+            # a network mount can take seconds, and _load() clears the expansion
+            # state — without this the late result would repopulate it and
+            # re-render a folder the user has already navigated away from.
+            folder = self._cur()
             run_async(lambda: scan_directory(Path(path)),
-                      lambda res, err: self._on_children(path, res, err))
+                      lambda res, err: self._on_children(folder, path, res, err))
         self._render_list()  # chevron flips now; children appear once loaded
 
-    def _on_children(self, path, entries, error) -> bool:
+    def _on_children(self, folder, path, entries, error) -> bool:
+        if folder != self._cur():
+            return False  # stale scan for a folder we've navigated away from
         if error is not None or entries is None:
             self._expanded.discard(path)
         else:

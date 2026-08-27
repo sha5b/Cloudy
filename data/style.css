@@ -159,6 +159,13 @@
   margin-top: 2px;
 }
 
+/* The row of reaction chips hanging below a bubble (chat) or a channel post
+   (teams) — pulls them in from the bubble's edge like Teams does. */
+.cloudy-reactions,
+.cloudy-replies {
+  margin-top: 2px;
+}
+
 /* Chat message bubble — received (subtle fill) vs. mine (accent, right). */
 .cloudy-bubble {
   border-radius: 12px;

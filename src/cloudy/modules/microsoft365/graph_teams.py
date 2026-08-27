@@ -65,23 +65,55 @@ class GraphTeamsMixin:
         """A page of a channel's root posts (oldest-last), each carrying its
         ``replies`` list — channel conversations are post+replies, not a flat
         stream. ``next_token`` (Graph ``@odata.nextLink``) fetches the older
-        page above. Needs ``ChannelMessage.Read.All`` (tenant-admin consent)."""
+        page above. Needs ``ChannelMessage.Read.All`` (tenant-admin consent).
+
+        ``systemEventMessage`` rows (members added/removed, renames, calls)
+        pass through as centered status rows and soft-deleted messages keep a
+        ``{"deleted": True}`` tombstone instead of silently vanishing from the
+        channel's history."""
         url = page_token or (
             f"/teams/{team_id}/channels/{channel_id}/messages"
             f"?$top={limit}&$expand=replies")
         data = self._get(url, SCOPES_CHANNELS)
         me = self._me_id()
         out = []
+
+        def parse(r):
+            mtype = r.get("messageType")
+            if mtype == "systemEventMessage":
+                # The chat mixin's static parser (GraphClient mixes both in)
+                # turns membership/call events into a status row; unknown
+                # event kinds stay hidden.
+                row = self._system_event_row(r)
+                if row is not None:
+                    row["subject"] = ""
+                    row["replies"] = []
+                return row
+            if mtype != "message":
+                return None
+            if r.get("deletedDateTime"):
+                # Keep the thread position: a soft-deleted post becomes a
+                # tombstone row (the same shape graph_chat emits for chats).
+                user = (r.get("from") or {}).get("user") or {}
+                return {
+                    "id": r.get("id", ""), "subject": "", "text": "",
+                    "markup": "", "from": html.unescape(
+                        user.get("displayName", "") or ""),
+                    "sent": r.get("createdDateTime", ""),
+                    "is_mine": bool(user.get("id")) and user.get("id") == me,
+                    "attachments": [], "reactions": [], "web_url": "",
+                    "reply_to": None, "forward": None, "deleted": True,
+                    "replies": [],
+                }
+            return self._channel_message_row(r, me, team_id, channel_id)
+
         for m in data.get("value", []):
-            if m.get("messageType") != "message" or m.get("deletedDateTime"):
+            row = parse(m)
+            if row is None:
                 continue
-            row = self._channel_message_row(m, me, team_id, channel_id)
-            replies = [self._channel_message_row(r, me, team_id, channel_id)
-                       for r in (m.get("replies") or [])
-                       if r.get("messageType") == "message"
-                       and not r.get("deletedDateTime")]
-            replies.sort(key=lambda r: r.get("sent", ""))
-            row["replies"] = replies
+            replies = [parse(r) for r in (m.get("replies") or [])]
+            row["replies"] = [r for r in replies if r is not None]
+            row["replies"].sort(key=lambda r: r.get("sent", ""))
             out.append(row)
         out.reverse()  # Graph returns newest-first; render oldest-last like chat
         return out, data.get("@odata.nextLink")
@@ -245,10 +277,17 @@ class GraphTeamsMixin:
             f"/groups/{team_id}/onenote/sections/{section_id}/pages",
             doc, SCOPES_NOTES)
 
-    def update_note_page(self, team_id: str, page_id: str,
-                         body_html: str) -> None:
-        """Replace a page's body (async; the change may take a moment)."""
+    def update_note_page(self, team_id: str, page_id: str, body_html: str,
+                         title: str | None = None,
+                         original_title: str | None = None) -> None:
+        """Replace a page's body (async; the change may take a moment). When
+        ``title`` is given and differs from ``original_title``, a title-replace
+        command is appended so a renamed page doesn't silently keep its old
+        title on the server."""
         commands = [{"target": "body", "action": "replace",
                      "content": body_html or ""}]
+        if title and original_title is not None and title != original_title:
+            commands.append({"target": "title", "action": "replace",
+                             "content": title})
         self._patch(f"/groups/{team_id}/onenote/pages/{page_id}/content",
                     commands, SCOPES_NOTES)

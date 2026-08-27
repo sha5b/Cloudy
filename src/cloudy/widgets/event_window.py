@@ -45,6 +45,7 @@ class EventDetailWindow(Adw.Window):
         # Edit-form widgets, built lazily on first Edit; kept so Save can read them.
         self._form: dict = {}
         self._attendee_emails: list[str] = []
+        self._attendee_types: dict[str, str] = {}  # email → required|optional|…
 
         self._content = Adw.Bin(vexpand=True)
         self._content.set_child(self._spinner())
@@ -144,6 +145,7 @@ class EventDetailWindow(Adw.Window):
     def _exit_edit(self) -> None:
         self._form = {}
         self._attendee_emails = []
+        self._attendee_types = {}
         self._att_rows = []
         self._render_detail()
 
@@ -202,6 +204,11 @@ class EventDetailWindow(Adw.Window):
             if isinstance(a, dict) and a.get("email")]
         self._attendee_names = {
             a.get("email", ""): a.get("name", "")
+            for a in (ev.get("attendees") or []) if isinstance(a, dict)}
+        # Each attendee's original type (required/optional/…) rides along on
+        # Save so an untouched list isn't clobbered to all-required server-side.
+        self._attendee_types = {
+            a.get("email", ""): a.get("type") or "required"
             for a in (ev.get("attendees") or []) if isinstance(a, dict)}
         att_group = Adw.PreferencesGroup(
             title=_("Attendees"),
@@ -287,12 +294,17 @@ class EventDetailWindow(Adw.Window):
             if end <= start:
                 end = start + timedelta(hours=1)
 
-        # Desired attendee list = remaining rows + any newly typed addresses.
-        attendees = list(self._attendee_emails)
+        # Desired attendee list = remaining rows + any newly typed addresses,
+        # as {"email", "type"} entries: emails already on the event keep their
+        # original type, new ones default to required.
+        types = self._attendee_types
+        attendees = [{"email": e, "type": types.get(e, "required")}
+                     for e in self._attendee_emails]
         for a in self._att_add_row.get_text().split(","):
             a = a.strip()
-            if a and a not in attendees:
-                attendees.append(a)
+            if a and a not in self._attendee_emails and not any(
+                    s["email"] == a for s in attendees):
+                attendees.append({"email": a, "type": types.get(a, "required")})
 
         buf = f["body"].get_buffer()
         body = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True)
@@ -347,6 +359,11 @@ class EventDetailWindow(Adw.Window):
             return False
         self._window.add_toast(_("Response sent."))
         self._invalidate()
+        # The invite badge/banner lags behind an RSVP by design (slow sweep
+        # cadence) — nudge the notifier to re-sweep this account now.
+        notifier = getattr(self._window.get_application(), "notifier", None)
+        if hasattr(notifier, "refresh_invites"):
+            notifier.refresh_invites(self._account.id)
         if self._on_changed is not None:
             self._on_changed()
         self._load()  # refresh the detail (response state changed)

@@ -328,27 +328,39 @@ class CloudyApplication(Adw.Application):
             self._sync_started = True
             self.sync_manager.start()
             self.notifier.start()
-            self._log_active_mounts()
-            self._remount_saved_drives(verbose=True)
-            # Health watchdog: re-check remembered mounts periodically so a
-            # crashed rclone daemon reconnects on its own (every 90s; quiet).
-            GLib.timeout_add_seconds(
-                90, lambda: (self._remount_saved_drives(verbose=False), True)[1])
+            # One shared, event-driven view of what is mounted. Everything else
+            # (Files tab, Dashboard, the Nautilus D-Bus service) reads its
+            # snapshot instead of probing the system itself.
+            from .core.mount_state import MountState
 
-    def _log_active_mounts(self) -> None:
-        """Print which Cloudy drives are mounted at startup.
+            MountState.get().start_monitor()
+            self._remount_saved_drives(verbose=True, log_state=True)
+            # Health watchdog: bring back a crashed rclone daemon. The mount
+            # monitor already reacts to drives appearing and dying, so this only
+            # has to catch the case where nothing changed but a remount is owed
+            # — a slow tick is enough, and each one is a pair of /proc reads.
+            GLib.timeout_add_seconds(
+                self._WATCHDOG_INTERVAL_S,
+                lambda: (self._remount_saved_drives(verbose=False), True)[1])
+
+    #: How often to retry mounts the user asked to keep (seconds).
+    _WATCHDOG_INTERVAL_S = 300
+
+    @staticmethod
+    def _log_active_mounts() -> None:
+        """Print which Cloudy drives are mounted.
 
         Checkable in both RPM and Flatpak via the app's stdout / journal
         (``journalctl --user -t cloudy | grep mounts`` or the launch terminal).
-        Reads the kernel mount table, so it never stalls on a hung FUSE mount.
+        Reads the shared snapshot, so it never stalls on a hung FUSE mount.
         """
         try:
-            from .modules.microsoft365.mounts import MountManager, mount_root
+            from .core.mount_state import MountState
+            from .modules.microsoft365.mounts import mount_root
 
             root = str(mount_root())
             mounted = sorted(
-                m for m in MountManager.active_mounts() if m.startswith(root)
-            )
+                m for m in MountState.get().mounted if m.startswith(root))
             if mounted:
                 print(f"[mounts] active Cloudy mounts at startup ({len(mounted)}):")
                 for m in mounted:
@@ -358,21 +370,25 @@ class CloudyApplication(Adw.Application):
         except Exception as exc:  # noqa: BLE001 - never block startup on logging
             print(f"[mounts] could not enumerate mounts: {exc}")
 
-    def _remount_saved_drives(self, *, verbose: bool) -> None:
+    def _remount_saved_drives(self, *, verbose: bool, log_state: bool = False) -> None:
         """Bring back drives the user mounted that aren't currently healthy.
 
         FUSE mounts are live ``rclone mount`` daemons that die on reboot (and can
         crash mid-session), so we re-run the mounts the user asked to keep. Used
         both at startup (``verbose``) and as a periodic watchdog (quiet). Mounting
-        is blocking (rclone subprocesses + a ``ps`` health probe), so it runs on a
-        daemon thread and never stalls the UI.
+        is blocking (rclone subprocesses), so it runs on a daemon thread and
+        never stalls the UI.
         """
         def worker():
             try:
+                from .core.mount_state import MountState
                 from .modules.microsoft365.mounts import (
                     reconcile_mounts, remount_saved)
 
                 log = (lambda m: print(f"[mounts] {m}")) if verbose else (lambda _m: None)
+                MountState.get().refresh_blocking()
+                if log_state:
+                    self._log_active_mounts()
                 # Startup only: reconcile stale sidebar bookmarks against the
                 # rclone remotes — adopt orphaned drives (so they remount) and
                 # clear dead-stub bookmarks that would silently swallow uploads.

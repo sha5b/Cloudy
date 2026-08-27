@@ -66,14 +66,21 @@ def save_bytes_dialog(parent: Gtk.Window, data: bytes, name: str,
         if gfile is None:
             on_done(None)
             return
-        try:
+
+        def work():
             from gi.repository import Gio
 
             gfile.replace_contents(data, None, False,
                                    Gio.FileCreateFlags.NONE, None)
-            on_done(None)
-        except GLib.Error as exc:
-            on_done(exc.message)
+            return True
+
+        def done(_ok, err) -> bool:
+            on_done(err)  # None on success
+            return False
+
+        # Write off-thread: the destination can sit on a FUSE mount, where a
+        # synchronous write blocks the GTK loop on a network transfer.
+        run_async(work, done)
 
     dialog.save(parent, None, _on_saved)
 

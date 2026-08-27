@@ -11,6 +11,137 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (safe test harness)
+- **Headless UI sweep suite** (`tests/unit/test_chat_sweep.py`,
+  `test_mount_sweep.py`): drives the real Chat and Files views against a fake
+  Teams client injected into the app's client cache and a simulated mount
+  snapshot — no network, no real data, nothing to break. Exercises list
+  kinds/sections/presence/unread, all message shapes (links, quotes, images,
+  reactions, system events, tombstones), send/adopt/retry flows, pagination,
+  read-ack gating, scroll-state derivation, search cleanup, and render-time
+  ceilings (freeze guards). It immediately caught and fixed two more bugs: a
+  permanent "Loading chats…" placeholder row after a cold cache, and messages
+  delivered to a hidden tab never being marked read once it was shown again.
+
+### Fixed (full-app audit fix pass — chat, calendar, mail, Teams, dashboard, mounts)
+- **Startup mounting is parallel and stops re-writing rclone config.** The
+  auto-remount ran one drive at a time and re-ran `rclone config create` for
+  every remembered drive on every boot; remote creation is now serial-but-
+  skip-when-present and the mounts themselves run in parallel (up to 4), the
+  mount-table poll cadence was halved, and the first offline bisync waits ~90 s
+  so it stops competing with the remount burst.
+- **Bookmark reconciliation adopts scoped remotes.** The healing pass checked
+  only the legacy unscoped remote name, so since remotes became account-scoped
+  it deleted bookmarks it should have adopted.
+- **Share links resolve through the remembered mount base.** The fallback path
+  guessed the account folder from the account *id* (real folders use the
+  display name) and never matched, silently routing links at the wrong drive;
+  records now remember their base, and resolution no longer `resolve()`s
+  through the FUSE mount.
+- **Chat: an in-flight message stays in its own conversation.** The optimistic
+  "sending…" echo carried no chat id, so switching chats mid-send could append
+  it (and its Retry button) to the wrong thread forever; failed bubbles were
+  filed under whichever chat was open at callback time.
+- **Chat: rich sends no longer duplicate.** Echo adoption compared raw composer
+  text against the HTML-stripped server copy — never equal for markdown,
+  @mentions or multi-line+image sends, leaving two bubbles. Adoption now
+  matches the message id returned by the send.
+- **Chat: composer drafts and staged attachments no longer leak into the next
+  conversation** (previously they were silently sent to whichever chat you
+  switched to).
+- **Chat: messages are no longer marked read while the tab is hidden.** The
+  open-chat poll acked arrivals on focus alone, reading-and-clearing messages
+  on every device that were never displayed.
+- **Chat: an underscore no longer breaks sending.** The italic regex matched
+  `snake_case` and URLs, mangling them on Microsoft and failing outright on
+  Google; Google text-only sends now always take the plain path with a
+  fallback. Background refreshes also keep paged-in conversations instead of
+  collapsing the list to page 1, deleted-message tombstones actually render,
+  and stale search rows no longer linger under new results.
+- **Calendar: meeting-invite emails open again.** `startDateTime` on an
+  eventMessage is a string, not a dateTimeTimeZone dict — the invite-card
+  builder crashed every meetingRequest/meetingCancelled mail.
+- **Calendar: saving an event no longer drifts its time by the DST delta.**
+  The editor converted local→UTC with *today's* offset; it now resolves the
+  local IANA zone for the target date. Cross-zone `.ics` invites keep their
+  TZID (converted to your zone), month fetches pad a day so edge-of-grid
+  events aren't dropped, multi-day events appear on every day they span, and
+  Google event times are normalized to local (display, sorting, "Live now").
+- **Calendar: optional attendees stay optional.** Every editor save re-sent
+  the whole list as "required"; types are now carried through round-trips.
+  RSVPing (from the event window or a mail invite) refreshes the pending-
+  invite badge immediately, and the EDS mirror writes an exclusive all-day
+  DTEND for both providers.
+- **Mail: attachments open from the pop-out reader** (the window had no
+  application, so every chip click errored).
+- **Mail: timestamps render in local time** (rows and the reader sliced the
+  raw UTC string); reading mail in the Inbox decrements the sidebar badge
+  (the guard compared against a literal id the opaque Graph inbox never had);
+  folder-load failures surface an error/re-sign-in instead of a blank Unread
+  view; composer attach and attachment saves moved off the GTK thread
+  (downloading from a mount froze the UI); inline-image-only drafts are no
+  longer deleted after sending a flattened copy; re-saving a resumed draft
+  updates it instead of duplicating.
+- **Teams: forwarded posts render their quoted original** (previously an empty
+  card), channel images authenticate with channel scopes, the poll picks up
+  edits/reactions/attachments, a failed post restores the typed text instead
+  of discarding it, scrolled-up reading survives re-renders, inline images are
+  cached per channel, older posts paginate, system events and deleted messages
+  render, and OneNote title edits are actually saved.
+- **Dashboard: file-change rows open asynchronously** (the synchronous launch
+  on FUSE paths could freeze the app); the Files upload indicator works (it
+  queried the unscoped remote name, so "Uploading…" could never appear); the
+  Unread stat uses the server-side total it already fetched; cross-provider
+  event sorting/today-counting parses timestamps instead of comparing mixed
+  ISO strings; the Activity badge no longer counts starred channels forever;
+  the Activity feed keeps its content on transient refresh errors and renders
+  instantly from a cache; and the shared `status_page()` helper escapes its
+  text.
+- Unit suite grew from 153 to 256 tests (chat logic, Teams channels, calendar
+  spans/DST/ics/EDS, mail `_ical`/timestamps/drafts, dashboard ordering).
+
+### Fixed (mount-state snapshot refactor)
+- **Mount state is read once and shared, not re-probed constantly.** The Files
+  tab, the Dashboard, the Nautilus D-Bus service and the remount watchdog each
+  probed the system for themselves — the Files tab on every open and close, the
+  sync poll every 3 seconds, the watchdog once per remembered drive. In Flatpak
+  every one of those is a `flatpak-spawn --host` round-trip, so a few drives
+  turned into a steady stream of host processes. There is now one shared
+  snapshot (`core/mount_state.py`) refreshed only when something can have
+  changed: at startup, on kernel mount events (`Gio.UnixMountMonitor`), right
+  after Cloudy mounts or unmounts, and on a slow fallback tick. Readers get it
+  from memory and never block.
+- **A dead mount is cleared the moment it is noticed.** When an rclone daemon
+  dies its mountpoint stays in the mount table, and every `stat()` on it then
+  hangs in the kernel. Cloudy also puts each mountpoint in the GTK bookmarks
+  file, so the file manager sidebar, every GTK file chooser and Shell search
+  all stat it — one dead daemon froze the desktop's file handling. Each
+  snapshot refresh now detaches stale Cloudy mountpoints, instead of waiting up
+  to 90 seconds for the watchdog.
+- **Unmounting removes the sidebar bookmark before anything else can stat it**,
+  and both `fusermount` attempts have timeouts.
+- **Account switching no longer builds every tab.** One switch used to create
+  all five views and fire about six concurrent network loads for tabs nobody
+  was looking at — including a Files tab that re-enumerated libraries. Each tab
+  is now built the first time it is shown.
+- **Huge folders no longer lock the browser.** A folder is rendered up to a cap
+  with an honest "N more not shown" note; before, every entry became a widget
+  on the GTK thread.
+- **Expanding a folder inline no longer races navigation**: a subfolder scan
+  that lands after the user has moved on is dropped instead of writing into the
+  new folder's state.
+- **The mount cache has a ceiling** (`cache-max-size`, default 10G). With
+  `--vfs-cache-mode full` and a 72h retention it could otherwise grow until the
+  disk was full, which stalls the whole desktop.
+- **Nautilus extension**: dropped the `tip` argument from its menu items.
+  nautilus-python removed that property, so passing it raised and took the
+  whole Cloudy menu with it.
+
+### Changed
+- The remount watchdog runs every 5 minutes instead of every 90 seconds, and
+  costs one pair of `/proc` reads instead of one `ps` per remembered drive. The
+  mount monitor now covers the cases the watchdog used to poll for.
+
 ## [0.3.4] - 2026-08-04
 
 Full-app stability audit: file-browser freezes, chat/badge correctness, and

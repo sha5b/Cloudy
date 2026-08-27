@@ -2,9 +2,19 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Shahab Nedaei
 #
-# Reproducible one-shot setup for Cloudy development on Fedora 44 (GNOME 50).
-# Installs the build toolchain, the runtime libraries, and (optionally) the host
-# backends and the Flatpak runtimes. Safe to re-run.
+# System-package half of the Cloudy development setup (Fedora 44 / GNOME 50).
+#
+# This script installs ONLY what dnf must provide because pip/uv cannot: C
+# libraries, GObject introspection typelibs, code generators and host daemons.
+# The Python half — meson, ninja, ruff, msal, Pillow — lives in the uv
+# virtualenv instead; run `make venv` for that (no root needed).
+#
+#   dnf  (root, here)   gtk4/libadwaita/glib headers, glib-compile-resources,
+#                       python3-gobject, appstream validators, rclone, Nautilus
+#                       bindings, flatpak runtimes
+#   uv   (`make venv`)  meson, ninja, ruff, msal, Pillow
+#
+# `make bootstrap` runs this and then `make venv`. Safe to re-run.
 #
 # Usage:
 #   ./scripts/bootstrap-fedora.sh             # build toolchain + GTK libs
@@ -28,10 +38,17 @@ done
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
-# --- Build toolchain + GTK4/Libadwaita/PyGObject -----------------------------
-log "Installing build toolchain and GTK4/Libadwaita libraries"
+# --- Native build deps + GTK4/Libadwaita/PyGObject ---------------------------
+# NOT listed on purpose:
+#   * meson / ninja      -> the uv venv provides them (`make venv`)
+#   * blueprint-compiler -> Meson fetches the PINNED v0.16.0 from
+#                           subprojects/blueprint-compiler.wrap. Installing the
+#                           distro one silently overrides that pin, so builds
+#                           would stop being reproducible across machines.
+# glib2-devel is what carries glib-compile-resources and the gio-2.0 pkg-config
+# file; without it Meson cannot even configure.
+log "Installing native build dependencies and GTK4/Libadwaita libraries"
 sudo dnf install -y \
-  meson ninja-build blueprint-compiler \
   gcc pkgconf-pkg-config \
   gtk4-devel libadwaita-devel \
   python3 python3-gobject \
@@ -54,4 +71,4 @@ if [[ "$WANT_FLATPAK" == 1 ]]; then
   flatpak install -y --user org.gnome.Platform//50 org.gnome.Sdk//50
 fi
 
-log "Bootstrap complete. Next: 'make run' (local) or 'make flatpak-run' (sandboxed)."
+log "System packages done. Next: 'make venv' for the Python side, then 'make run'."

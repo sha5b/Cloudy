@@ -24,6 +24,9 @@ from ..modules.microsoft365.mounts import MountManager
 
 #: how often (seconds) to re-bisync each enabled account
 SYNC_INTERVAL = 600
+#: how long (seconds) a startup-enabled account waits before its FIRST bisync
+#: (lets the mount/auto-remount burst finish first)
+_STARTUP_SYNC_DELAY_S = 90
 
 
 class SyncManager:
@@ -32,6 +35,7 @@ class SyncManager:
         self._mounts = MountManager()
         self._timers: dict[str, int] = {}  # account_id -> GLib source id
         self._busy: set[str] = set()
+        self._first_run: set[str] = set()  # accounts with a deferred first sync
 
     # -- lifecycle --------------------------------------------------------
     def start(self) -> None:
@@ -42,7 +46,7 @@ class SyncManager:
             return
         for account in self._app.registry.accounts():
             if account.signed_in and getattr(account, "full_sync", False):
-                self.enable(account)
+                self.enable(account, immediate=False)
 
     def stop(self) -> None:
         """Stop all sync timers and disconnect settings handler."""
@@ -67,14 +71,31 @@ class SyncManager:
             for account_id in list(self._timers):
                 self._disable_by_id(account_id)
 
-    def enable(self, account) -> None:
+    def enable(self, account, immediate: bool = True) -> None:
         if not self._master_enabled():
             return
         if account.id not in self._timers:
             self._timers[account.id] = GLib.timeout_add_seconds(
                 SYNC_INTERVAL, self._on_timer, account.id
             )
-        self.sync_now(account)
+        if immediate or account.id in self._first_run:
+            self.sync_now(account)
+        elif account.id not in self._busy:
+            # At startup, hold the first bisync back: it competes with the
+            # auto-remount burst for bandwidth and host subprocesses, which is
+            # a large part of "drives take forever to come up". Interactive
+            # toggles (Preferences) still sync immediately.
+            self._first_run.add(account.id)
+            GLib.timeout_add_seconds(
+                _STARTUP_SYNC_DELAY_S, self._deferred_first_sync, account.id)
+
+    def _deferred_first_sync(self, account_id: str) -> bool:
+        self._first_run.discard(account_id)
+        account = self._app.registry.get(account_id)
+        if (account is not None and self._master_enabled()
+                and getattr(account, "full_sync", False)):
+            self.sync_now(account)
+        return False  # one-shot
 
     def disable(self, account) -> None:
         self._disable_by_id(account.id)

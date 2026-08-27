@@ -13,6 +13,7 @@ from __future__ import annotations
 import html
 import io
 import re
+from email.utils import getaddresses
 from gettext import gettext as _
 
 from gi.repository import Adw, Gtk, Pango
@@ -353,8 +354,9 @@ def _address_row(prefix: str, value: str) -> Gtk.Widget | None:
     """A dim "Prefix:" line whose addresses are each a click-to-copy link.
 
     Rendered as a single wrapping markup label so many recipients flow onto
-    multiple lines naturally."""
-    addrs = [a.strip() for a in (value or "").split(",") if a.strip()]
+    multiple lines naturally. getaddresses() splits RFC 5322 lists properly —
+    a naive comma split broke display names like ``"Doe, John" <j@x>``."""
+    addrs = [e for _n, e in getaddresses([value or ""]) if e]
     if not addrs:
         return None
     links = ", ".join(f'<a href="copy:{esc(a)}">{esc(a)}</a>' for a in addrs)

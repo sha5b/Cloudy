@@ -18,7 +18,7 @@ from gi.repository import Adw, Gdk, GLib, Gtk, Pango
 
 from .event_window import EventDetailWindow
 from .format import parse_iso_utc
-from .month_grid import MonthGrid
+from .month_grid import MonthGrid, expand_days
 from .source_nav import (
     SCOPE_HINT,
     SourceTabs,
@@ -66,6 +66,7 @@ class CalendarView(Adw.Bin):
         self._events: list = []
         self._has_data = False
         self._query = ""  # agenda search filter
+        self._no_matches_row = None  # transient "No events match …" placeholder
         # Live "happening now" tracking: a per-minute tick (only while the view is
         # on screen) re-marks events as they start/end and periodically refetches,
         # so "Live now" appears without a manual reload.
@@ -191,9 +192,10 @@ class CalendarView(Adw.Bin):
         if live != self._live_ids:
             self._render(self._events)
         # Every 5 minutes, refetch so server-side additions/changes show up live.
+        # Keep _has_data as-is: a transient fetch error then leaves the stale
+        # (still-shown) data on screen instead of blanking the agenda.
         self._tick_count += 1
         if self._tick_count % 5 == 0:
-            self._has_data = False
             self._load_async()
         return True  # keep the timer alive (removed on unmap)
 
@@ -206,7 +208,14 @@ class CalendarView(Adw.Bin):
     # -- range (the grid's visible month drives what we fetch) -----------
     def _range_iso(self) -> tuple[str, str]:
         first, last = self._grid.visible_range()
-        return f"{first}T00:00:00Z", f"{last}T23:59:59Z"
+        # Pad one day on each side: the window is UTC-truncated at day
+        # boundaries, so an event whose UTC instant falls just outside it (any
+        # non-UTC local offset) was missed even though its local day is on the
+        # grid. The grid/agenda key by date, so an extra day of data is
+        # harmless (it simply renders nothing outside the grid's own days).
+        pad_first = datetime.strptime(first, "%Y-%m-%d").date() - timedelta(days=1)
+        pad_last = datetime.strptime(last, "%Y-%m-%d").date() + timedelta(days=1)
+        return f"{pad_first}T00:00:00Z", f"{pad_last}T23:59:59Z"
 
     def _on_grid_range(self, _first: str, _last: str) -> None:
         # The grid moved to another month — refetch that span.
@@ -228,6 +237,7 @@ class CalendarView(Adw.Bin):
 
     def _clear(self) -> None:
         clear_listbox(self._list)
+        self._no_matches_row = None  # cleared along with the list
 
     def _set_message(self, text: str) -> None:
         self._clear()
@@ -242,17 +252,24 @@ class CalendarView(Adw.Bin):
             self._set_message(_("No events this month."))
             self._has_data = False
             return
-        last_day = None
+        # Group by day SPAN (not just the start date): an event covering
+        # several days appears under each day it covers, matching the grid.
+        first, last = self._grid.visible_range()
+        by_day: dict[str, list] = {}
         for ev in events:
-            day = (ev.get("start", "") or "").partition("T")[0]
-            if day != last_day:
-                self._list.append(self._day_header(day))
-                last_day = day
-            self._list.append(self._event_row(ev))
+            for day in expand_days(ev, first, last):
+                by_day.setdefault(day, []).append(ev)
+        for day in sorted(by_day):
+            evs = by_day[day]
+            evs.sort(key=lambda e: (e.get("start", ""), e.get("subject", "")))
+            self._list.append(self._day_header(day))
+            for ev in evs:
+                self._list.append(self._event_row(ev))
         self._has_data = True
 
     def _day_header(self, day: str) -> Gtk.ListBoxRow:
         row = Gtk.ListBoxRow(activatable=False, selectable=False)
+        row._day = day  # type: ignore[attr-defined] - tagged for header pruning
         label = Gtk.Label(label=_pretty_day(day), xalign=0,
                           margin_top=10, margin_bottom=2, margin_start=12)
         label.add_css_class("heading")
@@ -303,9 +320,13 @@ class CalendarView(Adw.Bin):
         if resp == "declined":
             title.add_css_class("cloudy-strikethrough")
         text.append(title)
-        # Location, else the owning calendar's name (Google merges several
-        # calendars into one agenda — show which one each event came from).
-        subtitle = ev.get("location") or ev.get("calendar")
+        # Location and, when both exist, the owning calendar's name (Google
+        # merges several calendars into one agenda — show which one each event
+        # came from without losing the room).
+        location = ev.get("location") or ""
+        calendar_name = ev.get("calendar") or ""
+        subtitle = (f"{location} · {calendar_name}" if location and calendar_name
+                    else (location or calendar_name))
         if subtitle:
             sub = Gtk.Label(label=subtitle, xalign=0,
                             ellipsize=Pango.EllipsizeMode.END)
@@ -318,12 +339,37 @@ class CalendarView(Adw.Bin):
     def _on_search_changed(self, entry) -> None:
         self._query = entry.get_text().strip().lower()
         self._list.invalidate_filter()
+        self._sync_no_matches()
 
     def _filter_row(self, row) -> bool:
+        if getattr(row, "_no_match", False):
+            return True  # the transient placeholder itself stays visible
         if not self._query:
             return True
         text = getattr(row, "_search", None)  # event rows only; hides day headers
         return text is not None and self._query in text
+
+    def _sync_no_matches(self) -> None:
+        """Show a transient dimmed row when the search hides everything.
+
+        Carries neither ``_ev`` nor ``_search`` (plus a ``_no_match`` marker so
+        the filter keeps it), so arrow-nav and the filter itself skip it."""
+        if self._no_matches_row is not None:
+            self._list.remove(self._no_matches_row)
+            self._no_matches_row = None
+        if not self._query:
+            return
+        for row in data_rows(self._list, "_ev"):
+            if self._query in (getattr(row, "_search", "") or ""):
+                return  # at least one match — nothing to show
+        row = Gtk.ListBoxRow(activatable=False, selectable=False)
+        label = Gtk.Label(label=_("No events match “%s”") % self._query, xalign=0,
+                          margin_top=10, margin_bottom=10, margin_start=12, wrap=True)
+        label.add_css_class("dim-label")
+        row.set_child(label)
+        row._no_match = True  # type: ignore[attr-defined]
+        self._list.append(row)
+        self._no_matches_row = row
 
     # -- sources (Me / Teams / Shared) -----------------------------------
     def _shared_addresses(self) -> list:
@@ -499,7 +545,9 @@ class CalendarView(Adw.Bin):
 
     # -- keyboard navigation / multi-select ------------------------------
     def _event_rows(self) -> list:
-        return data_rows(self._list, "_ev")
+        # Only rows the search filter hasn't hidden — arrow keys used to jump
+        # to (and focus) invisible rows while a query was active.
+        return [r for r in data_rows(self._list, "_ev") if r.get_visible()]
 
     def _nav(self, delta: int, *, extend: bool = False) -> None:
         move_selection(self._list, self._event_rows(), delta, extend=extend)
@@ -528,6 +576,7 @@ class CalendarView(Adw.Bin):
             return
         for row in rows:  # optimistic removal
             self._list.remove(row)
+        self._prune_empty_headers()
         self._window.add_toast(
             _("Deleted %d events") % len(ids) if len(ids) > 1 else _("Event deleted"))
 
@@ -539,6 +588,27 @@ class CalendarView(Adw.Bin):
                 client.delete_event(ev_id)
 
         run_async(work, lambda _r, error: self._on_deleted(error))
+
+    def _prune_empty_headers(self) -> None:
+        """Drop day-header rows left with no event rows under them (the
+        optimistic multi-delete removed their last event; the resync rebuilds
+        everything anyway, but the interim frame must not show orphan dates)."""
+        empty: list = []
+        header = None
+        has_events = False
+        child = self._list.get_first_child()
+        while child is not None:
+            if getattr(child, "_day", None) is not None:
+                if header is not None and not has_events:
+                    empty.append(header)
+                header, has_events = child, False
+            elif getattr(child, "_ev", None) is not None:
+                has_events = True
+            child = child.get_next_sibling()
+        if header is not None and not has_events:
+            empty.append(header)
+        for row in empty:
+            self._list.remove(row)
 
     def _on_deleted(self, error) -> bool:
         if error:

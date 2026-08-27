@@ -12,7 +12,12 @@ eject on the mounted drive — nautilus-python can't add items to sidebar entrie
 so there's no extension-side unmount.
 
 Install to ~/.local/share/nautilus-python/extensions/ and run `nautilus -q`.
-Requires the python3-nautilus (4.x) bindings.
+Requires the nautilus-python (4.x) bindings — without that package Nautilus
+never loads this file at all.
+
+Nautilus.MenuItem exposes only ``name`` and ``label``: ``icon``, ``priority``
+and ``tip`` were unsupported for years and are gone from nautilus-python, so
+passing them raises and the whole menu disappears.
 
 All D-Bus calls are best-effort: if the app is not running they fail quietly,
 so the extension never breaks the file manager.
@@ -208,14 +213,12 @@ class CloudyMenuProvider(GObject.GObject, Nautilus.MenuProvider):
         copy_link = Nautilus.MenuItem(
             name="Cloudy::copy_share_link",
             label="Copy Share Link (Cloudy)",
-            tip="Create and copy a OneDrive/SharePoint sharing link via Cloudy",
         )
         copy_link.connect("activate", self._on_copy_link, managed)
 
         free_space = Nautilus.MenuItem(
             name="Cloudy::free_up_space",
             label="Free Up Space",
-            tip="Remove the local copy; keep the file online",
         )
         free_space.connect("activate", self._on_free_space, managed)
         return [copy_link, free_space]
@@ -229,7 +232,6 @@ class CloudyMenuProvider(GObject.GObject, Nautilus.MenuProvider):
         sync = Nautilus.MenuItem(
             name="Cloudy::sync_folder",
             label="Sync This Folder with Cloudy",
-            tip="Mark this folder for synchronization",
         )
         sync.connect("activate", self._on_sync_folder, folder)
         return [sync]

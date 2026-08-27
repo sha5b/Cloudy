@@ -3,7 +3,9 @@
 
 import base64
 import unittest
+from zoneinfo import ZoneInfo
 
+from cloudy.modules.gmail import google_client
 from cloudy.modules.gmail.google_client import (
     GoogleClient,
     GoogleError,
@@ -33,6 +35,14 @@ class TestBodyCharset(unittest.TestCase):
 
 
 class TestNormalization(unittest.TestCase):
+    def setUp(self):
+        # Pin the local zone so timed-event normalization is deterministic.
+        self._orig = google_client._local_zone
+        google_client._local_zone = lambda: ZoneInfo("Europe/Vienna")
+
+    def tearDown(self):
+        google_client._local_zone = self._orig
+
     def test_message_from_json_unescapes_and_reads_labels(self):
         msg = {
             "id": "m1",
@@ -62,9 +72,30 @@ class TestNormalization(unittest.TestCase):
              "start": {"dateTime": "2026-06-16T09:00:00Z"},
              "end": {"dateTime": "2026-06-16T09:15:00Z"}, "location": "Room"}
         row = GoogleClient._event_from_json(e)
-        self.assertEqual(row["start"], "2026-06-16T09:00:00Z")
+        # Timed dateTimes are normalized to naive LOCAL wall-clock (Graph
+        # convention): June = CEST (+02:00) in the pinned Vienna zone.
+        self.assertEqual(row["start"], "2026-06-16T11:00:00")
+        self.assertEqual(row["end"], "2026-06-16T11:15:00")
         self.assertFalse(row["all_day"])
         self.assertEqual(row["location"], "Room")
+
+    def test_event_from_json_timed_winter_offset(self):
+        # January = CET (+01:00): the DST offset of the TARGET date is used.
+        e = {"id": "e9", "summary": "Review",
+             "start": {"dateTime": "2027-01-16T09:00:00Z"},
+             "end": {"dateTime": "2027-01-16T09:30:00Z"}}
+        row = GoogleClient._event_from_json(e)
+        self.assertEqual(row["start"], "2027-01-16T10:00:00")
+        self.assertEqual(row["end"], "2027-01-16T10:30:00")
+
+    def test_event_from_json_offset_datetime(self):
+        # An explicit offset is honored (converted through the same instant).
+        e = {"id": "e10", "summary": "Off",
+             "start": {"dateTime": "2026-06-16T03:00:00-04:00"},
+             "end": {"dateTime": "2026-06-16T04:00:00-04:00"}}
+        row = GoogleClient._event_from_json(e)
+        self.assertEqual(row["start"], "2026-06-16T09:00:00")
+        self.assertEqual(row["end"], "2026-06-16T10:00:00")
 
     def test_event_from_json_all_day(self):
         e = {"id": "e2", "summary": "Holiday",
@@ -134,6 +165,49 @@ class TestCalendarIds(unittest.TestCase):
     def test_cal_path_encodes_specials(self):
         self.assertEqual(GoogleClient._cal_path("a@b#c"), "a%40b%23c")
         self.assertEqual(GoogleClient._cal_path(""), "primary")
+
+
+class TestAttendeeSlots(unittest.TestCase):
+    def test_string_defaults_to_required(self):
+        self.assertEqual(google_client._attendee_slot("a@b.c"),
+                         {"email": "a@b.c", "optional": False})
+
+    def test_dict_type_maps_to_optional_bool(self):
+        self.assertEqual(google_client._attendee_slot({"email": "a@b.c"}),
+                         {"email": "a@b.c", "optional": False})
+        self.assertEqual(
+            google_client._attendee_slot({"email": "a@b.c", "type": "optional"}),
+            {"email": "a@b.c", "optional": True})
+
+    def test_empty_entry_dropped(self):
+        self.assertIsNone(google_client._attendee_slot(""))
+        self.assertIsNone(google_client._attendee_slot({"email": ""}))
+
+
+class TestDraftSave(unittest.TestCase):
+    def test_new_draft_posts_update_puts(self):
+        class GC(GoogleClient):
+            def __init__(self):
+                super().__init__(lambda s: "t")
+                self.calls = []
+
+            def _post(self, url, body, scopes):
+                self.calls.append(("POST", url, body))
+                return {}
+
+            def _put(self, url, body, scopes):
+                self.calls.append(("PUT", url, body))
+                return {}
+
+        gc = GC()
+        gc.save_draft(["a@b.c"], "S", "B")
+        gc.save_draft(["a@b.c"], "S2", "B2", draft_id="d7")
+        method, url, body = gc.calls[0]
+        self.assertEqual((method, url), ("POST", f"{google_client.GMAIL}/users/me/drafts"))
+        method, url, body = gc.calls[1]
+        self.assertEqual(method, "PUT")
+        self.assertTrue(url.endswith("/drafts/d7"))
+        self.assertIn("message", body)  # PUT wraps the raw message the same way
 
 
 class _FakeGC(GoogleClient):

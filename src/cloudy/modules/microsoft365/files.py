@@ -10,9 +10,10 @@ docs/MODULES.md and docs/ARCHITECTURE.md.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
-from .mounts import MountManager, load_mount_records, mount_root
+from .mounts import MountManager, load_mount_records
 
 
 class OneDriveFiles:
@@ -46,7 +47,9 @@ class OneDriveFiles:
                                  onedrive=True)
 
     def is_mounted(self, drive) -> bool:
-        return self.mounts.is_mounted(self.mounts.mountpoint_for(drive.name))
+        from ...core.mount_state import MountState
+
+        return MountState.get().is_mounted(self.mounts.mountpoint_for(drive.name))
 
     # -- share links ------------------------------------------------------
     def _resolve_path(self, path: str) -> tuple[str, str]:
@@ -56,7 +59,11 @@ class OneDriveFiles:
         SharePoint/team-drive file resolves to the correct drive/item instead of
         being treated as the user's personal OneDrive.
         """
-        p = Path(path).expanduser().resolve()
+        # normpath, NOT Path.resolve(): resolve() stats/readlinks its way
+        # through every component — inside a FUSE mount that's a kernel round
+        # trip per hop, and on a hung daemon an unbounded hang. Nautilus hands
+        # us absolute paths, so normalization is all we need.
+        p = Path(os.path.normpath(os.path.expanduser(path)))
 
         # 1. Match against stored mountpoints.
         for rec in load_mount_records():
@@ -64,22 +71,24 @@ class OneDriveFiles:
             if not mp:
                 continue
             try:
-                rel = p.relative_to(Path(mp))
+                rel = p.relative_to(Path(os.path.normpath(mp)))
             except ValueError:
                 continue
             drive_id = rec.get("drive_id") or ""
             if drive_id:
                 return drive_id, str(rel)
 
-        # 2. Fallback: recompute the per-account mount base from the account id.
+        # 2. Fallback: the per-account base remembered on the record. (It
+        # derives from the account's display name, which can't be rebuilt from
+        # the record's account_id — the old account_id guess never matched a
+        # real mountpoint, silently routing share links at the wrong drive.)
         for rec in load_mount_records():
-            account_id = rec.get("account_id", "")
+            base = rec.get("base")
             drive_name = rec.get("drive_name", "")
             drive_id = rec.get("drive_id") or ""
-            if not account_id or not drive_id:
+            if not base or not drive_name or not drive_id:
                 continue
-            base = mount_root() / MountManager._safe_name(account_id)
-            mp = self.mounts.mountpoint_for(drive_name, base)
+            mp = self.mounts.mountpoint_for(drive_name, Path(base))
             try:
                 rel = p.relative_to(mp)
             except ValueError:

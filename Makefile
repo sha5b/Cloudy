@@ -12,6 +12,18 @@ FLATPAK_DIR := _build/flatpak
 
 SCHEMA_DIR  := $(PREFIX)/share/glib-2.0/schemas
 
+# uv-managed dev environment (see `make venv` and docs/BUILDING.md). When .venv
+# exists every recipe uses its interpreter and tools; otherwise we fall back to
+# whatever is on PATH, so a plain system checkout still builds.
+VENV        := .venv
+VENV_BIN    := $(CURDIR)/$(VENV)/bin
+have_venv    = $(wildcard $(VENV_BIN)/$(1))
+PYTHON      := $(if $(call have_venv,python),$(VENV_BIN)/python,python3)
+MESON       := $(if $(call have_venv,meson),$(VENV_BIN)/meson,meson)
+RUFF        := $(if $(call have_venv,ruff),$(VENV_BIN)/ruff,ruff)
+# Meson shells out to ninja by name, so the venv's bin must be on PATH for it.
+MESON_ENV   := PATH="$(VENV_BIN):$$PATH"
+
 NAUTILUS_EXT_DIR := $(HOME)/.local/share/nautilus-python/extensions
 
 # RPM build tree (self-contained under _build/, no ~/rpmbuild needed).
@@ -30,24 +42,41 @@ FLATPAK_BUNDLE := $(RELEASE_DIR)/$(APP_ID).flatpak
 # Wrapped so the secret only enters the recipe shell, never the make environment.
 LOAD_ENV    := set -a; [ -f .env ] && . ./.env; set +a;
 
-.PHONY: all bootstrap setup build install run clean distclean \
+.PHONY: all bootstrap venv setup build install run clean distclean ruff \
         flatpak flatpak-run flatpak-test lint test test-unit install-nautilus \
         uninstall-nautilus rpm srpm dist-tarball release flatpak-bundle
 
 all: build
 
-## Install every dependency on Fedora 44 (toolchain + backends + flatpak)
+## Full dev setup on Fedora 44: system packages (dnf, needs root) + the uv venv.
+## The two halves are separate on purpose — see scripts/bootstrap-fedora.sh.
 bootstrap:
 	./scripts/bootstrap-fedora.sh --all
+	$(MAKE) venv
+
+## Create the uv development environment (.venv)
+# --system-site-packages is REQUIRED: PyGObject and the GTK4/Libadwaita typelibs
+# come from the system (python3-gobject), and have no useful PyPI equivalent.
+venv:
+	uv venv --system-site-packages
+	uv sync --inexact
+	@echo "Ready. Activate with: source $(VENV)/bin/activate"
 
 ## Configure the Meson build into $(BUILDDIR)
+# A failed setup leaves an unusable $(BUILDDIR) behind, and the next `make build`
+# then reported the baffling "Current directory is not a meson build directory".
+# So: always start from a clean dir, and remove it again if setup fails.
 setup:
-	meson setup $(BUILDDIR) --prefix="$(PREFIX)"
+	@rm -rf $(BUILDDIR)
+	@$(MESON_ENV) $(MESON) setup $(BUILDDIR) --prefix="$(PREFIX)" || { rm -rf $(BUILDDIR); exit 1; }
 
 ## Compile (configures first if needed)
+# Keyed on build.ninja, not the directory: a half-configured $(BUILDDIR) exists
+# but cannot be compiled, and must trigger a re-setup rather than a confusing
+# error from meson.
 build:
-	@test -d $(BUILDDIR) || $(MAKE) setup
-	meson compile -C $(BUILDDIR)
+	@test -f $(BUILDDIR)/build.ninja || $(MAKE) setup
+	$(MESON_ENV) $(MESON) compile -C $(BUILDDIR)
 
 ## Install into the local prefix
 # Prune the previously-installed Python package first: meson's install_subdir
@@ -56,7 +85,7 @@ build:
 install: build
 	rm -rf "$(PREFIX)/share/cloudy/cloudy"
 	find src -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
-	meson install -C $(BUILDDIR)
+	$(MESON_ENV) $(MESON) install -C $(BUILDDIR)
 
 ## Build, install, and run locally (no sandbox)
 run: install
@@ -64,11 +93,11 @@ run: install
 
 ## Run the Meson test suite (schema/desktop/metainfo validation + logic units)
 test: build
-	meson test -C $(BUILDDIR) --print-errorlogs
+	$(MESON_ENV) $(MESON) test -C $(BUILDDIR) --print-errorlogs
 
 ## Run only the headless logic unit tests (fast; no build needed)
 test-unit:
-	PYTHONPATH=src:tests/unit python3 -m unittest discover -s tests/unit -p 'test_*.py'
+	PYTHONPATH=src:tests/unit $(PYTHON) -m unittest discover -s tests/unit -p 'test_*.py'
 
 ## --- RPM ----------------------------------------------------------------
 ## Reproducible source tarball (excludes secrets, build cruft, VCS).
@@ -77,7 +106,7 @@ dist-tarball:
 	          $(RPM_TOP)/BUILDROOT $(RPM_TOP)/RPMS $(RPM_TOP)/SRPMS
 	@rm -rf $(RPM_TOP)/cloudy-$(VERSION)
 	@rsync -a \
-	  --exclude='.git' --exclude='_build' --exclude='_install' \
+	  --exclude='.git' --exclude='_build' --exclude='_install' --exclude='.venv' \
 	  --exclude='.flatpak-builder' --exclude='.env' --exclude='.env.*' \
 	  --exclude='__pycache__' --exclude='*.py[co]' --exclude='*.flatpak' \
 	  --exclude='po/*.mo' --exclude='po/*.gmo' --exclude='subprojects/*/.git' \
@@ -118,7 +147,7 @@ FLATPAK_BUILDER ?= flatpak run \
 flatpak: flatpak-test
 flatpak-test:
 	@mkdir -p $(FLATPAK_DIR)
-	@$(LOAD_ENV) python3 scripts/flatpak-local-manifest.py \
+	@$(LOAD_ENV) $(PYTHON) scripts/flatpak-local-manifest.py \
 	  $(APP_ID).yml $(CURDIR) $(FLATPAK_DIR)/$(APP_ID).local.yml
 	$(FLATPAK_BUILDER) --user --install --force-clean \
 	  --install-deps-from=flathub \
@@ -132,7 +161,7 @@ flatpak-run:
 ## Export a single-file, installable .flatpak bundle (carries the app + icon).
 flatpak-bundle:
 	@mkdir -p $(FLATPAK_DIR) $(RELEASE_DIR)
-	@$(LOAD_ENV) python3 scripts/flatpak-local-manifest.py \
+	@$(LOAD_ENV) $(PYTHON) scripts/flatpak-local-manifest.py \
 	  $(APP_ID).yml $(CURDIR) $(FLATPAK_DIR)/$(APP_ID).local.yml
 	# Build and export into a local OSTree repo (no system install).
 	$(FLATPAK_BUILDER) --force-clean --install-deps-from=flathub \
@@ -175,7 +204,12 @@ uninstall-nautilus:
 
 ## Lint the Python sources
 lint:
-	python3 -m py_compile $$(find src nautilus-extension -name '*.py')
+	$(PYTHON) -m py_compile $$(find src nautilus-extension -name '*.py')
+
+## Static checks beyond syntax (unused/undefined/shadowed names, unused locals).
+## Config lives in pyproject.toml; needs `make venv` (or ruff on PATH).
+ruff:
+	$(RUFF) check src nautilus-extension tests scripts
 
 ## Remove build artifacts
 clean:

@@ -23,16 +23,16 @@ from gettext import gettext as _
 from gi.repository import GLib, Gtk, Pango
 
 from .editor_window import EditorWindow
-from .format import esc
 from .rich_editor import RichTextEditor
-from .source_nav import local_initial_folder, run_async
+from .source_nav import friendly_error, local_initial_folder, run_async
 
 
 class ComposeWindow(EditorWindow):
     def __init__(self, window, account, *, from_label: str, send_fn,
                  to: str = "", subject: str = "", body: str = "",
                  cc: str = "", bcc: str = "",
-                 title: str | None = None, draft_fn=None):
+                 title: str | None = None, draft_fn=None,
+                 subject_editable: bool = True):
         super().__init__(window, title=title or _("New message"),
                          primary_label=_("Send"))
         self._window = window
@@ -80,6 +80,11 @@ class ComposeWindow(EditorWindow):
 
         self._subject = Gtk.Entry(placeholder_text=_("Subject"), hexpand=True)
         self._subject.set_text(subject)
+        if not subject_editable:
+            # Native Graph forwards keep the original subject server-side (the
+            # forward action doesn't take a subject override), so editing it
+            # here would be a lie — show it read-only instead.
+            self._subject.set_editable(False)
 
         self._editor = RichTextEditor()
         if body:
@@ -233,19 +238,31 @@ class ComposeWindow(EditorWindow):
             self._add_attachment(files.get_item(i))
 
     def _add_attachment(self, gfile) -> None:
-        try:
+        # Read off-thread: the picker can browse into a FUSE mount, where a
+        # synchronous read means downloading the file on the GTK loop (same
+        # pattern as chat_view's _on_attach_chosen).
+        def work():
             ok, data, _etag = gfile.load_contents(None)
             if not ok:
-                return
-            name = gfile.get_basename() or _("attachment")
+                raise GLib.Error.new_literal(
+                    GLib.quark_from_string("cloudy"), _("read failed"), 0)
             ctype = "application/octet-stream"
             info = gfile.query_info("standard::content-type", 0, None)
             if info and info.get_content_type():
                 ctype = info.get_content_type()
-        except GLib.Error as exc:
-            self.toast(_("Couldn't read file: %s") % exc.message)
-            return
-        entry = {"name": name, "content_type": ctype, "data": bytes(data)}
+            return bytes(data), ctype, gfile.get_basename() or _("attachment")
+
+        def done(res, err) -> bool:
+            if err is not None or res is None:
+                self.toast(_("Couldn't read file: %s") % friendly_error(err))
+            else:
+                self._stage_attachment(*res)
+            return False
+
+        run_async(work, done)
+
+    def _stage_attachment(self, data: bytes, ctype: str, name: str) -> None:
+        entry = {"name": name, "content_type": ctype, "data": data}
         chip = self._chip(entry)
         entry["widget"] = chip
         self._attachments.append(entry)
@@ -259,7 +276,7 @@ class ComposeWindow(EditorWindow):
         inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
                         margin_top=4, margin_bottom=4, margin_start=8, margin_end=4)
         inner.append(Gtk.Image.new_from_icon_name("mail-attachment-symbolic"))
-        inner.append(Gtk.Label(label=esc(entry["name"]),
+        inner.append(Gtk.Label(label=entry["name"],  # plain label: no esc()
                                ellipsize=Pango.EllipsizeMode.MIDDLE,
                                max_width_chars=22))
         remove = Gtk.Button(icon_name="window-close-symbolic")
@@ -329,7 +346,7 @@ class ComposeWindow(EditorWindow):
     def _on_draft_saved(self, _result, error) -> bool:
         if error:
             self._draft_btn.set_sensitive(True)
-            self.toast(_("Couldn't save draft: %s") % error)
+            self.toast(_("Couldn't save draft: %s") % friendly_error(error))
             return False
         self._window.add_toast(_("Draft saved."))
         self.close()
@@ -338,7 +355,7 @@ class ComposeWindow(EditorWindow):
     def _on_sent(self, _result, error) -> bool:
         if error:
             self.primary_btn.set_sensitive(True)
-            self.toast(_("Couldn't send: %s") % error)
+            self.toast(_("Couldn't send: %s") % friendly_error(error))
             return False
         self._window.add_toast(_("Message sent."))
         self.close()

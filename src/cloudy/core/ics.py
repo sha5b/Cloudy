@@ -11,8 +11,10 @@ external, forwarded), not just ones that round-trip through a calendar API.
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 # A conferencing link buried in a free-text DESCRIPTION (Teams/Meet/Zoom/Webex),
 # used as a fallback when no machine-readable URL property is present.
@@ -112,6 +114,46 @@ def _mailto(value: str) -> str:
     return value.split(":", 1)[1].strip() if value.lower().startswith("mailto:") else value.strip()
 
 
+def _local_zone() -> ZoneInfo | None:
+    """The system's local IANA zone, or ``None`` when it can't be determined
+    (same detection as graph_calendar/eds_publish: the /etc/localtime symlink
+    into the zoneinfo db)."""
+    key = os.environ.get("TZ", "")
+    if "/" not in key:
+        try:
+            target = os.path.realpath("/etc/localtime")
+            if "/zoneinfo/" in target:
+                key = target.split("/zoneinfo/", 1)[1]
+        except OSError:
+            key = ""
+    if "/" in key:
+        try:
+            return ZoneInfo(key)
+        except Exception:  # noqa: BLE001 - unknown/broken key
+            pass
+    return None
+
+
+def _to_local_basic(value: str, tzid: str | None) -> str:
+    """A naive iCal date-time given in ``TZID`` → the same wall-clock in the
+    USER's local zone, as the naive basic-format string the parser stores.
+
+    Instant-preserving: downstream consumers (event_view/event_compose) treat
+    naive values as local, so converting here keeps them correct without
+    changes. UTC (``Z``) values, bare dates and unresolvable TZIDs stay as-is
+    (today's behavior)."""
+    if not tzid or "T" not in value or value.endswith("Z"):
+        return value
+    try:
+        local = _local_zone()
+        if local is None:
+            return value
+        dt = datetime.strptime(value, "%Y%m%dT%H%M%S").replace(tzinfo=ZoneInfo(tzid))
+    except (ValueError, KeyError):  # malformed value / unknown zone key
+        return value
+    return dt.astimezone(local).replace(tzinfo=None).strftime("%Y%m%dT%H%M%S")
+
+
 def parse_invite(text: str) -> dict | None:
     """Parse a VCALENDAR string. Returns the invite dict when it carries a
     VEVENT (with ``method``, ``uid``, ``sequence``, ``summary``, ``location``,
@@ -160,10 +202,10 @@ def parse_invite(text: str) -> dict | None:
         elif name == "STATUS":
             ev["status"] = value.strip().upper()
         elif name == "DTSTART":
-            ev["dtstart"] = value.strip()
+            ev["dtstart"] = _to_local_basic(value.strip(), params.get("TZID"))
             ev["all_day"] = params.get("VALUE", "").upper() == "DATE"
         elif name == "DTEND":
-            ev["dtend"] = value.strip()
+            ev["dtend"] = _to_local_basic(value.strip(), params.get("TZID"))
         elif name == "DESCRIPTION":
             ev["description"] = value.strip()
         # Machine-readable conferencing links Microsoft/Google add to invites.

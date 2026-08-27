@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: 2026 Shahab Nedaei
 
 import unittest
+from zoneinfo import ZoneInfo
 
+from cloudy.core import ics
 from cloudy.core.ics import build_reply, parse_invite
 
 
@@ -59,6 +61,44 @@ class TestParseInvite(unittest.TestCase):
         )
         ev = parse_invite(text)
         self.assertEqual(ev["attendees"][0]["cn"], "Doe; John")
+
+
+class TestTzidConversion(unittest.TestCase):
+    """DTSTART/DTEND;TZID=… values are converted to the USER's local zone at
+    parse time (downstream consumers treat naive values as local)."""
+
+    def setUp(self):
+        self._orig = ics._local_zone
+        ics._local_zone = lambda: ZoneInfo("Europe/Vienna")
+
+    def tearDown(self):
+        ics._local_zone = self._orig
+
+    def _invite(self, dtstart: str, dtend: str) -> dict:
+        text = (
+            "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:tz-1\r\n"
+            f"DTSTART{dtstart}\r\nDTEND{dtend}\r\n"
+            "END:VEVENT\r\nEND:VCALENDAR\r\n"
+        )
+        return parse_invite(text)
+
+    def test_us_tzid_converted_to_local_zone(self):
+        # 12:00 America/New_York (EDT, UTC-4) = 18:00 Europe/Vienna (CEST, +2).
+        ev = self._invite(";TZID=America/New_York:20260616T120000",
+                          ";TZID=America/New_York:20260616T130000")
+        self.assertEqual(ev["dtstart"], "20260616T180000")
+        self.assertEqual(ev["dtend"], "20260616T190000")
+
+    def test_winter_offsets_differ(self):
+        # 12:00 New_York (EST, UTC-5) in January = 18:00 Vienna (CET, +1).
+        ev = self._invite(";TZID=America/New_York:20270116T120000",
+                          ";TZID=America/New_York:20270116T130000")
+        self.assertEqual(ev["dtstart"], "20270116T180000")
+
+    def test_utc_and_unknown_tzid_untouched(self):
+        ev = self._invite(":20260616T120000Z", ";TZID=Mars/Olympus:20260616T130000")
+        self.assertEqual(ev["dtstart"], "20260616T120000Z")
+        self.assertEqual(ev["dtend"], "20260616T130000")
 
 
 class TestBuildReply(unittest.TestCase):

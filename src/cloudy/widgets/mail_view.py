@@ -71,6 +71,7 @@ class MailView(Adw.Bin):
         self._loading_more = False
         self._query = ""          # live filter over loaded messages (type-ahead)
         self._search_query = ""   # committed server-side search (Enter); "" = browse
+        self._group_search_toasted = False  # group-mailbox Enter hint, shown once
 
         # -- left pane: source tabs + context/folder dropdowns + list ----
         self._ctx_dd = Gtk.DropDown(model=Gtk.StringList.new([]), tooltip_text=_("Choose"))
@@ -306,27 +307,45 @@ class MailView(Adw.Bin):
         def work():
             from .clients import build_account_client
 
-            client = build_account_client(self._window.get_application(), self._account)
             try:
+                client = build_account_client(self._window.get_application(), self._account)
                 folders = client.list_folders()
-            except Exception:  # noqa: BLE001
-                folders = []
+            except Exception as exc:  # noqa: BLE001
+                # The error rides in the result (not as run_async's error) so a
+                # FAILED fetch stays distinguishable from an empty folder list.
+                return [], [], exc
             teams = []
             if self._is_ms and hasattr(client, "list_groups"):
                 try:
                     teams = client.list_groups()
                 except Exception:  # noqa: BLE001 - needs Group.Read.All consent
                     teams = []
-            return folders, teams
+            return folders, teams, None
 
-        # On a hard failure (e.g. no client) fall back to empty sources.
-        run_async(work, lambda res, _error: self._on_sources_loaded(*(res or ([], []))))
+        run_async(work, lambda res, _error:
+                  self._on_sources_loaded(*(res or ([], [], None))))
 
-    def _on_sources_loaded(self, folders, teams) -> bool:
+    def _on_sources_loaded(self, folders, teams, error=None) -> bool:
         self._me_folders = folders
         self._teams = teams
         # If we're showing the source the data belongs to, refresh its dropdowns.
         if self._source == "me":
+            if error is not None:
+                # A failed folder fetch must not masquerade as an empty mailbox
+                # (which would prepend the "Unread" virtual folder and
+                # auto-select it): keep whatever is on screen and surface the
+                # failure — the inline "Re-sign in" row for a stale scope.
+                if self._has_data:
+                    self._window.add_toast(
+                        _("Couldn't load folders: %s") % friendly_error(error))
+                    return False
+                self._folder_dd.set_sensitive(False)
+                if is_scope_error(str(error)):
+                    self._reauth_prompt()
+                else:
+                    self._set_placeholder(
+                        _("Couldn't load folders: %s") % friendly_error(error))
+                return False
             self._populate_folders(self._me_folders, initial=True)
         elif self._source == "teams":
             self._populate_context()
@@ -413,6 +432,13 @@ class MailView(Adw.Bin):
                 (f for f in folders
                  if (f.get("well_known") or "") == "inbox"
                  or str(f.get("id", "")).lower() == self._inbox_id.lower()), None)
+            if inbox is not None and inbox.get("id"):
+                # Capture the REAL inbox id (opaque on Graph): the unread-badge
+                # guards compare against it, and the literal "inbox" only ever
+                # matched Gmail's label id — so reading/deleting from the MS
+                # Inbox never decremented the badge. "unread" still works via
+                # _fetch_folder(); Gmail keeps its "INBOX" id.
+                self._inbox_id = str(inbox["id"])
             inbox_unread = inbox.get("unread", 0) if inbox else 0
             unread_folder = {"id": "unread", "name": _("Unread"), "unread": inbox_unread}
             rest = [f for f in folders if f is not inbox]
@@ -524,7 +550,8 @@ class MailView(Adw.Bin):
                 if is_scope_error(error):
                     self._reauth_prompt()
                 else:
-                    self._set_placeholder(_("Couldn't load mail: %s") % error)
+                    self._set_placeholder(
+                        _("Couldn't load mail: %s") % friendly_error(error))
             return False
         messages, next_token = result
         # Only the plain folder listing is cached; search results are transient.
@@ -681,7 +708,9 @@ class MailView(Adw.Bin):
             for row in self._message_rows():
                 self._list.select_row(row)
             return True
-        if ctrl and keyval == Gdk.KEY_r and self._open_mid:
+        if ctrl and keyval == Gdk.KEY_r and getattr(self, "_open_msg", None):
+            # _open_msg (not _open_mid): a reply fired while the body is still
+            # loading would be built from the list row's bare display name.
             self._on_reply_clicked(None)
             return True
         if ctrl and keyval == Gdk.KEY_n:
@@ -706,6 +735,15 @@ class MailView(Adw.Bin):
         self._list.invalidate_filter()
 
     def _on_search_activate(self, entry) -> None:
+        if str(self._folder_id).startswith("group:"):
+            # Server-side search only works on real folders; group mailboxes
+            # (conversation threads) ignore the query — a silent no-op. Local
+            # filtering still applies; say so once instead of "Searching…".
+            if not self._group_search_toasted:
+                self._group_search_toasted = True
+                self._window.add_toast(
+                    _("Search isn't available for group mailboxes"))
+            return
         text = entry.get_text().strip()
         if not text or text == self._search_query:
             return
@@ -719,10 +757,10 @@ class MailView(Adw.Bin):
     def _filter_row(self, row) -> bool:
         unread_only = self._folder_id == "unread"
         search = getattr(row, "_search", None)
-        if search is None:  # non-message rows
-            if getattr(row, "_more", False):
-                return not self._query  # keep "Load older" (also in Unread view)
-            return not (self._query or unread_only)  # hide placeholders while filtering
+        if search is None:  # non-message rows (placeholders, "Load older",
+            # "Re-sign in") — filtered by the live query only, NOT by the
+            # Unread view, so error/recovery rows stay reachable there.
+            return not self._query
         if unread_only and not getattr(row, "_unread", False):
             return False
         if self._query and self._query not in search:
@@ -928,6 +966,31 @@ class MailView(Adw.Bin):
         if self._loading_more:
             return
         self._load_async()
+        self._refresh_folder_labels()
+
+    def _refresh_folder_labels(self) -> None:
+        """Best-effort refresh of the folder dropdown's labels (unread counts)
+        after a poll-triggered reload — they used to stay frozen until the view
+        was rebuilt. Personal mailbox only; failures keep the current labels,
+        and the current folder selection is restored by id."""
+        if self._source != "me":
+            return
+
+        def work():
+            from .clients import build_account_client
+
+            client = build_account_client(self._window.get_application(), self._account)
+            return client.list_folders()
+
+        def done(folders, error) -> bool:
+            # Stale (source switched away) or failed → keep what's on screen.
+            if error or not folders or self._source != "me":
+                return False
+            self._me_folders = folders
+            self._populate_folders(folders, initial=True)  # keeps the selection
+            return False
+
+        run_async(work, done)
 
     def _in_drafts_folder(self) -> bool:
         """True when the active folder is Drafts (Graph well-known alias, or
@@ -957,6 +1020,10 @@ class MailView(Adw.Bin):
             from .message_view import _to_text
 
             source, address = self._send_context()
+            # File attachments AND inline (cid:) images live only on the draft:
+            # the composer re-serializes the body, so it can't carry either over.
+            has_files = bool(msg.get("attachments"))
+            has_inline = bool(msg.get("inline_images"))
 
             def send(to, subject, body, *, cc=None, bcc=None, attachments=None,
                      importance="normal", read_receipt=False):
@@ -968,11 +1035,11 @@ class MailView(Adw.Bin):
                                  address=address, cc=cc, bcc=bcc, html=True,
                                  attachments=attachments, importance=importance,
                                  read_receipt=read_receipt)
-                # Only auto-delete an attachment-less draft: the composer can't
-                # carry the draft's server-side attachments over, so deleting
-                # one that has them would destroy files the user never saw.
-                # A leftover draft is harmless; a destroyed attachment isn't.
-                if not msg.get("attachments"):
+                # Only auto-delete an attachment-less draft: deleting one with
+                # files or inline images would destroy content the user never
+                # saw (the flattened text body loses the images). A leftover
+                # draft is harmless; a destroyed attachment isn't.
+                if not has_files and not has_inline:
                     try:
                         client.delete_message(mid)  # the sent copy supersedes it
                     except Exception:  # noqa: BLE001 - a leftover draft is harmless
@@ -980,7 +1047,7 @@ class MailView(Adw.Bin):
                 self._invalidate_messages()
 
             body = msg.get("body", "") or ""
-            if msg.get("attachments"):
+            if has_files or has_inline:
                 self._window.add_toast(
                     _("This draft has attachments — they stay on the draft "
                       "and won't be attached here."))
@@ -990,7 +1057,7 @@ class MailView(Adw.Bin):
                           cc=msg.get("cc", ""), bcc=msg.get("bcc", ""),
                           body=_to_text(body) if msg.get("body_html") else body,
                           title=_("Draft"),
-                          draft_fn=self._make_draft_fn()).present()
+                          draft_fn=self._make_draft_fn(mid)).present()
             return False
 
         run_async(work, done)
@@ -1200,6 +1267,11 @@ class MailView(Adw.Bin):
                     _("Couldn't remove it: %s") % friendly_error(error))
             elif removed:
                 self._window.add_toast(_("Removed from calendar."))
+                # The invite is resolved — refresh the Calendar tab's badge.
+                notifier = getattr(
+                    self._window.get_application(), "notifier", None)
+                if notifier is not None and hasattr(notifier, "refresh_invites"):
+                    notifier.refresh_invites(self._account.id)
             else:
                 self._window.add_toast(_("That meeting isn't on your calendar."))
             return False
@@ -1214,6 +1286,12 @@ class MailView(Adw.Bin):
         # Reflect the new answer in the open reader without a full reload.
         self._window.add_toast(_("Response sent — calendar updated.") if synced
                                else _("Response sent."))
+        # The Calendar tab's pending-invite badge only re-checks on its slow
+        # poll — nudge it now so it doesn't advertise an answered invite for
+        # the next ten minutes.
+        notifier = getattr(self._window.get_application(), "notifier", None)
+        if notifier is not None and hasattr(notifier, "refresh_invites"):
+            notifier.refresh_invites(self._account.id)
         if self._open_msg and self._open_msg.get("invite"):
             partstat = {"accept": "ACCEPTED", "tentativelyAccept": "TENTATIVE",
                         "decline": "DECLINED"}.get(action, "")
@@ -1244,8 +1322,10 @@ class MailView(Adw.Bin):
             return address
         return self._account.display_name
 
-    def _make_draft_fn(self):
-        """A ``draft_fn`` for the composer, saving into the provider's Drafts."""
+    def _make_draft_fn(self, draft_id: str | None = None):
+        """A ``draft_fn`` for the composer, saving into the provider's Drafts.
+        ``draft_id`` (the resumed-draft path passes the open draft's id) makes
+        saves PATCH that draft in place instead of duplicating it."""
         source, address = self._send_context()
 
         def save_draft(to, subject, body, *, cc=None, bcc=None, attachments=None):
@@ -1254,7 +1334,7 @@ class MailView(Adw.Bin):
             client = build_account_client(self._window.get_application(), self._account)
             client.save_draft(to=to, subject=subject, body=body, source=source,
                               address=address, cc=cc, bcc=bcc, html=True,
-                              attachments=attachments)
+                              attachments=attachments, draft_id=draft_id)
             self._invalidate_messages()
 
         return save_draft
@@ -1287,11 +1367,11 @@ class MailView(Adw.Bin):
 
     def _open_reply(self, *, reply_all: bool) -> None:
         mid = self._open_mid
-        if not mid:
-            return
+        if not mid or getattr(self, "_open_msg", None) is None:
+            return  # body not loaded yet — nothing reliable to reply to
         from .compose_view import ComposeWindow
 
-        meta = getattr(self, "_open_msg", None) or self._messages_by_id.get(mid, {})
+        meta = self._open_msg
         subject = meta.get("subject", "")
         if subject and not subject.lower().startswith("re:"):
             subject = _("Re: %s") % subject
@@ -1315,11 +1395,11 @@ class MailView(Adw.Bin):
 
     def _on_forward_clicked(self, _btn) -> None:
         mid = self._open_mid
-        if not mid:
-            return
+        if not mid or getattr(self, "_open_msg", None) is None:
+            return  # body not loaded yet — nothing reliable to forward
         from .compose_view import ComposeWindow
 
-        msg = getattr(self, "_open_msg", None) or {}
+        msg = self._open_msg
         subject = msg.get("subject", "")
         if subject and not subject.lower().startswith(("fwd:", "fw:")):
             subject = _("Fwd: %s") % subject
@@ -1364,7 +1444,8 @@ class MailView(Adw.Bin):
 
         ComposeWindow(self._window, self._account, from_label=self._from_label(),
                       send_fn=send, subject=subject, body=body,
-                      title=_("Forward"), draft_fn=self._make_draft_fn()).present()
+                      title=_("Forward"), draft_fn=self._make_draft_fn(),
+                      subject_editable=not native).present()
 
     @staticmethod
     def _forward_quote(msg: dict) -> str:

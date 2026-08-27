@@ -38,11 +38,7 @@ class CloudyWindow(Adw.ApplicationWindow):
         self._registry = app.registry
         self._engine = app.engine
 
-        self._account_stack = None
-        self._account_mail_view = None
-        self._account_chat_view = None
-        self._account_calendar_view = None
-        self._account_activity_view = None
+        self._clear_account_views()
         self._account_shown = None
         self._last_tab: dict = {}  # account id -> last-viewed tab name
         self._mail_folder_by_account: dict = {}  # account id -> last mail folder id
@@ -224,15 +220,7 @@ class CloudyWindow(Adw.ApplicationWindow):
     def _show_dashboard(self) -> None:
         from .widgets.dashboard_view import DashboardView
 
-        # Forget the account views we just replaced: with _account_shown left
-        # pointing at the last account, notifier pushes kept badging detached
-        # ViewStackPages and refreshing views no longer in the widget tree.
-        self._account_stack = None
-        self._tab_pages = {}
-        self._account_mail_view = None
-        self._account_chat_view = None
-        self._account_calendar_view = None
-        self._account_activity_view = None
+        self._clear_account_views()
         self._account_shown = None
 
         header = Adw.HeaderBar()
@@ -270,37 +258,16 @@ class CloudyWindow(Adw.ApplicationWindow):
             caps = ["activity", *caps]
 
         stack = Adw.ViewStack()
+        self._clear_account_views()
         self._account_stack = stack
-        self._tab_pages = {}  # capability key -> Adw.ViewStackPage (for tab badges)
-        self._account_mail_view = None
-        self._account_chat_view = None
-        self._account_calendar_view = None
-        self._account_activity_view = None
         self._account_shown = account.id
+        # Each tab starts as an empty holder; its view is built the first time
+        # the tab is actually shown (see _build_tab).
         for key in caps:
             label, icon = CAPABILITY_UI.get(key, (key, "application-x-addon-symbolic"))
-            child = self._capability_placeholder(account, key, label)
-            if key == "activity":
-                from .widgets.activity_view import ActivityView
-
-                if isinstance(child, ActivityView):
-                    self._account_activity_view = child
-            elif key == "mail":
-                from .widgets.mail_view import MailView
-
-                if isinstance(child, MailView):
-                    self._account_mail_view = child
-            elif key == "chat":
-                from .widgets.chat_view import ChatView
-
-                if isinstance(child, ChatView):
-                    self._account_chat_view = child
-            elif key == "calendar":
-                from .widgets.calendar_view import CalendarView
-
-                if isinstance(child, CalendarView):
-                    self._account_calendar_view = child
-            page = stack.add_titled(child, key, label)
+            host = Adw.Bin()
+            self._tab_hosts[key] = host
+            page = stack.add_titled(host, key, label)
             page.set_icon_name(icon)
             self._tab_pages[key] = page
 
@@ -319,6 +286,7 @@ class CloudyWindow(Adw.ApplicationWindow):
         if remembered and stack.get_child_by_name(remembered) is not None:
             stack.set_visible_child_name(remembered)
         stack.connect("notify::visible-child-name", self._on_tab_changed)
+        self._build_tab(account, stack.get_visible_child_name())
 
         header = Adw.HeaderBar()
         switcher = Adw.ViewSwitcher(policy=Adw.ViewSwitcherPolicy.WIDE)
@@ -341,18 +309,55 @@ class CloudyWindow(Adw.ApplicationWindow):
 
     def _on_tab_changed(self, stack, _pspec) -> None:
         name = stack.get_visible_child_name()
-        if self._account_shown and name:
-            self._last_tab[self._account_shown] = name
+        if not (self._account_shown and name):
+            return
+        self._last_tab[self._account_shown] = name
+        self._build_tab(self._registry.get(self._account_shown), name)
+
+    #: Views the rest of the window talks to directly (notifier refreshes, deep
+    #: links). Filled in by _build_tab as each tab is first shown.
+    _VIEW_ATTRS = {
+        "activity": "_account_activity_view",
+        "mail": "_account_mail_view",
+        "chat": "_account_chat_view",
+        "calendar": "_account_calendar_view",
+    }
+
+    def _clear_account_views(self) -> None:
+        """Forget the previous account's tabs. Without this, notifier pushes
+        badge detached ViewStackPages and refetch for views no longer in the
+        widget tree."""
+        self._account_stack = None
+        self._tab_pages = {}   # capability key -> Adw.ViewStackPage (tab badges)
+        self._tab_hosts = {}   # capability key -> Adw.Bin holding the view
+        self._built_tabs = set()
+        for attr in self._VIEW_ATTRS.values():
+            setattr(self, attr, None)
+
+    def _build_tab(self, account, key) -> None:
+        """Build a tab's view the first time that tab is shown.
+
+        Building all of them up front meant a single account switch created five
+        views and fired half a dozen concurrent network loads for tabs nobody
+        was looking at — including a Files tab that re-enumerated libraries and
+        re-probed the mount table on every switch."""
+        host = self._tab_hosts.get(key)
+        if account is None or host is None or key in self._built_tabs:
+            return
+        self._built_tabs.add(key)
+        label = CAPABILITY_UI.get(key, (key, ""))[0]
+        view = self._capability_placeholder(account, key, label)
+        host.set_child(view)
+        # A StatusPage stand-in (signed out / nothing to show) is not a view the
+        # notifier or deep links can drive — leave the reference at None.
+        attr = self._VIEW_ATTRS.get(key)
+        if attr and not isinstance(view, Adw.StatusPage):
+            setattr(self, attr, view)
 
     def _show_disabled_account(self, account) -> None:
         from .widgets.format import esc
 
-        self._account_stack = None
-        self._tab_pages = {}  # the previous account's pages must not be badged
-        self._account_mail_view = None
-        self._account_chat_view = None
-        self._account_calendar_view = None
-        self._account_activity_view = None
+        self._clear_account_views()
         self._account_shown = account.id
         status = Adw.StatusPage(
             icon_name="action-unavailable-symbolic",
@@ -500,12 +505,7 @@ class CloudyWindow(Adw.ApplicationWindow):
         if self._account_shown == account.id:
             # Stop notifier pushes from badging/refreshing the removed
             # account's now-detached views.
-            self._account_stack = None
-            self._tab_pages = {}
-            self._account_mail_view = None
-            self._account_chat_view = None
-            self._account_calendar_view = None
-            self._account_activity_view = None
+            self._clear_account_views()
             self._account_shown = None
         self.content_nav.pop_to_tag("welcome")
         self.add_toast(_("Removed %s.") % account.display_name)

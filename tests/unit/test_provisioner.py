@@ -10,7 +10,7 @@ import unittest.mock
 import zipfile
 from pathlib import Path
 
-from cloudy.core.provisioner import RCLONE_SHA256, ensure_rclone, resolve
+from cloudy.core.provisioner import ensure_rclone
 
 
 class TestEnsureRclone(unittest.TestCase):

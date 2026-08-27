@@ -45,6 +45,27 @@ from .source_nav import (
     toggle_pin,
 )
 
+# Markdown detection for the composer's rich-send path. The lookarounds keep
+# the markers word/space-bounded so snake_case identifiers and underscored URLs
+# aren't mistaken for italic — a false positive forced an HTML send, which
+# Google Chat rejects outright.
+_MD_BOLD = re.compile(r"(?<!\S)\*\*(.+?)\*\*(?!\S)", re.DOTALL)
+_MD_ITALIC = re.compile(r"(?<!\w)_(.+?)_(?!\w)", re.DOTALL)
+
+
+def _merge_chat_pages(existing: list, fresh: list) -> list:
+    """Merge a freshly-fetched chats page into the loaded list by id.
+
+    A background refresh only holds page 1, so replacing the list wholesale
+    would drop every older conversation already paged in. The fresh copy wins
+    for chats it covers (new preview/unread state), entries it doesn't cover
+    are kept, and the result sorts newest-first."""
+    by_id = {c.get("id"): c for c in existing if c.get("id")}
+    for c in fresh:
+        if c.get("id"):
+            by_id[c["id"]] = c
+    return sorted(by_id.values(), key=lambda c: c.get("last_at", ""), reverse=True)
+
 
 class ChatView(Adw.Bin):
     __gtype_name__ = "CloudyChatView"
@@ -89,8 +110,7 @@ class ChatView(Adw.Bin):
         # Tell the notifier which chat is actually on screen — it skips badging
         # the conversation being read. Cleared while the tab is hidden (an
         # Adw.ViewStack unmaps the hidden page) so background arrivals badge.
-        self.connect("map",
-                     lambda *_a: self._set_notifier_open_chat(self._chat_id))
+        self.connect("map", lambda *_a: self._on_mapped())
         self.connect("unmap", lambda *_a: self._set_notifier_open_chat(None))
 
         # -- left pane: the chat list ------------------------------------
@@ -150,10 +170,13 @@ class ChatView(Adw.Bin):
         self._adjusting = False     # guard: ignore our own programmatic scrolls
         self._scroll_anim = None    # active "jump to latest" animation, if any
         self._rendered_sigs = []    # per-message fingerprints of the live thread
-        # The un-acked optimistic echo, if one is showing: {"widget", "text"}.
-        # When the server confirms it, that exact widget is adopted in place
-        # (status flips Sending→Sent) instead of rebuilding the whole thread —
-        # so its decoded image never reloads and the view never jumps.
+        # The un-acked optimistic echo, if one is showing: {"chat_id", "widget",
+        # "text", "confirmed_id"}. When the server confirms it, that exact
+        # widget is adopted in place (status flips Sending→Sent) instead of
+        # rebuilding the whole thread — so its decoded image never reloads and
+        # the view never jumps. confirmed_id is the created message's id once
+        # the POST returns, so adoption matches by id (rich sends never match
+        # by text) and never against a different chat's thread.
         self._optimistic = None
         self._hold_tick = None      # frame-clock callback holding scroll position
         self._hold_until = 0        # frame time (µs) the hold expires
@@ -351,10 +374,13 @@ class ChatView(Adw.Bin):
                     self._set_list_message(self._unavailable_text(error))
             return False
         chats, next_token = result
-        chats = sorted(chats, key=lambda c: c.get("last_at", ""), reverse=True)
-        self._chats_next_token = next_token
-        self._cache().set(f"{self._account.id}:chats", chats)
-        self._render_chats(chats)
+        # A background refresh returns page 1, which carries no older-pages
+        # cursor — resetting to None would kill "Load older conversations".
+        if next_token is not None:
+            self._chats_next_token = next_token
+        merged = _merge_chat_pages(self._all_chats, chats)
+        self._cache().set(f"{self._account.id}:chats", merged)
+        self._render_chats(merged)
         return False
 
     def _load_more_chats(self) -> None:
@@ -381,9 +407,7 @@ class ChatView(Adw.Bin):
             return False
         chats, next_token = result
         self._chats_next_token = next_token
-        seen = {c["id"] for c in self._all_chats}
-        merged = self._all_chats + [c for c in chats if c["id"] not in seen]
-        merged.sort(key=lambda c: c.get("last_at", ""), reverse=True)
+        merged = _merge_chat_pages(self._all_chats, chats)
         self._cache().set(f"{self._account.id}:chats", merged)
         self._render_chats(merged)
         return False
@@ -403,9 +427,10 @@ class ChatView(Adw.Bin):
             GLib.source_remove(self._search_timer)
             self._search_timer = None
         if not raw:
-            # Leaving search: the results listbox is full of rows built outside
-            # patch_listbox (no _patch_key) — clear it, or patch_listbox would
-            # leave them in place and append the whole chat list below them.
+            # Leaving search: the results list may still hold placeholder rows
+            # built outside patch_listbox (no _patch_key) — clear it, or
+            # patch_listbox would leave them in place and append the whole chat
+            # list below them.
             if self._search_mode:
                 clear_listbox(self._list)
                 self._chats_more_row = None
@@ -461,6 +486,15 @@ class ChatView(Adw.Bin):
         if self._chats_more_row is not None:
             self._list.remove(self._chats_more_row)
             self._chats_more_row = None
+        # Drop placeholder rows ("Loading chats…", "No conversations.") — they
+        # carry no _patch_key, so patch_listbox would leave them sitting above
+        # the rendered chats forever (a cold cache made the loading row stick).
+        child = self._list.get_first_child()
+        while child is not None:
+            nxt = child.get_next_sibling()
+            if getattr(child, "_patch_key", None) is None:
+                self._list.remove(child)
+            child = nxt
         selected = [r._chat_id for r in self._list.get_selected_rows()
                     if getattr(r, "_chat_id", None)]
 
@@ -758,6 +792,11 @@ class ChatView(Adw.Bin):
             return False  # transient failure / switched away — try again next tick
         messages, next_token = result
         merged = self._merge_page(self._cached_messages(chat_id), messages)
+        # A tombstone the server now returns means its soft-delete has caught
+        # up: drop the local hide so the "deleted this message" row renders.
+        for m in merged:
+            if m.get("deleted") and m.get("id") in self._deleted_ids:
+                self._deleted_ids.discard(m["id"])
         kept = [m for m in merged
                 if self._has_content(m) and m.get("id") not in self._deleted_ids]
         if self._thread_signature(kept) == self._thread_sig:
@@ -773,7 +812,8 @@ class ChatView(Adw.Bin):
         re-clear the notifier flag. open_chat only did this once, so the badge
         could light up (and stick) for the conversation being watched."""
         root = self.get_root()
-        if root is None or (hasattr(root, "is_active") and not root.is_active()):
+        if (root is None or not self.get_mapped()
+                or (hasattr(root, "is_active") and not root.is_active())):
             return
         newest = max((m.get("sent") or "" for m in messages), default="")
         if newest and newest > self._read_ids.get(chat_id, ""):
@@ -1042,6 +1082,9 @@ class ChatView(Adw.Bin):
         if chat_id != self._chat_id:
             self._image_cache = {}  # drop the previous chat's decoded thumbnails
             self._deleted_ids = set()  # locally-deleted marks are per-conversation
+            self._optimistic = None  # an un-acked echo never carries into another chat
+            self._entry.set_text("")  # nor does a half-typed draft…
+            self._clear_pending()  # …or its staged attachments
         self._chat_id = chat_id
         self._chat_name = name
         # Resume pagination where this chat left off — the cached thread may
@@ -1093,6 +1136,18 @@ class ChatView(Adw.Bin):
         notifier = getattr(self._window.get_application(), "notifier", None)
         if notifier is not None and hasattr(notifier, "set_open_chat"):
             notifier.set_open_chat(self._account.id if chat_id else None, chat_id)
+
+    def _on_mapped(self) -> None:
+        self._set_notifier_open_chat(self._chat_id)
+        # Messages that arrived while the tab was hidden were rendered by the
+        # poll but deliberately NOT acked (the unmapped view must not mark
+        # them read). The next poll won't help either — its signature matches
+        # what's on screen — so ack the backlog here, now that the thread is
+        # actually visible again.
+        if self._chat_id is not None:
+            cached = self._cached_messages(self._chat_id)
+            if cached:
+                self._ack_open_chat(self._chat_id, cached)
 
     # -- server-side read state -------------------------------------------
     def _mark_read_server(self, chat_id) -> None:
@@ -1202,6 +1257,11 @@ class ChatView(Adw.Bin):
         self._forward_return_to = None  # opened fine; no bounce needed
         messages, next_token = result
         merged = self._merge_page(self._cached_messages(chat_id), messages)
+        # Same as _on_poll: a returned tombstone means the soft-delete caught
+        # up — un-hide it so the "deleted this message" row finally renders.
+        for m in merged:
+            if m.get("deleted") and m.get("id") in self._deleted_ids:
+                self._deleted_ids.discard(m["id"])
         self._store_page(chat_id, merged, messages, next_token)
         self._render_thread(chat_id, merged)
         # A forward-quote jump asked to land on a specific message; do it once the
@@ -1266,9 +1326,13 @@ class ChatView(Adw.Bin):
                 # icon Sending→Sent and register it under the real id. No new
                 # bubble, no teardown — the thread stays perfectly still.
                 opt = self._optimistic
-                opt_match = (opt is not None and msg.get("is_mine")
-                             and (msg.get("text", "") or "").strip()
-                             == (opt["text"] or "").strip())
+                confirmed_id = (opt or {}).get("confirmed_id")
+                opt_match = (
+                    opt is not None and opt.get("chat_id") == chat_id
+                    and msg.get("is_mine")
+                    and ((msg.get("id") == confirmed_id if confirmed_id is not None
+                          else (msg.get("text", "") or "").strip()
+                          == (opt["text"] or "").strip())))
                 if opt_match and not msg.get("attachments"):
                     # Pure-text echo: adopt the exact widget in place (no rebuild,
                     # no flicker), just flip Sending→Sent.
@@ -1343,14 +1407,22 @@ class ChatView(Adw.Bin):
         ``messages`` (re-appending it then would duplicate the message)."""
         keep = [w for cid, w in self._failed_bubbles if cid == self._chat_id]
         opt = self._optimistic
-        if opt is not None:
+        if opt is not None and opt.get("chat_id") == self._chat_id:
+            confirmed_id = opt.get("confirmed_id")
             confirmed = any(
-                m.get("is_mine") and (m.get("text", "") or "").strip()
-                == (opt["text"] or "").strip() for m in messages)
+                m.get("is_mine")
+                and (m.get("id") == confirmed_id if confirmed_id is not None
+                     else (m.get("text", "") or "").strip()
+                     == (opt["text"] or "").strip())
+                for m in messages)
             if confirmed:
                 opt = None
             else:
                 keep.append(opt["widget"])
+        else:
+            # An echo from another chat (e.g. a Retry fired while browsing
+            # elsewhere) must never be re-appended to this thread.
+            opt = None
         for w in keep:
             if w.get_parent() is self._thread:
                 self._thread.remove(w)
@@ -1385,11 +1457,17 @@ class ChatView(Adw.Bin):
             if self._msg_sig(messages[i]) != sig:
                 return None
         tail = messages[len(old):]
-        if self._optimistic is not None:
-            opt_text = (self._optimistic["text"] or "").strip()
-            if not (len(tail) == 1 and tail[0].get("is_mine")
-                    and (tail[0].get("text", "") or "").strip() == opt_text):
+        opt = self._optimistic
+        if opt is not None and opt.get("chat_id") == self._chat_id:
+            confirmed_id = opt.get("confirmed_id")
+            ok = (len(tail) == 1 and tail[0].get("is_mine")
+                  and (tail[0].get("id") == confirmed_id if confirmed_id is not None
+                       else (tail[0].get("text", "") or "").strip()
+                       == (opt["text"] or "").strip()))
+            if not ok:
                 return None
+        # else: no echo showing in THIS thread (none at all, or one belonging
+        # to another chat) — the tail is judged purely on the rendered prefix.
         return tail
 
     @staticmethod
@@ -1633,8 +1711,9 @@ class ChatView(Adw.Bin):
         Pure icon visibility — no rebuild."""
         # Hide every status icon first (one will be re-shown below).
         widgets = list(self._bubble_widgets.values())
-        if self._optimistic is not None:
-            widgets.append(self._optimistic["widget"])
+        opt = self._optimistic
+        if opt is not None and opt.get("chat_id") == self._chat_id:
+            widgets.append(opt["widget"])
         for w in widgets:
             icon = getattr(w, "_status_icon", None)
             if icon is not None:
@@ -1645,7 +1724,8 @@ class ChatView(Adw.Bin):
             return
         m = messages[mine_idx[-1]]
         if not m.get("id"):  # the un-acked optimistic echo
-            widget = self._optimistic["widget"] if self._optimistic else None
+            widget = (opt["widget"] if opt is not None
+                      and opt.get("chat_id") == self._chat_id else None)
         else:
             widget = self._bubble_widgets.get(m["id"])
         icon = getattr(widget, "_status_icon", None)
@@ -2548,16 +2628,28 @@ class ChatView(Adw.Bin):
                    if self._query in (c.get("name", "") or "").lower()]
         for chat in matches:
             row = self._chat_row(chat)
+            # Key every row for patch_listbox: search rows bypass it when
+            # built, but the next keystroke's _render_filtered must be able
+            # to remove them — unkeyed rows would linger above the new list.
+            row._patch_key = chat["id"]
             self._list.append(row)
             self._rows_by_id[chat["id"]] = row
+
+        def add_section(text):
+            row = self._section_row(text)
+            row._patch_key = f"section:{text}"
+            self._list.append(row)
+
         if error:
-            self._list.append(self._section_row(_("Message search failed")))
+            add_section(_("Message search failed"))
             return False
         hits = results or []
         if matches and hits:
-            self._list.append(self._section_row(_("Messages")))
-        for hit in hits:
-            self._list.append(self._search_row(hit))
+            add_section(_("Messages"))
+        for i, hit in enumerate(hits):
+            row = self._search_row(hit)
+            row._patch_key = f"hit:{hit.get('message_id') or i}"
+            self._list.append(row)
         if not matches and not hits:
             self._set_list_message(_("Nothing matches “%s”.") % query)
         return False
@@ -2624,7 +2716,9 @@ class ChatView(Adw.Bin):
                   for e in self._pending if e.get("kind", "image") == "image"]
         files = [(e["data"], e["ctype"], e.get("name", "file"))
                  for e in self._pending if e.get("kind") == "file"]
-        mentions = list(self._mentions)
+        # Prune mentions the user has edited back out — a stale one forced the
+        # rich (HTML) send path, which Google Chat rejects outright.
+        mentions = [m for m in self._mentions if ("@" + m["name"]) in text]
         if not text and not images and not files:
             return
         if len(images) + len(files) > self._MAX_ATTACH_PER_MESSAGE:
@@ -2661,10 +2755,13 @@ class ChatView(Adw.Bin):
         attachments (so any file type can be shared, not just images)."""
         if bubble is not None:
             self._mark_sending(bubble)
-            self._optimistic = {"widget": bubble, "text": text}
+            self._optimistic = {"chat_id": chat_id, "widget": bubble,
+                                "text": text, "confirmed_id": None}
         # Rich (HTML) send when there are images, files, @mentions, or markdown
         # formatting (**bold** / _italic_); otherwise a cheap plain-text send.
         rich = bool(images or files or mentions or self._has_markdown(text))
+        if rich and self._account.provider == "google" and not images and not files:
+            rich = False  # Google has no rich send — text-only sends go plain
 
         # Prepare outgoing images on the GTK main thread: GdkPixbuf is not
         # thread-safe and must not be touched from the worker thread.
@@ -2681,20 +2778,22 @@ class ChatView(Adw.Bin):
                                                      chat_id=chat_id)
                              for data, ctype, name in files]
                 content, mention_array = self._compose_html(text, mentions)
-                return client.send_chat_html(
-                    chat_id, f"<div>{content}</div>", mention_array, send_images,
-                    file_atts)
+                try:
+                    return client.send_chat_html(
+                        chat_id, f"<div>{content}</div>", mention_array,
+                        send_images, file_atts)
+                except Exception:  # noqa: BLE001 - degrade instead of failing
+                    # e.g. Google rejects rich sends — deliver the plain text
+                    # rather than losing the message outright.
+                    return client.send_chat_message(chat_id, text)
             return client.send_chat_message(chat_id, text)
 
-        run_async(work, lambda _r, error: self._on_message_sent(
-            chat_id, error, text, images, files, mentions, bubble))
-
-    _MD_BOLD = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
-    _MD_ITALIC = re.compile(r"_(.+?)_", re.DOTALL)
+        run_async(work, lambda result, error: self._on_message_sent(
+            chat_id, error, text, images, files, mentions, bubble, result))
 
     @classmethod
     def _has_markdown(cls, text: str) -> bool:
-        return bool(cls._MD_BOLD.search(text) or cls._MD_ITALIC.search(text))
+        return bool(_MD_BOLD.search(text) or _MD_ITALIC.search(text))
 
     @classmethod
     def _compose_html(cls, text, mentions):
@@ -2714,8 +2813,8 @@ class ChatView(Adw.Bin):
                         "id": m["id"], "displayName": m["name"],
                         "userIdentityType": "aadUser"}},
                 })
-        content = cls._MD_BOLD.sub(r"<b>\1</b>", content)
-        content = cls._MD_ITALIC.sub(r"<i>\1</i>", content)
+        content = _MD_BOLD.sub(r"<b>\1</b>", content)
+        content = _MD_ITALIC.sub(r"<i>\1</i>", content)
         return content.replace("\n", "<br>"), out
 
     def _render_pending(self, chat_id, text, images=None) -> None:
@@ -2754,7 +2853,8 @@ class ChatView(Adw.Bin):
             icon.set_visible(True)
         # Remember this echo so the authoritative reload adopts THIS widget in
         # place (status flips Sending→Sent) rather than rebuilding the thread.
-        self._optimistic = {"widget": bubble, "text": text}
+        self._optimistic = {"chat_id": chat_id, "widget": bubble,
+                            "text": text, "confirmed_id": None}
         self._scroll_to_bottom()
 
     def _on_sent(self, chat_id, error) -> bool:
@@ -2767,7 +2867,8 @@ class ChatView(Adw.Bin):
         return False
 
     def _on_message_sent(self, chat_id, error, text=None, images=None,
-                         files=None, mentions=None, bubble=None) -> bool:
+                         files=None, mentions=None, bubble=None,
+                         result=None) -> bool:
         """After sending a NEW message: don't reload immediately — the server
         often hasn't indexed it yet, so a reload would drop the optimistic bubble
         and jump the view up. The optimistic echo already shows it; reconcile a
@@ -2779,12 +2880,23 @@ class ChatView(Adw.Bin):
             # thread (which would discard the typed message + attached images).
             if bubble is not None:
                 self._mark_failed(bubble, lambda: self._send_message(
-                    chat_id, text, images, files, mentions, bubble))
+                    chat_id, text, images, files, mentions, bubble), chat_id)
             else:
                 self._cache().invalidate(prefix=self._msg_key(chat_id))
                 if chat_id == self._chat_id:
                     self._load_messages(chat_id)
             return False
+
+        # The POST returns the created chatMessage — pin its id on the echo so
+        # adoption matches by id. Text equality never matches a rich send (the
+        # server copy is the HTML-ified body), which duplicated the bubble.
+        opt = self._optimistic
+        if (bubble is not None and isinstance(opt, dict)
+                and opt.get("widget") is bubble and opt.get("chat_id") == chat_id
+                and isinstance(result, dict)):
+            mid = result.get("id")
+            if mid:
+                opt["confirmed_id"] = mid
 
         def reconcile() -> bool:
             self._poll_fetch(chat_id)  # _on_poll updates the cache + re-renders
@@ -2812,16 +2924,19 @@ class ChatView(Adw.Bin):
             icon.set_visible(True)
         self._set_status(outer, "sending")
 
-    def _mark_failed(self, outer, resend_cb) -> None:
+    def _mark_failed(self, outer, resend_cb, chat_id) -> None:
         """Flag a bubble as un-sent: a red badge + a Retry button that re-fires
-        the same send. The bubble stays put (we don't reload on failure)."""
+        the same send. The bubble stays put (we don't reload on failure).
+        ``chat_id`` is the conversation the send targeted — recorded at failure
+        time, not read from ``self._chat_id`` (which may have switched away
+        while the send was in flight)."""
         # Drop the optimistic pointer so a later background poll's _apply_status
         # won't hide this bubble's failed badge; track it instead so a full
         # thread re-render re-appends it rather than destroying the un-sent
         # message (and its Retry button / in-memory attachments).
         self._optimistic = None
         if not any(w is outer for _c, w in self._failed_bubbles):
-            self._failed_bubbles.append((self._chat_id, outer))
+            self._failed_bubbles.append((chat_id, outer))
         icon = getattr(outer, "_status_icon", None)
         if icon is None:
             return

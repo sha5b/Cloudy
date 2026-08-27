@@ -17,6 +17,7 @@ daemons run on the host (outside the Flatpak sandbox); see docs/ARCHITECTURE.md.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import shutil
@@ -157,6 +158,11 @@ def record_mount(account_id: str, drive, mountpoint: str | None = None) -> None:
         "drive_id": getattr(drive, "id", "") or "",
         "drive_kind": getattr(drive, "kind", "") or "",
         "mountpoint": mountpoint,
+        # The per-account base the mountpoint sits in. Remembered because it
+        # derives from the account's *display name*, which can't be
+        # reconstructed from the record alone (files._resolve_path used to
+        # guess account_id and never matched).
+        "base": str(Path(mountpoint).parent) if mountpoint else "",
     })
     _save_mount_records(records)
 
@@ -196,6 +202,75 @@ def mount_base_for(account) -> Path:
 
 def cache_mode() -> str:
     return _setting("cache-mode", "full") or "full"
+
+
+def cache_max_size() -> str:
+    """Ceiling for rclone's on-disk VFS cache (an rclone size string).
+
+    ``--vfs-cache-mode full`` keeps every opened file on disk for
+    ``--vfs-cache-max-age``; without a size cap a few large libraries can fill
+    the home partition, and a full disk stalls the whole desktop (including the
+    file manager). rclone evicts the least-recently-used entries to stay under
+    this — files still waiting to upload are never evicted."""
+    return _setting("cache-max-size", "10G") or "10G"
+
+
+# -- raw, uncached probes ------------------------------------------------
+# These are the only two places that actually read system state. They are
+# blocking (in Flatpak, host subprocesses), so nothing on the GTK thread may
+# call them: read ``core.mount_state.MountState`` instead, which owns the one
+# cached snapshot and refreshes it off-thread.
+
+def read_mount_table() -> set[str]:
+    """Every mounted path, from the kernel mount table.
+
+    Stall-proof: parses ``/proc/self/mountinfo`` directly, so it never stats
+    (and never blocks on) a possibly-hung FUSE mountpoint the way
+    ``os.path.ismount`` would. In Flatpak it reads the HOST table — mounts run
+    on the host, so the sandbox's own table wouldn't show them."""
+    if _in_flatpak():
+        try:
+            out = subprocess.run(
+                [*_host_prefix(), "cat", "/proc/self/mountinfo"],
+                capture_output=True, text=True, timeout=10).stdout
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        lines = out.splitlines()
+    else:
+        try:
+            with open("/proc/self/mountinfo", encoding="utf-8") as fh:
+                lines = fh.readlines()
+        except OSError:
+            lines = []
+    paths: set[str] = set()
+    for line in lines:
+        fields = line.split(" ")
+        if len(fields) > 4:
+            # Field 5 is the mount point; mountinfo octal-escapes
+            # space/tab/newline/backslash in paths.
+            paths.add(fields[4].replace("\\040", " ").replace("\\011", "\t")
+                      .replace("\\012", "\n").replace("\\134", "\\"))
+    return paths
+
+
+def read_process_cmdlines() -> str:
+    """All running process command lines (host-aware), as one blob.
+
+    Tells whether a live ``rclone``/``onedriver`` daemon still backs a
+    mountpoint without ever touching the FUSE path (a stat on a hung mount can
+    stall forever). Best-effort — ``""`` if ``ps`` can't run."""
+    try:
+        return subprocess.run(
+            [*_host_prefix(), "ps", "-eo", "args"],
+            capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _mount_state():
+    from ...core.mount_state import MountState
+
+    return MountState.get()
 
 
 def _bookmarks_file() -> Path:
@@ -273,127 +348,25 @@ class MountManager:
         (used for per-account mount locations); falls back to ``mount_root()``."""
         return (base or mount_root()) / self._safe_name(name)
 
-    # Mount-table snapshot cache. In Flatpak every read is a synchronous
-    # ``flatpak-spawn --host`` round-trip, and views check one mountpoint per
-    # drive — without a cache a single Files-tab refresh spawns N host
-    # processes (on the GTK thread). A couple of seconds of staleness is fine;
-    # mount/unmount invalidate explicitly.
-    _TABLE_TTL = 2.0
-    _table_cache: tuple[float, set[str]] | None = None
-    _table_lock = threading.Lock()
-
-    @classmethod
-    def _invalidate_mount_table(cls) -> None:
-        with cls._table_lock:
-            cls._table_cache = None
-
-    @classmethod
-    def active_mounts(cls, fresh: bool = False) -> set[str]:
-        """All currently-mounted paths, read from the kernel mount table.
-
-        Stall-proof and reliable across sessions: parses ``/proc/self/mountinfo``
-        directly, so it never stats (and never blocks on) a possibly-hung FUSE
-        mountpoint the way ``os.path.ismount`` would. In Flatpak it reads the
-        HOST table (mounts run on the host), since the sandbox's own table
-        wouldn't show them. Returns absolute paths. Results are cached briefly
-        (see ``_TABLE_TTL``); pass ``fresh=True`` to force a re-read."""
-        with cls._table_lock:
-            cached = cls._table_cache
-            if (not fresh and cached is not None
-                    and time.monotonic() - cached[0] < cls._TABLE_TTL):
-                return cached[1]
-        if _in_flatpak():
-            try:
-                out = subprocess.run(
-                    [*_host_prefix(), "cat", "/proc/self/mountinfo"],
-                    capture_output=True, text=True, timeout=10).stdout
-            except (OSError, subprocess.SubprocessError):
-                out = ""
-            lines = out.splitlines()
-        else:
-            try:
-                with open("/proc/self/mountinfo", encoding="utf-8") as fh:
-                    lines = fh.readlines()
-            except OSError:
-                lines = []
-        paths: set[str] = set()
-        for line in lines:
-            fields = line.split(" ")
-            if len(fields) > 4:
-                # Field 5 is the mount point; mountinfo octal-escapes
-                # space/tab/newline/backslash in paths.
-                mp = (fields[4].replace("\\040", " ").replace("\\011", "\t")
-                      .replace("\\012", "\n").replace("\\134", "\\"))
-                paths.add(mp)
-        with cls._table_lock:
-            cls._table_cache = (time.monotonic(), paths)
-        return paths
-
-    def is_mounted(self, mountpoint: Path, fresh: bool = False) -> bool:
-        return str(mountpoint) in self.active_mounts(fresh=fresh)
-
     def _await_mount(self, mountpoint: Path, timeout: float = 10.0) -> bool:
         """Poll the mount table until ``mountpoint`` appears (the FUSE daemon
         comes up shortly after `--daemon` forks). Returns True once mounted, or
         False if it never shows within ``timeout``. Runs on a worker thread
         (mount() is called via run_async), so a short sleep is fine."""
+        state = _mount_state()
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if self.is_mounted(mountpoint, fresh=True):
+        while True:
+            state.refresh_table_blocking()
+            if state.is_mounted(mountpoint):
                 return True
-            time.sleep(0.25)
-        return self.is_mounted(mountpoint, fresh=True)
+            if time.monotonic() >= deadline:
+                return False
+            # 0.5s, not tighter: in Flatpak every poll is a `flatpak-spawn
+            # --host` round-trip, so a fast cadence mostly measures subprocess
+            # latency — the daemon needs a beat to come up anyway.
+            time.sleep(0.5)
 
-    @staticmethod
-    def _process_cmdlines() -> str:
-        """All running process command lines (host-aware), as one blob.
-
-        Used to tell whether a live ``rclone``/``onedriver`` daemon still backs a
-        mountpoint without ever touching the FUSE path (a stat on a hung mount
-        can stall). Best-effort — returns ``""`` if ``ps`` can't run."""
-        try:
-            return subprocess.run(
-                [*_host_prefix(), "ps", "-eo", "args"],
-                capture_output=True, text=True, timeout=10).stdout
-        except (OSError, subprocess.SubprocessError):
-            return ""
-
-    def _has_mount_process(self, mountpoint: Path) -> bool:
-        mp = str(mountpoint)
-        for line in self._process_cmdlines().splitlines():
-            if mp in line and "mount" in line and ("rclone" in line or "onedriver" in line):
-                return True
-        return False
-
-    def mount_health(self, mountpoint: Path) -> str:
-        """Health of a mountpoint, without touching it (stall-proof):
-
-          * ``"active"`` — in the mount table *and* a daemon still serves it;
-          * ``"stale"``  — in the mount table but the daemon is gone (I/O would
-            fail with "transport endpoint is not connected"); needs clearing
-            before it can be remounted;
-          * ``"absent"`` — not mounted.
-        """
-        if not self.is_mounted(mountpoint):
-            return "absent"
-        return "active" if self._has_mount_process(mountpoint) else "stale"
-
-    def healthy_mounts(self) -> set[str]:
-        """Active FUSE mountpoints whose daemon is still alive, with a single
-        process-table read for all of them (``mount_health`` per path would
-        shell out to ``ps`` once per mountpoint). Only rclone/onedriver mounts
-        qualify — exactly the ones safe to scan without hanging."""
-        cmdlines = self._process_cmdlines().splitlines()
-        healthy: set[str] = set()
-        for mp in self.active_mounts():
-            for line in cmdlines:
-                if (mp in line and "mount" in line
-                        and ("rclone" in line or "onedriver" in line)):
-                    healthy.add(mp)
-                    break
-        return healthy
-
-    def _lazy_unmount(self, mountpoint: Path) -> None:
+    def lazy_unmount(self, mountpoint) -> None:
         """Detach a stale/dead FUSE mount (lazy ``-z``, so even a hung endpoint
         releases). Leaves the sidebar bookmark in place — the path is unchanged
         and a remount reuses it."""
@@ -405,7 +378,6 @@ class MountManager:
             except subprocess.TimeoutExpired:
                 continue
             if res.returncode == 0:
-                self._invalidate_mount_table()
                 return
 
     # -- host-aware rclone execution -------------------------------------
@@ -507,6 +479,10 @@ class MountManager:
         #                            server show locally within ~15s.
         #   --dir-cache-time 5m    : snappy listings; polling invalidates on change.
         #   --vfs-cache-max-age 72h: keep opened files cached (instant re-open).
+        #   --vfs-cache-max-size   : hard ceiling on that cache. Without it the
+        #                            cache grows until the disk is full, and a
+        #                            full home partition stalls the whole
+        #                            desktop (file manager included).
         #   --vfs-write-back 5s    : push a written/copied file to the server 5s
         #                            after it's closed. Explicit (not relying on
         #                            the default) so the upload window is known.
@@ -521,6 +497,7 @@ class MountManager:
         argv = self._rclone_argv(
             "mount", f"{remote}:", str(mountpoint),
             "--vfs-cache-mode", cache_mode(),
+            "--vfs-cache-max-size", cache_max_size(),
             "--dir-cache-time", "5m",
             "--poll-interval", "15s",
             "--vfs-cache-max-age", "72h",
@@ -680,14 +657,15 @@ class MountManager:
         mountpoint.mkdir(parents=True, exist_ok=True)
 
         # A stale mount (in the mount table but its daemon is dead) must be
-        # cleared first: is_mounted() alone would treat it as already-mounted
+        # cleared first: "is it mounted?" alone would treat it as already-mounted
         # and skip the real mount, reporting success for a drive that only
         # returns "transport endpoint is not connected" — and a hung endpoint
-        # also stalls every file chooser on the desktop that stats it.
-        if self.mount_health(mountpoint) == "stale":
-            self._lazy_unmount(mountpoint)
+        # also stalls every file chooser on the desktop that stats it. The
+        # refresh both re-reads the truth and does that clearing.
+        state = _mount_state()
+        state.refresh_blocking()
 
-        if not self.is_mounted(mountpoint):
+        if not state.is_mounted(mountpoint):
             if backend is RCLONE:
                 # `rclone mount --daemon` forks and the parent exits 0 *before*
                 # the FUSE mount is actually up, so a 0 return tells us nothing;
@@ -721,19 +699,14 @@ class MountManager:
                     raise RuntimeError("onedriver mount didn't come up (timed out)")
 
         self.add_bookmark(mountpoint, name)
+        state.refresh_blocking()   # publish the new mount to every reader
         return MountInfo(
             name=name, mountpoint=mountpoint, backend=backend.name,
-            drive_id=drive_id, active=self.is_mounted(mountpoint),
+            drive_id=drive_id, active=state.is_mounted(mountpoint),
         )
 
-    def mount_drive(self, *, provider: str, drive, token: str,
-                    base: Path | None = None, account_id: str = "") -> MountInfo:
-        """Create the rclone remote for ``drive`` from a stored token and mount
-        it. Shared by the Files view and the startup auto-remount so the remote
-        options stay in one place. Blocking — call off the UI thread."""
+    def _remote_opts(self, *, provider: str, drive, token: str) -> dict:
         google = provider == "google"
-        backend = "drive" if google else "onedrive"
-        remote = self.remote_name(drive.name, account_id)
         if google:
             opts = {"token": token, "scope": "drive"}
             # "Shared with me" and Shared Drives are the same backend with a
@@ -748,29 +721,60 @@ class MountManager:
                 "drive_id": drive.id,
                 "drive_type": self.drive_type_for(drive.kind),
             }
-        self.create_remote(remote, backend, opts)
+        return opts
+
+    def ensure_remote(self, *, provider: str, drive, token: str,
+                      account_id: str = "") -> None:
+        """Create the drive's rclone remote if it doesn't already exist.
+
+        Remounting used to re-run ``config create`` for every remembered drive
+        on every boot — a wasted host subprocess per drive (and a config-file
+        rewrite) for a remote that is already there. Note ``config create``
+        rewrites rclone's single config file, so callers remounting several
+        drives must serialize these; parallel creates can drop sections."""
+        remote = self.remote_name(drive.name, account_id)
+        if not self.has_remote(remote):
+            self.create_remote(
+                remote, "drive" if provider == "google" else "onedrive",
+                self._remote_opts(provider=provider, drive=drive, token=token))
+
+    def mount_drive(self, *, provider: str, drive, token: str,
+                    base: Path | None = None, account_id: str = "") -> MountInfo:
+        """Create the rclone remote for ``drive`` from a stored token (if
+        missing) and mount it. Shared by the Files view and the startup
+        auto-remount so the remote options stay in one place. Blocking — call
+        off the UI thread."""
+        self.ensure_remote(provider=provider, drive=drive, token=token,
+                           account_id=account_id)
+        remote = self.remote_name(drive.name, account_id)
         return self.mount(name=drive.name, remote=remote,
-                          drive_id=drive.id, base=base, onedrive=not google)
+                          drive_id=drive.id, base=base, onedrive=provider != "google")
 
     def unmount(self, mountpoint: Path) -> None:
-        if self.is_mounted(mountpoint):
+        state = _mount_state()
+        if state.is_mounted(mountpoint):
             # fusermount works for both rclone and onedriver FUSE mounts; run it
             # on the host in Flatpak (the mount lives in the host namespace).
             res = subprocess.run(
                 [*_host_prefix(), "fusermount3", "-u", str(mountpoint)],
-                capture_output=True, text=True)
+                capture_output=True, text=True, timeout=30)
             if res.returncode != 0:
                 subprocess.run([*_host_prefix(), "fusermount", "-u", str(mountpoint)],
-                               check=False)
+                               check=False, timeout=30)
+            state.refresh_table_blocking()
             # A busy mount (any file still open) makes both attempts fail with
             # exit 1. Swallowing that made the caller forget the mount record
             # and toast "Unmounted" while the drive stayed mounted — raise
             # instead so the UI can report the real situation.
-            if self.is_mounted(mountpoint):
+            if state.is_mounted(mountpoint):
                 detail = (res.stderr or res.stdout or "").strip()
                 raise RuntimeError(
                     detail or "the drive is busy (a file may still be open)")
+        # The bookmark must go with the mount: a sidebar entry pointing at a
+        # path that is no longer a live mount is what makes Nautilus (and every
+        # GTK file chooser) stat a dead endpoint and hang.
         self.remove_bookmark(mountpoint)
+        state.refresh_blocking()
 
     # -- Nautilus sidebar bookmark ---------------------------------------
     def _bookmark_line(self, mountpoint: Path, label: str) -> str:
@@ -819,10 +823,19 @@ def remount_saved(registry, secrets, log=lambda _m: None) -> int:
 
     Doubles as the startup restore *and* the periodic health watchdog: for each
     remembered drive it recomputes the per-account mount base, checks health,
-    skips anything already healthy, clears a stale (dead-daemon) mount first,
-    then remounts via ``mount_drive`` from the stored token (no re-auth).
-    Best-effort per drive — a failure is logged and skipped, never raised.
-    Returns the number of drives (re)mounted.
+    skips anything already healthy, then remounts via ``mount_drive`` from the
+    stored token (no re-auth). Best-effort per drive — a failure is logged and
+    skipped, never raised. Returns the number of drives (re)mounted.
+
+    Health comes from ONE shared snapshot (which also clears stale mounts), not
+    a ``ps`` per drive as it used to.
+
+    Two phases, because the slow parts have different shapes: remote creation
+    is SERIAL (``rclone config create`` rewrites the one config file — parallel
+    creates can drop sections, and for an existing remote it's a no-op anyway),
+    while the mounts themselves are independent daemons and run in PARALLEL —
+    serially remounting N drives made startup take N × (spawn + poll) for no
+    reason, which is the "drives take forever" report.
     """
     from .graph import Drive
 
@@ -834,7 +847,10 @@ def remount_saved(registry, secrets, log=lambda _m: None) -> int:
         log("no mount backend available; skipping auto-remount")
         return 0
 
-    remounted = 0
+    state = _mount_state()
+    state.refresh_blocking()
+
+    pending: list[dict] = []
     for rec in records:
         account_id = rec.get("account_id", "")
         drive_name = rec.get("drive_name", "")
@@ -844,12 +860,8 @@ def remount_saved(registry, secrets, log=lambda _m: None) -> int:
             continue
         base = mount_base_for(account)
         mountpoint = mgr.mountpoint_for(drive_name, base)
-        health = mgr.mount_health(mountpoint)
-        if health == "active":
+        if state.health(mountpoint) == "active":
             continue
-        if health == "stale":
-            log(f"clearing stale mount at {mountpoint} (daemon gone)")
-            mgr._lazy_unmount(mountpoint)
         provider = getattr(account, "provider", "")
         token_kind = "rclone-gdrive" if provider == "google" else "rclone-onedrive"
         token = secrets.lookup(account_id, token_kind)
@@ -858,13 +870,38 @@ def remount_saved(registry, secrets, log=lambda _m: None) -> int:
             continue
         drive = Drive(id=rec.get("drive_id", ""), name=drive_name,
                       kind=rec.get("drive_kind", ""), web_url="")
+        pending.append({"account": account, "drive": drive, "token": token,
+                        "base": base, "mountpoint": mountpoint})
+
+    ready: list[dict] = []
+    for item in pending:
         try:
-            mgr.mount_drive(provider=provider, drive=drive, token=token,
-                            base=base, account_id=account_id)
-            log(f"remounted {drive_name!r} at {mountpoint}")
-            remounted += 1
+            mgr.ensure_remote(
+                provider=item["account"].provider, drive=item["drive"],
+                token=item["token"], account_id=item["account"].id)
+            ready.append(item)
         except Exception as exc:  # noqa: BLE001 - one bad drive must not block others
-            log(f"failed to remount {drive_name!r}: {exc}")
+            log(f"failed to prepare remote for {item['drive'].name!r}: {exc}")
+
+    remounted = 0
+    lock = threading.Lock()
+
+    def do_mount(item: dict) -> None:
+        nonlocal remounted
+        try:
+            mgr.mount_drive(provider=item["account"].provider, drive=item["drive"],
+                            token=item["token"], base=item["base"],
+                            account_id=item["account"].id)
+            log(f"remounted {item['drive'].name!r} at {item['mountpoint']}")
+            with lock:
+                remounted += 1
+        except Exception as exc:  # noqa: BLE001 - one bad drive must not block others
+            log(f"failed to remount {item['drive'].name!r}: {exc}")
+
+    if ready:
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(4, len(ready))) as pool:
+            list(pool.map(do_mount, ready))
     return remounted
 
 
@@ -889,12 +926,14 @@ def _reconstruct_record(account, folder: str, dump: dict) -> dict | None:
     else:  # onedrive / sharepoint
         kind = cfg.get("drive_type", "documentLibrary")
         drive_id = cfg.get("drive_id", "")
+    base = mount_base_for(account)
     return {
         "account_id": account.id,
         "drive_name": folder,
         "drive_id": drive_id,
         "drive_kind": kind,
-        "mountpoint": str(mount_base_for(account) / MountManager._safe_name(folder)),
+        "mountpoint": str(base / MountManager._safe_name(folder)),
+        "base": str(base),
     }
 
 
@@ -936,6 +975,8 @@ def reconcile_mounts(registry, log=lambda _m: None) -> dict:
     dump = mgr.config_dump() if mgr.preferred_backend() else {}
     root = str(mount_root())
     recorded_mps = {r.get("mountpoint", "") for r in load_mount_records()}
+    state = _mount_state()
+    state.refresh_blocking()
 
     for p in mgr.bookmark_paths():
         sp = str(p)
@@ -946,7 +987,7 @@ def reconcile_mounts(registry, log=lambda _m: None) -> dict:
         if account is None and not sp.startswith(root + os.sep):
             continue
         folder = p.name
-        if mgr.is_mounted(p):
+        if state.is_mounted(p):
             if account is not None and sp not in recorded_mps:
                 rec = _reconstruct_record(account, folder, dump)
                 if rec:
@@ -955,14 +996,21 @@ def reconcile_mounts(registry, log=lambda _m: None) -> dict:
                     counts["recorded"] += 1
                     log(f"recorded already-mounted {folder!r}")
             continue
-        if account is not None and folder in dump:
-            rec = _reconstruct_record(account, folder, dump)
-            if rec:
-                _remember(rec)
-                recorded_mps.add(sp)
-                counts["adopted"] += 1
-                log(f"adopted orphaned bookmark {folder!r} (will remount)")
-                continue
+        if account is not None:
+            # The gate must consider the account-SCOPED remote name (what
+            # mount_drive creates); checking only the bare folder name made
+            # every scoped remote look "gone", so healing deleted the bookmark
+            # instead of adopting it. The unscoped name stays as the legacy
+            # fallback (matches _reconstruct_record's lookup).
+            scoped = MountManager.remote_name(folder, account.id)
+            if scoped in dump or folder in dump:
+                rec = _reconstruct_record(account, folder, dump)
+                if rec:
+                    _remember(rec)
+                    recorded_mps.add(sp)
+                    counts["adopted"] += 1
+                    log(f"adopted orphaned bookmark {folder!r} (will remount)")
+                    continue
         mgr.remove_bookmark(p)
         counts["removed"] += 1
         log(f"removed stale bookmark {sp} (no live mount / no remote)")

@@ -3,10 +3,16 @@
 
 import unittest
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from gi_setup import gi  # noqa: F401 - pins GI versions before import
 
-from cloudy.widgets.event_time import iso_to_local_naive, local_to_utc_iso, parse_hhmm
+from cloudy.widgets import event_time
+from cloudy.widgets.event_time import (
+    iso_to_local_naive,
+    local_to_utc_iso,
+    parse_hhmm,
+)
 
 
 class TestParseHhmm(unittest.TestCase):
@@ -47,6 +53,31 @@ class TestLocalToUtcIso(unittest.TestCase):
         # The exact time depends on the host timezone, but it must parse back.
         back = datetime.fromisoformat(iso.replace("Z", "+00:00"))
         self.assertIsNotNone(back.tzinfo)
+
+
+class TestDstSafeConversion(unittest.TestCase):
+    """local_to_utc_iso must use the offset of the TARGET date, not today's
+    (a fixed offset drifted every save for the other DST half-year)."""
+
+    def setUp(self):
+        self._orig = event_time.local_tz_key
+        event_time.local_tz_key = lambda: "Europe/Vienna"
+
+    def tearDown(self):
+        event_time.local_tz_key = self._orig
+
+    def test_summer_date_uses_dst_offset(self):
+        # Vienna in July: CEST = UTC+02:00 → 12:00 local = 10:00 UTC.
+        iso = local_to_utc_iso(datetime(2026, 7, 15, 12, 0), all_day=False)
+        self.assertEqual(iso, "2026-07-15T10:00:00Z")
+
+    def test_winter_date_uses_standard_offset(self):
+        # Vienna in January: CET = UTC+01:00 → 12:00 local = 11:00 UTC.
+        iso = local_to_utc_iso(datetime(2027, 1, 15, 12, 0), all_day=False)
+        self.assertEqual(iso, "2027-01-15T11:00:00Z")
+
+    def test_zone_resolved_from_key(self):
+        self.assertEqual(event_time._local_tzinfo(), ZoneInfo("Europe/Vienna"))
 
 
 if __name__ == "__main__":

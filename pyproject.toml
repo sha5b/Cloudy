@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Shahab Nedaei
+#
+# uv-managed development environment.
+#
+# Cloudy itself is built and installed by Meson, NOT by pip — this file exists
+# only to pin the Python-side toolchain and dependencies so `uv sync` gives every
+# contributor the same environment. Hence `package = false`: there is nothing
+# here for uv to build or install as a distribution.
+#
+# What uv CANNOT provide: PyGObject and the GTK4/Libadwaita/Secret/WebKit GObject
+# introspection typelibs. Those are system libraries with no useful PyPI
+# equivalent, so the virtualenv is created with --system-site-packages and picks
+# up Fedora's python3-gobject. `make venv` does this for you; see docs/BUILDING.md.
+
+[project]
+name = "cloudy-dev"
+version = "0.3.4"
+description = "Development environment for Cloudy (the app itself is built with Meson)"
+requires-python = ">=3.12"
+
+# Runtime imports that are NOT part of the GNOME platform. Keep in step with
+# requirements.txt, which is what the Flatpak build reads.
+dependencies = [
+    "msal>=1.31",
+    "Pillow>=10.0",
+]
+
+[dependency-groups]
+dev = [
+    # The build system. Installing them here rather than expecting them on PATH
+    # is what makes `make build` work from a clean checkout.
+    "meson>=1.0",
+    "ninja>=1.11",
+    # Linting. `make lint` only runs py_compile; ruff is for the wider sweep
+    # (unused imports, undefined names) — see `make ruff`.
+    "ruff>=0.6",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 90
+target-version = "py312"
+
+[tool.ruff.lint]
+# Deliberately narrow: this codebase has its own house style and is not
+# ruff-clean by default. These are the checks that catch real defects —
+# unused/undefined/shadowed names and unused locals.
+select = ["F401", "F811", "F821", "F841"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test helpers import names purely to assert they are importable.
+"tests/unit/gi_setup.py" = ["F401"]

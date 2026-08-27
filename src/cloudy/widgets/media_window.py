@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from gettext import gettext as _
 
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk
+from gi.repository import Adw, Gdk, Gtk
 
 from .attachments import save_bytes_dialog
 from .imaging import thumbnail_texture

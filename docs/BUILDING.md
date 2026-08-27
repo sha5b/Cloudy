@@ -14,7 +14,8 @@ and the [Makefile](../Makefile), so a clean machine can be set up with two
 commands:
 
 ```bash
-make bootstrap     # installs toolchain + host backends + GNOME 50 Flatpak runtime
+make bootstrap     # system packages: toolchain + host backends + GNOME 50 Flatpak runtime
+make venv          # uv environment for the Python side (meson, ninja, msal, ruff)
 make run           # local Meson build + install + launch
 # or
 make flatpak flatpak-run
@@ -26,18 +27,48 @@ Pinned for reproducibility: GNOME runtime/SDK **50**, `blueprint-compiler`
 
 The manual steps follow.
 
-### No root? (CI / restricted environments)
+### The uv development environment
 
-`meson` and `ninja` install into user space, and Meson auto-fetches the pinned
-`blueprint-compiler` from `subprojects/blueprint-compiler.wrap` when it is not on
-`PATH` — so a full local build needs no system packages beyond the GTK4 /
-Libadwaita / PyGObject runtime (already present on a GNOME desktop):
+`make venv` builds `.venv` with [uv](https://docs.astral.sh/uv/) from
+`pyproject.toml` + `uv.lock`. It holds the Python-side toolchain (`meson`,
+`ninja`, `ruff`) and the two runtime imports that are not part of the GNOME
+platform (`msal`, `Pillow`).
+
+Every Makefile target uses `.venv` automatically when it exists — you do not
+have to activate it. Activate it anyway if you want to run tools by hand:
 
 ```bash
-python3 -m pip install --user meson ninja
-export PATH="$HOME/.local/bin:$PATH"
-meson setup _build --prefix="$PWD/_install"   # clones blueprint-compiler v0.16.0
-meson install -C _build
+make venv
+source .venv/bin/activate
+```
+
+**The virtualenv MUST be created with `--system-site-packages`** (`make venv`
+does this). PyGObject and the GTK4/Libadwaita/Secret typelibs are system
+libraries with no useful PyPI equivalent, so the venv borrows Fedora's
+`python3-gobject`. An isolated venv cannot `import gi` and every test and smoke
+check fails.
+
+What uv still cannot provide: `glib-compile-resources` and the `gio-2.0` /
+`gtk4` / `libadwaita` pkg-config files. Those come from `glib2-devel`,
+`gtk4-devel` and `libadwaita-devel` — `make bootstrap` installs them, or:
+
+```bash
+sudo dnf install glib2-devel gtk4-devel libadwaita-devel
+```
+
+Without them `make build` cannot configure; `make lint`, `make ruff` and
+`make test-unit` still work.
+
+### No root? (CI / restricted environments)
+
+Meson auto-fetches the pinned `blueprint-compiler` from
+`subprojects/blueprint-compiler.wrap` when it is not on `PATH`, so beyond the
+`-devel` packages above a local build needs nothing system-wide:
+
+```bash
+make venv
+.venv/bin/meson setup _build --prefix="$PWD/_install"   # clones blueprint-compiler v0.16.0
+.venv/bin/meson install -C _build
 GSETTINGS_SCHEMA_DIR="$PWD/_install/share/glib-2.0/schemas" ./_install/bin/cloudy
 ```
 
@@ -194,4 +225,4 @@ Run `nautilus -q` once after first install so Nautilus loads it. It adds an
 - **Blueprint errors** → confirm `blueprint-compiler` ≥ 0.12 or let the wrap
   fetch it.
 - **Nautilus extension not loading** → clear `__pycache__`, run `nautilus -q`,
-  confirm `python3-nautilus` 4.x is installed.
+  confirm `nautilus-python` 4.x is installed.

@@ -21,20 +21,58 @@ Working and shipped (RPM + Flatpak; `make release` reinstalls the user Flatpak s
 - 0.3.2 (full Graph/Google client audit) added Graph-native meeting-invite cards + RSVP with organizer tracking, the pending-invitation Calendar badge/notification, nested Outlook mail folders, secondary-calendar aggregation for Microsoft, upload-session sends for >3 MB attachments, replies that keep the quoted thread (`comment`, not `message.body`), native Graph forward (keeps inline images/attachments), `Group.ReadWrite.All` (group replies 403'd on read-only; re-sign-in needed), chat-file permission grants (recipients could never open sent files), a fully async Nautilus extension (the sync `ManagedRoots` D-Bus call froze Nautilus), and the Google fixes: `calendar.calendarlist.readonly` scope (calendar list always 403'd), chat edit `updateMask`, own-message detection via OIDC `sub`, charset-aware body decoding, event pagination, rotated-refresh-token persistence, granular-consent 403 → "Re-sign in".
 - 0.3.3 made chat threads tell the whole story: Graph `systemEventMessage`s (member added — with the Teams-style shared-history suffix computed from `visibleHistoryStartDateTime` —, removed, left, chat renamed, call started/ended) render as centered status rows (`_system_event_row` in `graph_chat.py` → `_system_row` in `chat_view.py`; unknown event kinds are hidden, not noise), and deleted messages keep a dim "X deleted this message" tombstone (row flag `deleted`) instead of being filtered out of the page. Neither row type gets the message context menu/selection.
 
-**Verification convention** (applies to nearly every change below): GUI cannot be driven from a headless/agent shell (Wayland handoff kills the wrapper shell, exit 144). So changes are verified by `make build` + `make test` (4–5 meson validators + the `tests/unit/` logic suite, 104 tests) + `make lint` (py_compile) + a **headless import/instantiate smoke test** (`gi.require_version` then import/instantiate each widget module — `window.py`/`application.py` can't be imported standalone, their `Gtk.Template` needs the compiled gresource), then the user runs `make run`/`make flatpak-run` to eyeball. "Not yet eyeballed" boilerplate is omitted per-entry below.
+**Verification convention** (applies to nearly every change below): GUI cannot be driven from a headless/agent shell (Wayland handoff kills the wrapper shell, exit 144). So changes are verified by `make build` + `make test` (4–5 meson validators + the `tests/unit/` logic suite, 153 tests) + `make lint` (py_compile) + `make ruff` + a **headless import/instantiate smoke test** (`gi.require_version` then import/instantiate each widget module — `window.py`/`application.py` can't be imported standalone, their `Gtk.Template` needs the compiled gresource), then the user runs `make run`/`make flatpak-run` to eyeball. "Not yet eyeballed" boilerplate is omitted per-entry below.
 
 ---
 
 ## Standing gotchas & known limitations
 
+### Mount state — read the snapshot, never the system
+- **`core/mount_state.py::MountState.get()` is the only thing that may ask the
+  system what is mounted.** It owns one snapshot (`mounted`, `healthy`,
+  `health(path)`) and refreshes it on startup, on `Gio.UnixMountMonitor` mount
+  events, after Cloudy mounts/unmounts, and on a 5-minute fallback tick (a
+  Flatpak sandbox gets no events for host mounts). Reading it is pure memory —
+  safe on the GTK thread, and free however often Nautilus asks.
+- The two raw probes are `mounts.read_mount_table()` and
+  `mounts.read_process_cmdlines()`. **Both block** (host subprocesses in
+  Flatpak); only `MountState` and worker-thread code in `mounts.py` may call
+  them. Stub these two in tests — never let a test read the real mount table.
+- **Never `stat`/`ismount`/`resolve` a mountpoint.** A stale FUSE endpoint makes
+  the call hang in the kernel, uninterruptibly. Every check is a string compare
+  against the snapshot.
+- **A stale mount must be detached at once**, which `refresh_blocking()` does
+  for remembered Cloudy mountpoints. Cloudy writes each mountpoint into
+  `~/.config/gtk-3.0/bookmarks`, so a dead endpoint is stat'd by the Nautilus
+  sidebar, every GTK file chooser and Shell search — one dead daemon freezes
+  file handling across the desktop. This is the freeze users report.
+- **GIO reports an rclone mount as local** (`filesystem::type: fuse`,
+  `filesystem::remote: FALSE`; only `fuse.sshfs` is in glib's remote list). So
+  Nautilus's `show-image-thumbnails`/`show-directory-item-counts` `local-only`
+  defaults treat a cloud drive like a local disk and thumbnail/count every
+  file — and under `--vfs-cache-mode full` each thumbnail downloads the file.
+  There is no app-side lever for this; it is a user setting
+  (`gsettings set org.gnome.nautilus.preferences show-image-thumbnails never`).
+- **`nautilus-python` is a separate package** (Fedora 44 ships 4.1.0; there is
+  no `python3-nautilus`). Without it Nautilus never loads
+  `cloudy_nautilus.py` at all. `Nautilus.MenuItem` takes only `name` and
+  `label` — `icon`/`priority`/`tip` were removed and passing them raises.
+
 ### Architecture / conventions
+- **Tabs are built lazily** (`window._build_tab`, driven by
+  `notify::visible-child-name`). Do not go back to building every capability
+  view in `_show_account`: that created five views and ~6 concurrent network
+  loads per account switch. `_account_mail_view` and friends stay `None` until
+  their tab is first shown, so every user must null-check (they already did,
+  for signed-out accounts).
 - **Use `source_nav.run_async(work, on_done)`** for all off-thread work, never raw `threading.Thread`+`GLib.idle_add`; callback signature is `(result, error)`, capture extra ids via lambda (`lambda res, err: self._on_x(id, res, err)`).
 - **Pango markup**: Adw row/title/StatusPage text is parsed as markup — wrap dynamic text with `widgets/format.esc()`. Mail/agenda lists use plain `Gtk.Label` (immune).
 - **Graph query URLs**: encode values with spaces (e.g. `$orderby=... desc`) or urllib aborts ("URL can't contain control characters").
 - **GSettings**: `Gio.Settings.new()` *aborts the process* if the schema isn't installed — look up via `SettingsSchemaSource` first (see `mounts._setting`). New schema keys need `make build` (recompiles + reinstalls schema).
 - **New scopes force re-consent**: existing accounts must Sign Out → Sign In to pick up added scopes; Mail/Calendar surface this with an inline **Re-sign in** button on scope errors (`is_scope_error`).
 - **`Account.from_dict`** tolerates missing keys (adding fields safe; removing drops on next save). New fields must be added to the `from_dict` allowlist or they silently drop (this bit `muted_sources`). Extra fields: `full_sync`, `mount_location`, `shared_mailboxes`, `pinned_sources`, `muted_sources`.
-- **Network-mount scans are dangerous**: `os.walk` over a FUSE mount can stall / trigger downloads. Keep scanning bounded (`recent_changes` `max_scan`).
+- **Network-mount scans are dangerous**: `os.walk` over a FUSE mount can stall / trigger downloads. Keep scanning bounded (`recent_changes` `max_scan`), and only over `MountState.healthy` mountpoints — a deadline cannot interrupt a stuck readdir.
+- **Rendering is bounded too**: `file_browser._RENDER_CAP` (500) caps how many rows/tiles are built in one pass. Every entry is a widget tree built on the GTK thread, so an uncapped SharePoint folder froze the app for seconds.
 - **Module on/off is per-provider**: the Accounts on/off switch toggles the whole `module_id` (`enabled-modules`), shared by all accounts of a provider.
 - **Single-instance app**: quit the running instance before relaunching (a new launch hands off and exits 0) — also required for CSS to reload.
 - **meson install doesn't prune**: `make install` removes the installed package tree first so renamed/removed modules don't linger as phantom providers.
@@ -77,18 +115,18 @@ A first attempt stopped poll/presence timers on `unrealize`, but `Adw.ViewStack`
 - **Google OAuth cleanup** — local redirect server is always shut down.
 
 ## Biggest remaining wins — NOT done (architectural; need GUI/live-API testing, get sign-off)
-1. **Lazy view construction** (`window._show_account`): every account switch eagerly builds ALL five tab views and fires ~6 concurrent network loads though one tab is visible. Build the visible/remembered tab eagerly, the rest on first `notify::visible-child-name`.
+1. ~~**Lazy view construction**~~ — done (`window._build_tab`).
 2. **Gmail inbox is a serial N+1** (`google_client.list_messages_page`): one blocking GET per message. Parallelize with a ThreadPoolExecutor (pattern in `list_events`) or use the Gmail batch endpoint.
 3. **Image decode on the main thread** in chat/teams `done()` callbacks and `message_view.html_body_widget` (inline-image shrink+re-encode) — move decode into the worker thread.
 4. **Shared-helper dedup**: one image `texture_from_bytes` (4 copies: media_window/rich_editor/teams_view/chat_view), one `_attachment_chip` (2), one `_reply_quote` (2) — extract to a shared module.
-5. **Mail `refresh_live` collapses pagination**; **Files** nav race + unbounded FUSE-folder render (see below).
+5. **Mail `refresh_live` collapses pagination**. (The Files nav race and the unbounded FUSE-folder render are fixed — see `_on_children`'s folder tag and `_RENDER_CAP`.)
 
 ---
 
 ## Known, deliberately NOT fixed (need live-API verification)
 - **Calendar display does not show an end date for multi-day / all-day spans.** `_format_when` prints only the start day. Cross-provider (MS + Google) change — must be tested against the live API before touching.
 - **Mail `refresh_live` collapses pagination**: a live refresh re-renders only page 1, discarding loaded "Load older" pages and resetting scroll.
-- **Files `_load`/`_toggle_expand` last-write-wins race** on rapid navigation (no nav-token guard); `_scan` over a FUSE mount is unbounded for huge folders.
+- ~~Files `_load`/`_toggle_expand` race; unbounded render~~ — fixed. `_scan` itself is still unbounded for a folder with very many entries (the *render* is capped, the directory read is not).
 - **Google Shared Drives UNTESTED on a real Workspace account** (user has only personal Google): `MountManager.list_google_shared_drives` spins a throwaway rclone `drive` remote and parses `rclone backend drives` JSON — the JSON shape + Shared Drives path need a Workspace account to confirm. Shared-with-me is testable on personal. Shared Drives only appear *after* the user has mounted something once (an rclone token must already exist; the app holds no Google Drive OAuth scope).
 
 ---
@@ -120,11 +158,10 @@ A first attempt stopped poll/presence timers on `unrealize`, but `Adw.ViewStack`
 
 **Correctness (safe to fix, not done):**
 - **No `@odata.nextLink` pagination** in `graph.py` for folders, groups, contacts, drives (OneNote and `calendarView` now paginate) — accounts with >`$top` items silently truncate. Loop on `@odata.nextLink`.
-- **Mount success/failure mis-detected** (`mounts.py`): `rclone mount --daemon` forks and returns 0 before the FUSE mount exists, so `is_mounted()` right after reports `active=False` and real failures are swallowed. Poll with a short timeout + capture daemon stderr.
-- **`recent_changes` walk isn't bounded _within_ a single directory** (`file_browser.py`) — the deadline/count check is only at the top of the per-dir loop, so one huge dir on a FUSE mount blocks past budget. Check the deadline in the inner loop and prune `dirnames` when over budget.
+- ~~Mount success/failure mis-detected~~ — fixed earlier by `_await_mount` (polls the mount table after the `--daemon` fork).
+- ~~`recent_changes` inner-directory bounding~~ — verified already fixed (deadline/count checked inside the filenames loop; only a stuck `readdir` is uninterruptible, as documented).
+- ~~`respond_event` only blocks `group:` ids~~ — verified fixed (current code routes `shared:` via `/users/{address}/events/...`).
 - **Google `reply_all` drops CC/other recipients** (`google_client.py`) — only replies to the original sender even when `reply_all=True`.
-- **Google all-day `end` is exclusive** (`_event_from_json`) — off-by-one vs the Graph shape in views that compute/display the end day.
-- **`respond_event` only blocks `group:` ids** (`graph.py`) — a `shared:` id would be prefixed into a `/me/events/shared:…/accept` path; reject/route it.
 - **Unbounded dedup growth** (`notifications.py`) — `_seen_mail` / `_notified_events` only ever grow; cap/trim (matters in background mode).
 
 **Low / robustness:** `create_share_link` hardcodes `scope:"organization"` (invalid for consumer OneDrive); Google `get_event` `body_html` heuristic (`"<" in s and ">" in s`) false-positives plain text; cid-image strip regex in `message_view.py` over-matches on `>` in attribute values and misses unquoted `src=cid:`; `file_browser` rename/new-folder accept names with `/`/`..` (path traversal within the browser); EDS publish builds a bare `VEVENT` with a likely-wrong parent UID so may never publish.
@@ -136,6 +173,20 @@ A first attempt stopped poll/presence timers on `unrealize`, but `Adw.ViewStack`
 ---
 
 ## Changelog (reverse-chronological)
+
+### Headless UI sweep harness (2026-08-27, same day)
+`tests/unit/test_chat_sweep.py` (13 tests) + `test_mount_sweep.py` (2): drive the **real ChatView/FilesView** headlessly against a `FakeChatClient` injected via the app's per-account client cache (`app.set_account_client`) and a simulated `MountState` snapshot — no network, no real chats, no real mounts. `_pump()` runs a short GLib main loop so `run_async` results deliver; the view must be parented in a `Gtk.Window` or the caller-root guard drops every callback. Covers list kinds/sections/presence/unread, every message shape (links, markup, reply/forward quotes, images, reactions, system rows, tombstones), send→adopt-by-id, failed-send cross-chat guard, composer clearing, load-older ordering, read-ack mapping, scroll state derivation, search keying, and render-time ceilings. **Two bugs it caught, both fixed**: (1) the "Loading chats…" placeholder row survived `patch_listbox` forever on a cold cache (`_render_filtered` now drops unkeyed rows); (2) a message delivered while the Chat tab was hidden was never acked even after returning to the tab (identical-content polls are signature no-ops) — `_on_mapped` now acks the backlog.
+
+### Full-app audit fix pass — chat, calendar, mail, Teams, dashboard, mounts (2026-08-27)
+Five parallel deep audits + a startup/mount trace found ~68 verified bugs; this pass fixes them. `make test` 4/4, 256 unit tests, lint + ruff clean, headless instantiate smoke of all touched widgets green. **Not yet eyeballed in the GUI** — `make run` and check: chat send/switch flows, calendar multi-day chips + DST-sensitive event saves, mail timestamps/attachments, Teams forward quotes + "Load older", Dashboard rows.
+- **Chat** (`chat_view.py`): `_optimistic` is chat-scoped (`{chat_id, widget, text, confirmed_id}`) and cleared on switch — an in-flight echo can no longer migrate into another conversation; adoption matches the **message id** returned by the send POST (text-equality fallback), so rich sends (markdown/@mention/multi-line+image) don't duplicate; `_mark_failed` records the send-time chat id; `open_chat` clears the entry text + staged attachments; `_ack_open_chat` also requires `get_mapped()` (no more read-while-hidden); `_MD_BOLD/_MD_ITALIC` moved to module level with boundary guards and Google text-only sends take the plain path with a worker-side fallback (an underscore no longer kills a send); `_on_chats` merges page 1 into the loaded list (`_merge_chat_pages`) so background refreshes don't collapse pagination; search rows carry `_patch_key`s; tombstone ids are un-hidden once the server returns them as `deleted`.
+- **Calendar**: `event_time.local_to_utc_iso` resolves the local **ZoneInfo** (target-date offset — DST-correct saves); `ics.parse_invite` converts TZID'd DTSTART/DTEND to the user's zone; `_range_iso` pads a day each side; `month_grid.expand_days` spreads multi-day events across the grid AND agenda (Graph exclusive-midnight ends step back a day, Google inclusive ends don't); Google `dateTime`s normalized to local-naive in `_event_from_json`; attendee **types** round-trip (dicts `{"email","type"}` accepted by both providers' create/update); `Notifier.refresh_invites(account_id)` + calls from event-window and mail-view RSVP success paths; EDS all-day `DTEND` exclusive for both providers; arrow-nav filters hidden rows; transient refetch errors keep stale data; empty day headers pruned after multi-delete; "No events match" row.
+- **Mail**: `_ical_dt` module-level helper accepts dict/str/None (the eventMessage `startDateTime`-string crash); `format.short_time` parses + localizes; folder-load *failure* (≠ empty) surfaces error/re-auth instead of parking in Unread with hidden placeholders; real inbox id captured for the badge-decrement guard; composer attach + attachment save off-thread; inline-image-only drafts kept after send (not deleted); `save_draft(..., draft_id=)` PATCHes Graph / PUTs Gmail (resume no longer duplicates); chip double-escape removed; Ctrl+R guarded during load; folder labels refresh on live refresh; `friendly_error` in the three raw spots; `getaddresses` for Gmail header rows; native-forward Subject read-only; group-mailbox Enter-search disabled with a toast. `message_window` attachments fixed via the main-window parent.
+- **Teams** (`teams_view.py`/`graph_teams.py`/`graph_http.py`): `_forward_quote` ported (forwards render); `fetch_bytes(url, scopes=)` (channel images use `SCOPES_CHANNELS` — future-proof for per-scope tokens); `_posts_signature` mirrors chat's `_msg_sig` (edits/reply-reactions/attachments detected); failed post/reply restores the text; scroll anchor preserved across re-renders; `_image_cache` per channel; "Load older messages" pagination with `_merge_posts`; `_TEAMS_SCOPE_HINT`; dead `notepages:` invalidation removed; `_on_page_saved` reloads the saved section; system events + tombstones flow through `_system_event_row` and render as dim rows; OneNote title PATCHed when changed.
+- **Dashboard/shell** (`dashboard_view`/`activity_view`/`files_view`/`source_nav`): async `launch_default_for_uri`; upload status queried with the **scoped** remote name (indicator was structurally dead); Unread stat/badge use the fetched server total; `_iso_sort_key`/`_local_date` (parsed, not string-compared); Activity badge = unread chats only; Activity feed keeps content on transient errors + SWR-cached under `<account>:activity`; `status_page()` escapes internally (callers pass RAW text — teams_view's five pre-escaped call sites were de-escaped); Mounted stat uses `healthy`; files rows keyed by mountpoint.
+- **Mounts/startup** (`mounts.py`/`files.py`/`sync.py`): `remount_saved` = serial `ensure_remote` (create-only-if-missing) + **parallel** mounts (≤4); `_await_mount` polls at 0.5 s; reconcile adoption accepts account-scoped remote names; mount records remember their `base` and `files._resolve_path` uses it (old account-id guess never matched) without `Path.resolve()` through FUSE; the startup bisync is deferred ~90 s (`enable(account, immediate=False)`); `.cloudy-reactions`/`.cloudy-replies` CSS rules added.
+- **Still open (small, known)**: the Teams channel **Mute** bell is still a no-op (nothing polls channels in the notifier — needs a starred-channel watermark sweep before it means anything); the OneNote inline editor can still be destroyed by a channel switch mid-edit (proper fix = move it into an `EditorWindow`); a system event as a channel's newest post can surface as the Dashboard channel snippet; dashboard "Unread" preview list still counts only the preview page (the stat card is server-side now). Mail `refresh_live` pagination collapse and the calendar `_format_when` multi-day end label remain the known deferred items.
+- Unit suite: 153 → 256 (`test_chat_logic`, `test_teams_channels`, `test_calendar_spans`, `test_event_time` DST, `test_ics` TZID, `test_google_client` normalization/draft-PUT, `test_graph` `_ical`/save_draft, `test_format` local time, `test_dashboard_view`, `test_activity_view`, `test_files` scoped-reconcile/base-fallback).
 
 ### 0.3.4 — full-app stability audit (files freezes, chat/badges, threading) (2026-08-04)
 Four parallel deep audits (chat, badges, file-browser/mounts, app-wide threading) + fixes; `make test` 5/5, 139 unit tests, headless instantiate smoke test green.
@@ -247,7 +298,9 @@ All in `modules/microsoft365/mounts.py` (+ `widgets/files_view.py`, `application
 ```bash
 make run            # meson build+install into _install, then launch ./_install/bin/cloudy
 make build|test|lint|clean
+make venv           # uv dev environment (.venv); every target picks it up automatically
 make test-unit      # just the headless logic suite (fast, no build/schema)
+make ruff           # unused/undefined names (config in pyproject.toml)
 make flatpak flatpak-run   # sandboxed (org.gnome.Platform 50)
 make release        # builds RPM + Flatpak bundle and reinstalls the bundle
 ```

@@ -4,8 +4,6 @@
 import unittest
 
 from cloudy.core.interfaces import (
-    CalendarCapability,
-    ChatCapability,
     FilesCapability,
     MailCapability,
     ServiceModule,

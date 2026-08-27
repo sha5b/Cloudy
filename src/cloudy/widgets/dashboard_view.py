@@ -17,8 +17,8 @@ from pathlib import Path
 
 from gi.repository import Adw, Gio, GLib, Gtk, Pango
 
+from ..core.mount_state import MountState
 from ..modules.microsoft365.mounts import (
-    MountManager,
     mount_base_for,
     mount_root,
     sync_root,
@@ -236,7 +236,9 @@ class DashboardView(Adw.Bin):
                             chats.append((account, c))
                     except Exception:  # noqa: BLE001 - Teams may be unavailable
                         pass
-            events.sort(key=lambda pair: pair[1].get("start", ""))
+            # Cross-provider stamps: Graph gives local-naive strings, Google
+            # offset/Z-aware ones — compare as parsed UTC, not raw strings.
+            events.sort(key=lambda pair: _iso_sort_key(pair[1].get("start", "")))
             # Unread first; stable sort keeps the API's newest-first order within.
             messages.sort(key=lambda pair: pair[1].get("is_read", True))
             activity.sort(key=lambda pair: pair[1].get("when", ""), reverse=True)
@@ -268,12 +270,14 @@ class DashboardView(Adw.Bin):
 
     @staticmethod
     def _count_mounted(accounts) -> int:
-        # Count via the kernel mount table (stall-proof) rather than statting
+        # Count from the shared mount snapshot (stall-proof) rather than statting
         # each child with os.path.ismount, which can block on a hung FUSE mount.
+        # Healthy only: a stale entry still sits in the kernel mount table, but
+        # its daemon is gone — opening it would hang, so it isn't "mounted".
         roots = {str(mount_root())}  # backward-compat with any flat (pre-namespacing) mounts
         for account in accounts:
             roots.add(str(mount_base_for(account)))
-        return sum(1 for mp in MountManager.active_mounts()
+        return sum(1 for mp in MountState.get().healthy
                    if os.path.dirname(mp) in roots)
 
     @staticmethod
@@ -330,13 +334,11 @@ class DashboardView(Adw.Bin):
         # Scan per-mountpoint rather than per-account base so recent_changes
         # gives every drive a fair scan share — and ONLY mountpoints whose FUSE
         # daemon is alive: walking a dead mount hangs the worker forever (the
-        # deadline can't interrupt a stuck readdir). Runs on the worker thread
-        # (healthy_mounts shells out to ps/mountinfo).
+        # deadline can't interrupt a stuck readdir).
         roots = [sync_root()]
         bases = {str(mount_base_for(account)) for account in accounts}
         bases.add(str(mount_root()))  # pre-namespacing flat mounts
-        mm = MountManager()
-        for mp in sorted(mm.healthy_mounts()):
+        for mp in sorted(MountState.get().healthy):
             if os.path.dirname(mp) in bases:
                 roots.append(Path(mp))
         return roots
@@ -344,13 +346,15 @@ class DashboardView(Adw.Bin):
     def _on_loaded(self, data) -> bool:
         self._data = data
         self._set_badge("calendar", len(data.get("events", [])))
-        self._set_badge("mail", sum(
-            1 for _a, m in data.get("messages", []) if not m.get("is_read", True)))
+        # The server-side inbox count (client.inbox_unread()) — counting the
+        # fetched preview page caps the number at the page size.
+        self._set_badge("mail", data.get("unread", 0))
         self._set_badge("files", len(data.get("files", [])))
         self._set_badge("pinned", len(data.get("pinned", [])))
-        # Activity badge = unread chats + starred channels with a new post.
-        unread_chats = sum(1 for _a, c in data.get("chats", []) if c.get("unread"))
-        self._set_badge("activity", unread_chats + len(data.get("activity", [])))
+        # Activity badge = unread chats only. Starred channels have no newness
+        # signal behind them (the feed holds just their latest post), so
+        # counting them would pin the badge above zero forever.
+        self._set_badge("activity", _unread_chats(data.get("chats", [])))
         self._render_section()
         return False
 
@@ -399,10 +403,12 @@ class DashboardView(Adw.Bin):
     def _build_today(self) -> Gtk.Widget:
         events = self._data.get("events", [])
         messages = self._data.get("messages", [])
-        unread = sum(1 for _a, m in messages if not m.get("is_read", True))
-        today = datetime.now().date().isoformat()
+        # Server-side inbox count for the stat card too, so it matches the
+        # sidebar badge (the preview page below stays a page-limited sample).
+        unread = self._data.get("unread", 0)
+        today = datetime.now().date()
         events_today = sum(1 for _a, e in events
-                           if (e.get("start", "") or "").startswith(today))
+                           if _local_date(e.get("start", "")) == today)
         mounted = self._data.get("mounted", 0)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SPACE_L)
@@ -415,10 +421,9 @@ class DashboardView(Adw.Bin):
         stats.append(self._stat(events_today, _("Events today"),
                                 "x-office-calendar-symbolic", "calendar"))
         if self._ms_accounts:
-            unread_chats = sum(1 for _a, c in self._data.get("chats", [])
-                               if c.get("unread"))
-            stats.append(self._stat(unread_chats, _("New chats"),
-                                    "user-available-symbolic", "activity"))
+            stats.append(self._stat(_unread_chats(self._data.get("chats", [])),
+                                    _("New chats"), "user-available-symbolic",
+                                    "activity"))
         stats.append(self._stat(len(self._data.get("files", [])), _("File changes"),
                                 "document-open-recent-symbolic", "files"))
         stats.append(self._stat(mounted, _("Mounted"), "folder-remote-symbolic",
@@ -785,10 +790,17 @@ class DashboardView(Adw.Bin):
         if not path:
             return
         uri = "file://" + GLib.Uri.escape_string(path, "/", False)
-        try:
-            Gio.AppInfo.launch_default_for_uri(uri, None)
-        except Exception as exc:  # noqa: BLE001
-            self._window.add_toast(_("Couldn't open: %s") % exc)
+
+        # The sync launch stats + content-sniffs the target to pick a handler,
+        # which on a FUSE mount blocks the GTK thread (forever, if the mount
+        # daemon is hung). The async variant does that off the main loop.
+        def on_done(_obj, result) -> None:
+            try:
+                Gio.AppInfo.launch_default_for_uri_finish(result)
+            except Exception as exc:  # noqa: BLE001
+                self._window.add_toast(_("Couldn't open: %s") % exc)
+
+        Gio.AppInfo.launch_default_for_uri_async(uri, None, None, on_done)
 
     def _event_row(self, account, ev) -> Adw.ActionRow:
         from .format import esc
@@ -828,6 +840,31 @@ class DashboardView(Adw.Bin):
             "activated",
             lambda _r, a=account, mid=msg.get("id"): self._window.open_mail(a, mid))
         return row
+
+
+def _unread_chats(chats) -> int:
+    """Chats carrying an unread marker — the Activity badge / "New chats" stat.
+    Starred channels don't count: there is no newness signal behind them."""
+    return sum(1 for c in chats if c.get("unread"))
+
+
+def _iso_sort_key(start: str):
+    """A cross-provider sort key for a raw event ``start`` stamp.
+
+    Graph returns local-naive strings and Google offset/Z-aware ones, so a raw
+    string sort interleaves them in the wrong order. Parsed stamps compare as
+    UTC datetimes; unparseable values sink to the end, keeping raw-string order
+    among themselves."""
+    dt = parse_iso_utc(start)
+    return (0, dt) if dt is not None else (1, start)
+
+
+def _local_date(start: str):
+    """The local calendar date of a ``start`` stamp (None when unparseable) —
+    for "today" checks that must not compare a UTC date against a local one
+    (``"…T23:30:00Z"``.startswith(local today) misses late-evening events)."""
+    dt = parse_iso_utc(start)
+    return dt.astimezone().date() if dt is not None else None
 
 
 def _fmt(start: str, all_day: bool) -> str:

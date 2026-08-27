@@ -21,6 +21,27 @@ from ...core.auth.msal_graph import (
 )
 
 
+def _ical_dt(dt) -> str:
+    """Graph start/end value → iCal basic format (UTC gets a ``Z``).
+
+    Accepts BOTH shapes an eventMessage exposes: the expanded event's
+    ``dateTimeTimeZone`` dict (``{"dateTime", "timeZone"}``) and the bare
+    ``Edm.DateTimeOffset`` string of ``startDateTime``/``endDateTime`` — the
+    latter is a plain ``str`` (not a dict), which used to raise
+    ``AttributeError`` in the invite-card builder. ``None``/empty → ``""``."""
+    raw, utc = "", False
+    if isinstance(dt, str):
+        raw, utc = dt, dt.rstrip().endswith("Z")
+    elif dt:
+        raw = dt.get("dateTime") or ""
+        utc = dt.get("timeZone") == "UTC"
+    val = (raw or "")[:19]
+    if not val:
+        return ""
+    compact = val.replace("-", "").replace(":", "")
+    return compact + ("Z" if utc else "")
+
+
 class GraphMailMixin:
     # -- Mail -------------------------------------------------------------
     # Surface the everyday folders first; everything else falls in alphabetically.
@@ -338,18 +359,12 @@ class GraphMailMixin:
             return None  # accepted/declined notifications aren't actionable
         event = data.get("event") or {}
 
-        def _ical(dt: dict | None) -> str:
-            """Graph dateTimeTimeZone → iCal basic format (UTC gets a Z)."""
-            val = ((dt or {}).get("dateTime") or "")[:19]
-            if not val:
-                return ""
-            compact = val.replace("-", "").replace(":", "")
-            return compact + ("Z" if (dt or {}).get("timeZone") == "UTC" else "")
-
         organizer = ((event.get("organizer") or {}).get("emailAddress")
                      or (data.get("from") or {}).get("emailAddress") or {})
-        start = data.get("startDateTime") or event.get("start")
-        end = data.get("endDateTime") or event.get("end")
+        # Prefer the expanded event's dateTimeTimeZone dicts; the eventMessage's
+        # startDateTime/endDateTime strings (Edm.DateTimeOffset) are the fallback.
+        start = event.get("start") or data.get("startDateTime")
+        end = event.get("end") or data.get("endDateTime")
         location = ((data.get("location") or {}).get("displayName")
                     or (event.get("location") or {}).get("displayName") or "")
         return {
@@ -357,8 +372,8 @@ class GraphMailMixin:
             "status": "CANCELLED" if method == "CANCEL" else "",
             "summary": html.unescape(event.get("subject")
                                      or data.get("subject", "") or ""),
-            "dtstart": _ical(start),
-            "dtend": _ical(end),
+            "dtstart": _ical_dt(start),
+            "dtend": _ical_dt(end),
             "all_day": bool(event.get("isAllDay") or data.get("isAllDay")),
             "location": html.unescape(location),
             "organizer_email": organizer.get("address", ""),
@@ -610,9 +625,12 @@ class GraphMailMixin:
 
     def save_draft(self, *, to, subject: str, body: str, cc=None, bcc=None,
                    html: bool = False, attachments=None, source: str = "me",
-                   address: str | None = None) -> dict:
+                   address: str | None = None,
+                   draft_id: str | None = None) -> dict:
         """Save an unfinished message into Drafts (POST creates a draft, unlike
-        ``sendMail``) so it can be resumed here or in Outlook."""
+        ``sendMail``) so it can be resumed here or in Outlook. Passing the id
+        of an already-open draft PATCHes that draft in place instead of
+        POSTing a duplicate copy on every save."""
         message = {
             "subject": subject,
             "body": {"contentType": "HTML" if html else "Text", "content": body},
@@ -623,10 +641,21 @@ class GraphMailMixin:
         if bcc:
             message["bccRecipients"] = self._recipients(bcc)
         if source == "shared" and address:
-            return self._draft_with_attachments(
-                f"/users/{address}", message, attachments, SCOPES_MAIL_SHARED)
-        return self._draft_with_attachments(
-            "/me", message, attachments, SCOPES_MAIL)
+            base, scopes = f"/users/{address}", SCOPES_MAIL_SHARED
+        else:
+            base, scopes = "/me", SCOPES_MAIL
+        if draft_id:
+            # Re-saving a resumed draft updates it in place; newly attached
+            # files are added to that same draft (small inline, big via session).
+            self._patch(f"{base}/messages/{draft_id}", message, scopes)
+            small, big = self._split_attachments(attachments)
+            for obj in self._build_attachments(small):
+                self._post(f"{base}/messages/{draft_id}/attachments",
+                           obj, scopes)
+            for a in big:
+                self._upload_attachment(base, draft_id, a, scopes)
+            return {"id": draft_id}
+        return self._draft_with_attachments(base, message, attachments, scopes)
 
     def reply_mail(self, message_id: str, body: str, *, reply_all: bool = False,
                    html: bool = False, attachments=None,

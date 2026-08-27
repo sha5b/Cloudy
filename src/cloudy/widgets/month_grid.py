@@ -13,7 +13,7 @@ normalized dicts the REST clients return (``start`` ISO, ``subject``,
 from __future__ import annotations
 
 import calendar as _calmod
-from datetime import date
+from datetime import date, timedelta
 from gettext import gettext as _
 
 from gi.repository import Gtk, Pango
@@ -25,8 +25,41 @@ _WEEKDAYS = (_("Mon"), _("Tue"), _("Wed"), _("Thu"), _("Fri"), _("Sat"), _("Sun"
 _MAX_CHIPS = 3  # per day cell before "+N more"
 
 
-def _event_date(ev: dict) -> str:
-    return (ev.get("start", "") or "").partition("T")[0]
+def expand_days(ev: dict, window_first: str, window_last: str) -> list[str]:
+    """The ISO days an event covers (its day span), clipped to the visible
+    window so a year-long event can't fan out hundreds of entries.
+
+    The end date is used as-is (the inclusive last day both providers'
+    normalization produces), with one convention exception: Graph all-day
+    events end at the midnight AFTER the last covered day (``…T00:00:00``,
+    iCal-style exclusive), so those step back one day — otherwise a multi-day
+    event would only show a chip on its start day."""
+    start = (ev.get("start", "") or "")[:10]
+    if len(start) < 10:
+        return []
+    try:
+        first = date.fromisoformat(start)
+    except ValueError:
+        return [start]
+    raw_end = ev.get("end", "") or ""
+    try:
+        last = date.fromisoformat(raw_end[:10]) if len(raw_end) >= 10 else first
+    except ValueError:
+        last = first
+    if (ev.get("all_day") and last > first
+            and raw_end.partition("T")[2][:8] == "00:00:00"):
+        last -= timedelta(days=1)  # Graph's exclusive midnight END convention
+    try:
+        lo = max(first, date.fromisoformat(window_first))
+        hi = min(last, date.fromisoformat(window_last))
+    except ValueError:
+        return [start]
+    days: list[str] = []
+    day = lo
+    while day <= hi:
+        days.append(day.isoformat())
+        day += timedelta(days=1)
+    return days
 
 
 class MonthGrid(Gtk.Box):
@@ -128,13 +161,14 @@ class MonthGrid(Gtk.Box):
             child = nxt
 
         by_day: dict[str, list[dict]] = {}
+        weeks = _calmod.Calendar(firstweekday=0).monthdatescalendar(self._year, self._month)
         for ev in self._events:
-            by_day.setdefault(_event_date(ev), []).append(ev)
+            for day in expand_days(ev, weeks[0][0].isoformat(), weeks[-1][-1].isoformat()):
+                by_day.setdefault(day, []).append(ev)
         for evs in by_day.values():
             evs.sort(key=lambda e: e.get("start", ""))
 
         today = date.today()
-        weeks = _calmod.Calendar(firstweekday=0).monthdatescalendar(self._year, self._month)
         for r, week in enumerate(weeks):
             for c, day in enumerate(week):
                 self._grid.attach(

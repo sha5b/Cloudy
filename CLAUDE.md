@@ -8,7 +8,7 @@ Cloudy is a **GTK4 / Libadwaita (Python / PyGObject)** super-app for **Microsoft
 
 ## Build / run / test
 
-Toolchain here is **user-space**: `meson`/`ninja` via `pip --user` — ensure `export PATH="$HOME/.local/bin:$PATH"`.
+Toolchain is a **uv virtualenv**: `make venv` builds `.venv` from `pyproject.toml` + `uv.lock` (meson, ninja, ruff, msal, Pillow). Every `make` target uses it automatically — no activation needed. It MUST be created with `--system-site-packages` (PyGObject/GTK typelibs come from the system). `make build` additionally needs `glib2-devel gtk4-devel libadwaita-devel` from dnf.
 
 ```bash
 make run      # build + install into ./_install, then launch ./_install/bin/cloudy
@@ -16,7 +16,9 @@ make build    # meson compile (auto-configures _build/ first)
 make install  # install into local prefix (prunes the old package tree first)
 make test     # meson test: 4 validators (desktop/schema/metainfo/blueprint) + the logic unit suite
 make test-unit # just the headless logic unit tests (tests/unit/, fast, no build/schema needed)
-make lint     # just py_compile over src + nautilus-extension (no ruff/pyflakes here)
+make lint     # just py_compile over src + nautilus-extension
+make ruff     # unused/undefined/shadowed names + unused locals (config in pyproject.toml)
+make venv     # (re)build the uv development environment
 make clean
 ```
 

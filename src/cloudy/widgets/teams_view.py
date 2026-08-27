@@ -23,6 +23,7 @@ from gettext import gettext as _
 
 from gi.repository import Adw, Gdk, GLib, Gtk, Pango
 
+from ..core.auth.msal_graph import SCOPES_CHANNELS
 from ..modules.microsoft365.graph_markup import html_to_pango, strip_html
 from .format import esc, relative_time
 from .imaging import shrink_image_bytes, texture_from_png_bytes
@@ -41,6 +42,12 @@ from .source_nav import (
     toggle_mute,
     toggle_pin,
 )
+
+# The shared SCOPE_HINT copy talks about shared mailboxes; this tab's consent
+# problem is the teams/channels permission set, so use a Teams-specific hint.
+_TEAMS_SCOPE_HINT = _(
+    "Cloudy needs extra permissions for teams and channels — "
+    "sign out and back in to grant them.")
 
 
 class TeamsView(Adw.Bin):
@@ -72,6 +79,14 @@ class TeamsView(Adw.Bin):
         # Inline reply entries by post id, so a poll re-render can carry an
         # in-progress draft over into the rebuilt composer.
         self._reply_entries: dict[str, Gtk.Entry] = {}
+        # url -> (texture, original bytes) of already-fetched inline images, so
+        # a poll re-render reuses decoded images instead of re-downloading
+        # every picture in the channel (cleared when switching channels).
+        self._image_cache: dict = {}
+        # channel id -> older-page cursor (Graph @odata.nextLink) powering the
+        # "Load older messages" button atop the conversation.
+        self._conv_tokens: dict = {}
+        self._conv_loading = False  # an older-page fetch is in flight
 
         self.set_child(self._build_layout())
         self._load_teams()
@@ -259,7 +274,7 @@ class TeamsView(Adw.Bin):
             clear_listbox(self._teams_list)
             if is_scope_error(error):
                 self._teams_list.append(action_row(
-                    SCOPE_HINT, _("Re-sign in"),
+                    _TEAMS_SCOPE_HINT, _("Re-sign in"),
                     lambda: self._window.sign_in_account(self._account)))
             else:
                 self._teams_list.append(self._message_row(
@@ -351,6 +366,9 @@ class TeamsView(Adw.Bin):
     # Open a channel
     # ------------------------------------------------------------------ #
     def _open_channel(self, team, channel) -> None:
+        if channel["id"] != self._channel_id:
+            self._image_cache = {}  # drop the previous channel's decoded images
+            self._conv_loading = False
         self._team_id = team["id"]
         self._team_name = team["name"]
         self._channel_id = channel["id"]
@@ -433,7 +451,8 @@ class TeamsView(Adw.Bin):
             team_id, channel_id = self._team_id, self._channel_id
 
             def work():
-                return self._client().list_channel_messages(team_id, channel_id)
+                return self._client().list_channel_messages_page(
+                    team_id, channel_id)
 
             run_async(work,
                       lambda res, err: self._on_conv_poll(channel_id, res, err))
@@ -442,21 +461,34 @@ class TeamsView(Adw.Bin):
     def _on_conv_poll(self, channel_id, result, error) -> bool:
         if error or result is None or channel_id != self._channel_id:
             return False
-        self._cache.set(self._conv_key(), result)
-        if self._posts_signature(result) != self._conv_sig:
-            self._render_posts(result)  # only re-render on a real change
+        posts, _next = result
+        merged = self._merge_posts(self._cached_posts(), posts)
+        self._cache.set(self._conv_key(), merged)
+        if self._posts_signature(merged) != self._conv_sig:
+            self._render_posts(merged)  # only re-render on a real change
         return False
 
     @staticmethod
-    def _posts_signature(posts) -> tuple:
-        """A fingerprint of the posts (ids, timestamps, reply ids, reaction
-        totals) — changes exactly when something the reader would notice does."""
+    def _msg_sig(m) -> tuple:
+        """A cheap fingerprint of one post/reply — changes when its text,
+        attachments or reactions change (mirrors chat's ``_msg_sig``), so an
+        edit, a new reaction or an attachment is noticed by the poll."""
+        return (m.get("id", ""), m.get("sent", ""), m.get("text", ""),
+                bool(m.get("system")), bool(m.get("deleted")),
+                len(m.get("attachments") or []),
+                tuple(sorted((r.get("emoji"), r.get("count"))
+                             for r in (m.get("reactions") or []))))
+
+    @classmethod
+    def _posts_signature(cls, posts) -> tuple:
+        """A fingerprint of the posts — ids, timestamps, text, attachment
+        counts and reactions of every root post and reply — changes exactly
+        when something the reader would notice does."""
         sig: list = []
         for p in posts or []:
-            sig.append((p.get("id", ""), p.get("sent", ""),
-                        sum(r.get("count", 0) for r in (p.get("reactions") or []))))
+            sig.append(cls._msg_sig(p))
             for r in p.get("replies") or []:
-                sig.append((r.get("id", ""), r.get("sent", "")))
+                sig.append(cls._msg_sig(r))
         return tuple(sig)
 
     # ------------------------------------------------------------------ #
@@ -465,7 +497,37 @@ class TeamsView(Adw.Bin):
     def _conv_key(self) -> str:
         return f"{self._account.id}:channelmsgs:{self._channel_id}"
 
+    def _conv_token_key(self) -> str:
+        # Older-messages cursor, cached beside the posts so pagination survives
+        # closing/reopening the channel (the channelmsgs prefix invalidation
+        # clears both).
+        return f"{self._conv_key()}:cursor"
+
+    def _cached_posts(self) -> list:
+        cached = self._cache.get(self._conv_key())
+        return list(cached[0]) if cached else []
+
+    @staticmethod
+    def _merge_posts(cached: list, page: list) -> list:
+        """Merge a freshly-fetched newest ``page`` into the ``cached`` posts
+        (both oldest-first): the page is authoritative for the window it covers
+        while older history the user paged in below it is kept — so a poll can
+        never truncate just-loaded older posts (mirrors chat's merge)."""
+        if not cached or not page:
+            return list(page or cached)
+        page_ids = {p.get("id") for p in page if p.get("id")}
+        window_start = page[0].get("sent", "") or ""
+        older = [p for p in cached
+                 if p.get("id") not in page_ids
+                 and (p.get("sent", "") or "") <= window_start]
+        return older + list(page)
+
     def _load_conversation(self) -> None:
+        # Resume pagination where this channel left off (cached beside the
+        # posts), so the "Load older messages" button shows instantly — also
+        # on the fresh-cache early-return path below.
+        token = self._cache.get(self._conv_token_key())
+        self._conv_tokens[self._channel_id] = token[0] if token else None
         cached = self._cache.get(self._conv_key())
         if cached is not None:
             self._render_posts(cached[0])
@@ -478,7 +540,7 @@ class TeamsView(Adw.Bin):
         team_id, channel_id = self._team_id, self._channel_id
 
         def work():
-            return self._client().list_channel_messages(team_id, channel_id)
+            return self._client().list_channel_messages_page(team_id, channel_id)
 
         run_async(work,
                   lambda res, err: self._on_conversation(channel_id, res, err))
@@ -490,28 +552,34 @@ class TeamsView(Adw.Bin):
             self._clear_box(self._conv_box)
             if is_scope_error(error):
                 self._conv_box.append(action_row(
-                    SCOPE_HINT, _("Re-sign in"),
+                    _TEAMS_SCOPE_HINT, _("Re-sign in"),
                     lambda: self._window.sign_in_account(self._account)))
             else:
                 self._conv_box.append(status_page(
                     "dialog-warning-symbolic", _("Couldn't load posts"),
-                    esc(error)))
+                    error))
             return False
-        self._cache.set(self._conv_key(), result)
-        self._render_posts(result)
+        posts, next_token = result
+        self._conv_tokens[channel_id] = next_token
+        self._cache.set(self._conv_token_key(), next_token)
+        merged = self._merge_posts(self._cached_posts(), posts)
+        self._cache.set(self._conv_key(), merged)
+        self._render_posts(merged)
         return False
 
     def _render_posts(self, posts) -> None:
         self._conv_sig = self._posts_signature(posts)
         # A poll re-render must not eat an in-progress reply or yank the view:
-        # carry non-empty drafts over, and only autoscroll if the user was
-        # already at (or near) the bottom.
+        # carry non-empty drafts over, only autoscroll if the user was already
+        # at (or near) the bottom, and otherwise preserve the reading position
+        # by holding the distance-from-bottom across the rebuild.
         drafts = {pid: entry.get_text()
                   for pid, entry in self._reply_entries.items()
                   if entry.get_text()}
         adj = self._conv_scroll.get_vadjustment()
         at_bottom = (adj.get_value() + adj.get_page_size()
                      >= adj.get_upper() - 48)
+        anchor = None if at_bottom else adj.get_upper() - adj.get_value()
         self._reply_entries = {}
         self._clear_box(self._conv_box)
         title = Gtk.Label(label=esc(self._channel_name), xalign=0)
@@ -521,10 +589,11 @@ class TeamsView(Adw.Bin):
         if not posts:
             self._conv_box.append(status_page(
                 "user-available-symbolic", _("No posts yet"),
-                _("Be the first to post in %s.") % esc(self._channel_name)))
+                _("Be the first to post in %s.") % self._channel_name))
             if at_bottom:
                 GLib.idle_add(self._scroll_conv_to_bottom)
             return
+        self._sync_older_row()
         for post in posts:
             self._conv_box.append(self._post_card(post))
         for pid, text in drafts.items():
@@ -534,8 +603,76 @@ class TeamsView(Adw.Bin):
                 entry.set_position(-1)
         if at_bottom:
             GLib.idle_add(self._scroll_conv_to_bottom)
+        elif anchor is not None:
+            # Restore once the new content has laid out (idle runs after the
+            # resize pass): the same distance from the bottom lands on the
+            # same content, so reading older history isn't disturbed.
+            GLib.idle_add(self._restore_conv_scroll, anchor)
+
+    def _restore_conv_scroll(self, anchor: float) -> bool:
+        adj = self._conv_scroll.get_vadjustment()
+        adj.set_value(max(0.0, adj.get_upper() - anchor))
+        return False
+
+    def _sync_older_row(self) -> None:
+        """A small "Load older messages" button atop the conversation when the
+        channel has an older page available (the box is rebuilt on every
+        render, so appending is enough — no removal bookkeeping)."""
+        if not self._conv_tokens.get(self._channel_id):
+            return
+        btn = Gtk.Button(
+            label=_("Loading…") if self._conv_loading
+            else _("Load older messages"),
+            halign=Gtk.Align.CENTER, sensitive=not self._conv_loading)
+        btn.add_css_class("flat")
+        btn.connect("clicked", lambda *_a: self._load_older_posts())
+        self._conv_box.append(btn)
+
+    def _load_older_posts(self) -> None:
+        token = self._conv_tokens.get(self._channel_id)
+        if not token or self._conv_loading or not self._channel_id:
+            return
+        self._conv_loading = True
+        team_id, channel_id = self._team_id, self._channel_id
+
+        def work():
+            return self._client().list_channel_messages_page(
+                team_id, channel_id, page_token=token)
+
+        run_async(work,
+                  lambda res, err: self._on_older_posts(channel_id, res, err))
+
+    def _on_older_posts(self, channel_id, result, error) -> bool:
+        self._conv_loading = False
+        if error is not None or channel_id != self._channel_id:
+            if error is not None:
+                self._window.add_toast(
+                    _("Couldn't load more: %s") % friendly_error(error))
+                if channel_id == self._channel_id:
+                    # Re-render to flip the button out of its "Loading…" state.
+                    self._render_posts(self._cached_posts())
+            return False
+        older, next_token = result
+        self._conv_tokens[channel_id] = next_token
+        self._cache.set(self._conv_token_key(), next_token)
+        # Prepend the older page (dropping anything already held — pages can
+        # overlap) and rebuild; the anchor logic in _render_posts keeps the
+        # view on the same content while history grows above it.
+        base = self._cached_posts()
+        base_ids = {p.get("id") for p in base if p.get("id")}
+        older = [p for p in older if p.get("id") not in base_ids]
+        full = older + base
+        self._cache.set(self._conv_key(), full)
+        self._render_posts(full)
+        return False
 
     def _post_card(self, post) -> Gtk.Widget:
+        # System events (members/calls/renames) and deleted-message tombstones
+        # render as centered dim caption rows — no card, header or actions.
+        if post.get("system"):
+            return self._system_row(post)
+        if post.get("deleted"):
+            return self._deleted_row(post)
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         card.add_css_class("card")
         card.set_margin_start(2)
@@ -555,7 +692,12 @@ class TeamsView(Adw.Bin):
                           margin_start=16, margin_top=4)
             rbox.add_css_class("cloudy-replies")
             for reply in replies:
-                rbox.append(self._message_block(reply, heading=True))
+                if reply.get("system"):
+                    rbox.append(self._system_row(reply))
+                elif reply.get("deleted"):
+                    rbox.append(self._deleted_row(reply))
+                else:
+                    rbox.append(self._message_block(reply, heading=True))
             inner.append(rbox)
         # Inline reply composer.
         reply_entry = Gtk.Entry(hexpand=True, placeholder_text=_("Reply…"))
@@ -598,6 +740,11 @@ class TeamsView(Adw.Bin):
         reply = msg.get("reply_to")
         if reply and (reply.get("text") or reply.get("from")):
             box.append(self._reply_quote(reply))
+        # A forwarded post shows its source the same way — without this the
+        # card renders empty (the body is just an <attachment> placeholder).
+        forward = msg.get("forward")
+        if forward and (forward.get("text") or forward.get("from")):
+            box.append(self._forward_quote(forward))
 
         text = (msg.get("text", "") or "").strip()
         markup = (msg.get("markup", "") or "").strip()
@@ -614,11 +761,15 @@ class TeamsView(Adw.Bin):
         for att in msg.get("attachments", []) or []:
             # Images render as inline thumbnails (like Chat); other files as a
             # chip. Mirrors chat_view._bubble so the two surfaces look the same.
+            # Channel hosted content needs the ChannelMessage scopes, not the
+            # Chat ones fetch_bytes defaults to.
             if (att.get("content_type") or "").lower().startswith("image") \
                     and att.get("url"):
                 box.append(self._lazy_image(
-                    lambda u=att["url"]: self._client().fetch_bytes(u),
-                    att.get("name") or "image", max_px=320))
+                    lambda u=att["url"]: self._client().fetch_bytes(
+                        u, SCOPES_CHANNELS),
+                    att.get("name") or "image", max_px=320,
+                    url=att["url"]))
             else:
                 box.append(attachment_chip(att, self._window))
 
@@ -671,16 +822,96 @@ class TeamsView(Adw.Bin):
         box.append(inner)
         return box
 
+    @staticmethod
+    def _forward_quote(forward) -> Gtk.Widget:
+        """A quote of a forwarded post: a "Forwarded from X" header with a
+        snippet of the original text. Static (no cross-chat jump): the original
+        lives in another chat/channel this view can't open. Reuses the reply
+        quote's accent-bar styling."""
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        box.add_css_class("cloudy-reply-quote")
+        bar = Gtk.Box()
+        bar.add_css_class("cloudy-reply-bar")
+        box.append(bar)
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
+        who = (forward.get("from") or "").strip()
+        header = _("Forwarded from %s") % who if who else _("Forwarded message")
+        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        icon = Gtk.Image.new_from_icon_name("mail-forward-symbolic")
+        icon.set_pixel_size(12)
+        icon.add_css_class("dim-label")
+        hbox.append(icon)
+        hlbl = Gtk.Label(label=header, xalign=0,
+                         ellipsize=Pango.EllipsizeMode.END)
+        hlbl.add_css_class("caption-heading")
+        hbox.append(hlbl)
+        inner.append(hbox)
+        snippet = (forward.get("text") or _("(no preview)")
+                   ).replace("\n", " ").strip()
+        slbl = Gtk.Label(label=snippet[:200], xalign=0, wrap=True,
+                         wrap_mode=Pango.WrapMode.WORD_CHAR,
+                         ellipsize=Pango.EllipsizeMode.END, lines=3)
+        slbl.add_css_class("caption")
+        slbl.add_css_class("dim-label")
+        inner.append(slbl)
+        box.append(inner)
+        return box
 
-    def _lazy_image(self, fetch, name: str = "image", *, max_px: int = 320
-                    ) -> Gtk.Widget:
+    @staticmethod
+    def _system_row(post) -> Gtk.Widget:
+        """A centered "X added Y" / "Call started" status line (no card, no
+        reply box — it's not a message anyone can reply to)."""
+        outer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
+                        halign=Gtk.Align.CENTER, margin_top=4, margin_bottom=4)
+        icon = Gtk.Image.new_from_icon_name("system-users-symbolic")
+        icon.set_pixel_size(12)
+        icon.add_css_class("dim-label")
+        outer.append(icon)
+        lbl = Gtk.Label(label=post.get("text", ""), wrap=True,
+                        justify=Gtk.Justification.CENTER, max_width_chars=70)
+        lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        lbl.add_css_class("dim-label")
+        lbl.add_css_class("caption")
+        outer.append(lbl)
+        return outer
+
+    @staticmethod
+    def _deleted_row(post) -> Gtk.Widget:
+        """The tombstone for a soft-deleted channel post/reply: keeps its
+        position in the history (so the thread doesn't reshuffle) but offers
+        no actions."""
+        mine = bool(post.get("is_mine"))
+        who = _("You") if mine else (
+            (post.get("from") or "").strip() or _("Someone"))
+        lbl = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER,
+                        max_width_chars=70)
+        lbl.set_markup("<i>%s</i>" % esc(_("%s deleted this message") % who))
+        lbl.add_css_class("dim-label")
+        lbl.add_css_class("caption")
+        outer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                        halign=Gtk.Align.CENTER,
+                        margin_top=4, margin_bottom=4)
+        outer.append(lbl)
+        return outer
+
+
+    def _lazy_image(self, fetch, name: str = "image", *, max_px: int = 320,
+                    url: str = "") -> Gtk.Widget:
         """A thumbnail that lazily downloads an (auth-gated) image via ``fetch``
         (a no-arg callable returning bytes) and, on click, opens it full size.
-        Shared by channel image attachments and OneNote page images."""
+        Shared by channel image attachments and OneNote page images.
+
+        Decoded thumbnails are cached per-view by URL (when given), so a poll
+        re-render reuses the already-decoded image instantly instead of
+        re-downloading every picture in the channel."""
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        cached = self._image_cache.get(url) if url else None
+        if cached is not None:
+            box.append(self._picture_for(cached[0], cached[1], name))
+            return box
         placeholder = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         placeholder.append(Gtk.Image.new_from_icon_name("image-x-generic-symbolic"))
         placeholder.append(Gtk.Label(label=_("Loading image…")))
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         box.append(placeholder)
 
         def done(result, error):
@@ -696,17 +927,10 @@ class TeamsView(Adw.Bin):
                 placeholder.get_last_child().set_text(_("Image"))
                 placeholder.set_tooltip_text(str(exc))
                 return False
-            pic = Gtk.Picture.new_for_paintable(texture)
-            pic.set_can_shrink(False)
-            pic.set_halign(Gtk.Align.START)
-            pic.add_css_class("cloudy-bubble-image")
-            pic.set_size_request(texture.get_width(), texture.get_height())
-            pic.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
-            tap = Gtk.GestureClick()
-            tap.connect("released", lambda *_a: self._open_image_viewer(data, name))
-            pic.add_controller(tap)
+            if url:
+                self._image_cache[url] = (texture, data)
             box.remove(placeholder)
-            box.append(pic)
+            box.append(self._picture_for(texture, data, name))
             return False
 
         def work():
@@ -716,6 +940,19 @@ class TeamsView(Adw.Bin):
 
         run_async(work, done)
         return box
+
+    def _picture_for(self, texture, data: bytes, name: str) -> Gtk.Picture:
+        """Build a click-to-open Picture pinned to a decoded thumbnail."""
+        pic = Gtk.Picture.new_for_paintable(texture)
+        pic.set_can_shrink(False)
+        pic.set_halign(Gtk.Align.START)
+        pic.add_css_class("cloudy-bubble-image")
+        pic.set_size_request(texture.get_width(), texture.get_height())
+        pic.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
+        tap = Gtk.GestureClick()
+        tap.connect("released", lambda *_a: self._open_image_viewer(data, name))
+        pic.add_controller(tap)
+        return pic
 
     def _open_image_viewer(self, data: bytes, name: str = "image") -> None:
         from .media_window import ImageWindow
@@ -734,7 +971,8 @@ class TeamsView(Adw.Bin):
             return self._client().send_channel_message(team_id, channel_id, text)
 
         run_async(work,
-                  lambda _r, err: self._after_send(channel_id, err))
+                  lambda _r, err: self._after_send(
+                      channel_id, err, self._post_entry, text))
 
     def _send_reply(self, message_id, entry) -> None:
         text = entry.get_text().strip()
@@ -747,11 +985,21 @@ class TeamsView(Adw.Bin):
             return self._client().reply_channel_message(
                 team_id, channel_id, message_id, text)
 
-        run_async(work,
-                  lambda _r, err: self._after_send(channel_id, err))
+        # A poll re-render rebuilds the reply entries (drafts carried over), so
+        # resolve the entry for this post when the error arrives, not now.
+        run_async(work, lambda _r, err: self._after_send(
+            channel_id, err, self._reply_entries.get(message_id) or entry,
+            text))
 
-    def _after_send(self, channel_id, error) -> bool:
+    def _after_send(self, channel_id, error, entry=None, text: str = "") -> bool:
         if error is not None:
+            # A failed send must not destroy the typed text: put it back. Only
+            # when still on the sending channel — the composer belongs to it.
+            if (entry is not None and text
+                    and channel_id == self._channel_id
+                    and not entry.get_text()):
+                entry.set_text(text)
+                entry.set_position(-1)
             self._window.add_toast(_("Couldn't send: %s") % friendly_error(error))
             return False
         # Invalidate the channel the message was SENT to — _conv_key() is the
@@ -803,7 +1051,7 @@ class TeamsView(Adw.Bin):
         if team_id != self._team_id:
             return False
         if error is not None:
-            msg = (SCOPE_HINT if is_scope_error(error) else esc(error))
+            msg = SCOPE_HINT if is_scope_error(error) else error
             self._page_content.set_child(status_page(
                 "dialog-warning-symbolic", _("Couldn't load notes"), msg))
             self._set_sections([])
@@ -859,7 +1107,7 @@ class TeamsView(Adw.Bin):
         if error is not None:
             self._set_pages([])
             self._page_content.set_child(status_page(
-                "dialog-warning-symbolic", _("Couldn't load pages"), esc(error)))
+                "dialog-warning-symbolic", _("Couldn't load pages"), error))
             return False
         self._set_pages(result or [])
         if not result:
@@ -907,7 +1155,7 @@ class TeamsView(Adw.Bin):
             return False
         if error is not None:
             self._page_content.set_child(status_page(
-                "dialog-warning-symbolic", _("Couldn't load page"), esc(error)))
+                "dialog-warning-symbolic", _("Couldn't load page"), error))
             return False
         self._show_page_reader(page, result or "")
         return False
@@ -973,7 +1221,7 @@ class TeamsView(Adw.Bin):
                 url = html.unescape(src_m.group(1))
                 column.append(self._lazy_image(
                     lambda u=url: self._client().fetch_note_image(u),
-                    _("image"), max_px=760))
+                    _("image"), max_px=760, url=url))
                 rendered_any = True
                 continue
             markup = html_to_pango(seg)
@@ -1083,6 +1331,7 @@ class TeamsView(Adw.Bin):
 
     def _save_page(self, page, title_entry, editor) -> None:
         title = title_entry.get_text().strip() or _("Untitled page")
+        original_title = "" if page is None else (page.get("title") or "")
         try:
             body_html, _imgs = editor.get_html()
         except Exception:  # noqa: BLE001 - fall back to plain text on editor error
@@ -1096,23 +1345,27 @@ class TeamsView(Adw.Bin):
             if page_id is None:
                 client.create_note_page(team_id, section_id, title, body_html)
             else:
-                client.update_note_page(team_id, page_id, body_html)
+                client.update_note_page(team_id, page_id, body_html,
+                                        title=title,
+                                        original_title=original_title)
             return True
 
         self._page_content.set_child(loading_box(_("Saving…")))
-        run_async(work, lambda _r, err: self._on_page_saved(page, err))
+        run_async(work,
+                  lambda _r, err: self._on_page_saved(page, section_id, err))
 
-    def _on_page_saved(self, page, error) -> bool:
+    def _on_page_saved(self, page, section_id, error) -> bool:
         if error is not None:
             self._window.add_toast(_("Couldn't save: %s") % friendly_error(error))
             self._after_notes_change(page)
             return False
         # OneNote writes are async; give the service a moment, then refresh.
+        # Reload only when the section still on screen is the one saved into —
+        # the user may have switched sections (or teams) mid-save.
         self._window.add_toast(_("Saved — it may take a moment to appear"))
-        self._cache.invalidate(
-            prefix=f"{self._account.id}:notepages:{self._section_id}")
         self._after_notes_change(None)
-        self._load_pages()
+        if section_id == self._section_id:
+            self._load_pages()
         return False
 
     def _after_notes_change(self, page) -> None:

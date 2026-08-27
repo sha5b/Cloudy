@@ -9,6 +9,7 @@ import unittest.mock
 # (the helpers under test are pure; they just live behind that import).
 try:
     from cloudy.modules.microsoft365.graph import GraphClient, GraphError, _split_id
+    from cloudy.modules.microsoft365.graph_mail import _ical_dt
     _OK = True
 except ImportError:
     _OK = False
@@ -43,6 +44,111 @@ class TestMessageScope(unittest.TestCase):
         base, raw, _scopes = GraphClient._message_scope("shared:a@x.com:AAA")
         self.assertEqual(base, "/users/a@x.com")
         self.assertEqual(raw, "AAA")
+
+
+@_skip
+class TestIcalDt(unittest.TestCase):
+    """The eventMessage invite-card builder feeds _ical_dt BOTH shapes Graph
+    exposes: the expanded event's dateTimeTimeZone dict and the bare
+    Edm.DateTimeOffset string of startDateTime/endDateTime (a str, which used
+    to raise AttributeError in the old nested dict-only helper)."""
+
+    def test_dict_utc_gets_z(self):
+        self.assertEqual(
+            _ical_dt({"dateTime": "2026-06-14T09:30:00.0000000",
+                      "timeZone": "UTC"}),
+            "20260614T093000Z")
+
+    def test_dict_local_zone_no_z(self):
+        self.assertEqual(
+            _ical_dt({"dateTime": "2026-06-14T09:30:00",
+                      "timeZone": "W. Europe Standard Time"}),
+            "20260614T093000")
+
+    def test_bare_utc_string_gets_z(self):
+        # eventMessage startDateTime is a plain Edm.DateTimeOffset string.
+        self.assertEqual(_ical_dt("2026-06-14T09:30:00Z"), "20260614T093000Z")
+
+    def test_bare_offset_string_keeps_wall_clock(self):
+        self.assertEqual(_ical_dt("2026-06-14T11:30:00+02:00"),
+                         "20260614T113000")
+
+    def test_none_and_empty_shapes(self):
+        self.assertEqual(_ical_dt(None), "")
+        self.assertEqual(_ical_dt({}), "")
+        self.assertEqual(_ical_dt(""), "")
+
+
+@_skip
+class TestMeetingInvite(unittest.TestCase):
+    def _invite(self, payload):
+        client = GraphClient.__new__(GraphClient)
+        with unittest.mock.patch.object(client, "_get", return_value=payload):
+            return client._meeting_invite("MID1")
+
+    def test_string_datetimes_do_not_crash(self):
+        # The eventMessage's startDateTime/endDateTime are plain strings —
+        # the old dict-only helper raised AttributeError on them.
+        invite = self._invite({
+            "meetingMessageType": "meetingRequest", "subject": "Sync",
+            "startDateTime": "2026-06-14T09:30:00Z",
+            "endDateTime": "2026-06-14T10:30:00Z",
+        })
+        self.assertEqual(invite["dtstart"], "20260614T093000Z")
+        self.assertEqual(invite["dtend"], "20260614T103000Z")
+
+    def test_event_dicts_preferred_over_strings(self):
+        invite = self._invite({
+            "meetingMessageType": "meetingRequest", "subject": "Sync",
+            "startDateTime": "2026-06-14T23:30:00Z",
+            "endDateTime": "2026-06-15T00:30:00Z",
+            "event": {
+                "subject": "Sync",
+                "start": {"dateTime": "2026-06-14T09:30:00", "timeZone": "UTC"},
+                "end": {"dateTime": "2026-06-14T10:30:00", "timeZone": "UTC"},
+            },
+        })
+        self.assertEqual(invite["dtstart"], "20260614T093000Z")
+        self.assertEqual(invite["dtend"], "20260614T103000Z")
+
+
+@_skip
+class TestSaveDraft(unittest.TestCase):
+    def test_new_draft_uses_create_path(self):
+        client = GraphClient.__new__(GraphClient)
+        with unittest.mock.patch.object(
+                client, "_draft_with_attachments",
+                return_value={"id": "D1"}) as create:
+            out = client.save_draft(to=["a@b"], subject="S", body="B")
+        self.assertEqual(out, {"id": "D1"})
+        create.assert_called_once()
+        self.assertEqual(create.call_args.args[0], "/me")  # scope base
+
+    def test_draft_id_patches_in_place(self):
+        client = GraphClient.__new__(GraphClient)
+        with unittest.mock.patch.object(client, "_patch") as patch, \
+                unittest.mock.patch.object(client, "_post") as post:
+            out = client.save_draft(to=["a@b"], subject="S", body="B",
+                                    draft_id="DRAFT1")
+        patch.assert_called_once()
+        self.assertEqual(patch.call_args.args[0], "/me/messages/DRAFT1")
+        payload = patch.call_args.args[1]
+        self.assertEqual(payload["subject"], "S")
+        self.assertEqual(payload["toRecipients"],
+                         [{"emailAddress": {"address": "a@b"}}])
+        post.assert_not_called()  # nothing new attached → no extra POSTs
+        self.assertEqual(out, {"id": "DRAFT1"})
+
+    def test_draft_id_attachments_added_to_same_draft(self):
+        client = GraphClient.__new__(GraphClient)
+        att = {"name": "f.txt", "content_type": "text/plain", "data": b"x"}
+        with unittest.mock.patch.object(client, "_patch"), \
+                unittest.mock.patch.object(client, "_post") as post:
+            client.save_draft(to=["a@b"], subject="S", body="B",
+                              attachments=[att], draft_id="DRAFT1")
+        self.assertEqual(post.call_args.args[0],
+                         "/me/messages/DRAFT1/attachments")
+        self.assertEqual(post.call_args.args[1]["name"], "f.txt")
 
 
 @_skip

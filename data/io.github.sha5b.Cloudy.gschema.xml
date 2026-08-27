@@ -37,6 +37,16 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
       </choices>
     </key>
 
+    <key name="cache-max-size" type="s">
+      <default>'10G'</default>
+      <summary>Disk limit for the mount cache</summary>
+      <description>
+        Ceiling for rclone's on-disk cache of opened files, as an rclone size
+        string (for example '10G'). Least-recently-used files are dropped to
+        stay under it; files still waiting to upload are never dropped.
+      </description>
+    </key>
+
     <key name="mount-layout" type="s">
       <default>'one-folder'</default>
       <summary>Where libraries mount relative to the mount location</summary>

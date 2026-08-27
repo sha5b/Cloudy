@@ -42,6 +42,7 @@ class ActivityView(Adw.Bin):
         super().__init__()
         self._window = window
         self._account = account
+        self._has_data = False  # a feed has been rendered at least once
 
         self._set_status("content-loading-symbolic", _("Loading activity…"))
         self._load_async()
@@ -49,11 +50,23 @@ class ActivityView(Adw.Bin):
     def refresh_live(self) -> None:
         """Re-pull the feed in place (no loading flicker). Called by the notifier
         when its poll spots new mail/chat, so the feed updates on its own."""
-        self._load_async()
+        self._load_async(force=True)
 
     # -- loading ----------------------------------------------------------
-    def _load_async(self) -> None:
+    def _cache_key(self) -> str:
+        return f"{self._account.id}:activity"
+
+    def _load_async(self, *, force: bool = False) -> None:
         account = self._account
+        # Stale-while-revalidate like Mail/Calendar: render the cached feed
+        # instantly (re-timestamping nothing), then refetch when stale — or
+        # always, for a notifier-driven refresh. Without this every notifier
+        # push flashed the loading page.
+        cached = self._window.get_application().cache.get(self._cache_key())
+        if cached is not None:
+            self._render(cached[0])
+            if cached[1] and not force:
+                return  # fresh; skip the fetch
 
         def work():
             from .clients import build_account_client
@@ -64,16 +77,29 @@ class ActivityView(Adw.Bin):
         run_async(work, self._on_loaded)
 
     def _on_loaded(self, items, error) -> bool:
-        if error:
-            self._set_status("dialog-error-symbolic",
-                             _("Couldn't load activity"), str(error))
+        # A transient failure on a notifier-driven refresh must not wipe a feed
+        # that's already on screen — only the first load swaps to a full-page
+        # status (and an empty result here almost always means every guarded
+        # stream failed, not that the user caught up on everything).
+        if error or not items:
+            if self._has_data:
+                if error:
+                    self._window.add_toast(_("Couldn't refresh activity."))
+                return False
+            if error:
+                self._set_status("dialog-error-symbolic",
+                                 _("Couldn't load activity"), str(error))
+            else:
+                self._set_status("emblem-ok-symbolic", _("You're all caught up"),
+                                 _("New mail, invites and messages will show up here."))
             return False
-        if not items:
-            self._set_status("emblem-ok-symbolic", _("You're all caught up"),
-                             _("New mail, invites and messages will show up here."))
-            return False
-        self.set_child(self._build_feed(items))
+        self._window.get_application().cache.set(self._cache_key(), items)
+        self._render(items)
         return False
+
+    def _render(self, items) -> None:
+        self._has_data = True
+        self.set_child(self._build_feed(items))
 
     def _set_status(self, icon, title, description="") -> None:
         # StatusPage parses title/description as Pango markup — escape, or a

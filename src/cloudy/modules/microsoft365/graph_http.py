@@ -184,9 +184,11 @@ class GraphHttp:
             self._cached_me_id = data.get("id", "")
         return self._cached_me_id
 
-    def fetch_bytes(self, url: str) -> bytes:
+    def fetch_bytes(self, url: str, scopes: Sequence[str] | None = None) -> bytes:
         """Download a hosted content / attachment (needs the bearer token, so a
         plain URL open would 401). Used to render inline chat images.
+        ``scopes`` overrides the default chat scopes — channel hosted content
+        needs the ChannelMessage scopes, not the Chat ones.
 
         Graph hosted-content ``$value`` often 302-redirects to pre-authenticated
         storage; the Authorization header must be dropped on a cross-host hop or
@@ -198,7 +200,7 @@ class GraphHttp:
         # CDN (Giphy/Tenor/SharePoint CDN) may reject a request carrying it.
         host = (urllib.parse.urlsplit(url).hostname or "").lower()
         if host.endswith("graph.microsoft.com"):
-            token = self._token_provider(SCOPES_CHAT)
+            token = self._token_provider(SCOPES_CHAT if scopes is None else scopes)
             if not token:
                 raise GraphError("not signed in (no token for the requested scopes)")
             headers["Authorization"] = f"Bearer {token}"

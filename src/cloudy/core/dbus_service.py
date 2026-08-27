@@ -16,11 +16,12 @@ Status values returned by StatusForPath:
 from __future__ import annotations
 
 import os
-import time
 from pathlib import Path
 from typing import Callable, Optional
 
 from gi.repository import Gio, GLib
+
+from .mount_state import MountState
 
 BUS_NAME = "io.github.sha5b.Cloudy"
 OBJECT_PATH = "/io/github/sha5b/Cloudy/Sync"
@@ -64,8 +65,6 @@ class SyncStatusService:
     is optional and used for CreateShareLink.
     """
 
-    _ACTIVE_MOUNTS_TTL_S = 5.0
-
     def __init__(
         self,
         connection: Gio.DBusConnection,
@@ -76,7 +75,6 @@ class SyncStatusService:
         self._mount_root = Path(mount_root)
         self._share_link_fn = share_link_fn
         self._reg_id = 0
-        self._active_mounts_cache: tuple[set[str], float] | None = None
 
     def publish(self) -> None:
         node = Gio.DBusNodeInfo.new_for_xml(INTROSPECTION_XML)
@@ -105,13 +103,13 @@ class SyncStatusService:
         # are namespaced per account). Walk up to root; if any ancestor is an
         # active mountpoint, the path lives on a mounted Cloudy drive.
         #
-        # We read the kernel mount table (cached briefly) rather than
-        # os.path.ismount(): ismount *stats* the path, which BLOCKS indefinitely
-        # on a hung/slow FUSE network mount — and this runs on the app's main
-        # loop for every Nautilus emblem/menu query, so a stalled mount would
-        # freeze both the app and the file manager. The mount table never touches
-        # the filesystem, so it can't hang.
-        active = self._active_mounts()
+        # We read the shared mount snapshot rather than os.path.ismount():
+        # ismount *stats* the path, which BLOCKS indefinitely on a hung/slow
+        # FUSE network mount — and this runs on the app's main loop for every
+        # Nautilus emblem/menu query, so a stalled mount would freeze both the
+        # app and the file manager. The snapshot is pure memory, so it can't
+        # hang and costs nothing however often Nautilus asks.
+        active = MountState.get().mounted
         node = p
         while True:
             if node in active:
@@ -122,18 +120,6 @@ class SyncStatusService:
             if parent == node:
                 return "offline"
             node = parent
-
-    def _active_mounts(self) -> set[str]:
-        """Cached, stall-proof view of the kernel mount table."""
-        now = time.monotonic()
-        cache = self._active_mounts_cache
-        if cache is not None and (now - cache[1]) < self._ACTIVE_MOUNTS_TTL_S:
-            return cache[0]
-        from ..modules.microsoft365.mounts import MountManager
-
-        active = MountManager.active_mounts()
-        self._active_mounts_cache = (active, now)
-        return active
 
     def _managed_roots(self) -> list:
         """The directories Cloudy manages (mount root + sync root). The host

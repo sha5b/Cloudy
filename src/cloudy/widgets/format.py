@@ -52,11 +52,15 @@ def sender_email(value: str) -> str:
 
 
 def short_time(iso: str) -> str:
-    """'2026-06-14T09:30:00Z' -> '2026-06-14 09:30'."""
-    if not iso or "T" not in iso:
+    """'2026-06-14T09:30:00Z' -> '2026-06-14 09:30' — in the LOCAL wall clock.
+
+    Mail stamps arrive as UTC ("Z" or offset), so slicing the raw ISO string
+    showed the provider's UTC time; parse (tolerant, offsets/Z aware) and
+    convert instead. Unparsable input is returned unchanged."""
+    dt = _parse_iso(iso)
+    if dt is None:
         return iso
-    date, _sep, rest = iso.partition("T")
-    return f"{date} {rest[:5]}"
+    return dt.strftime("%Y-%m-%d %H:%M")
 
 
 def _parse_iso(iso: str):

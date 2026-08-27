@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import html
 import json
+import os
 import re
 import urllib.error
 import urllib.parse
@@ -25,6 +26,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Callable, Sequence
+from zoneinfo import ZoneInfo
 
 from ...core.auth.google_oauth import (
     SCOPES_BASE,
@@ -49,6 +51,51 @@ class GoogleError(Exception):
     def __init__(self, message: str, status: int = 0):
         super().__init__(message)
         self.status = status
+
+
+def _local_zone():
+    """The system's local IANA zone (DST-correct per instant), falling back to
+    the current fixed offset when the key can't be resolved. Same detection as
+    graph_calendar/eds_publish: the /etc/localtime symlink into zoneinfo."""
+    key = os.environ.get("TZ", "")
+    if "/" not in key:
+        try:
+            target = os.path.realpath("/etc/localtime")
+            if "/zoneinfo/" in target:
+                key = target.split("/zoneinfo/", 1)[1]
+        except OSError:
+            key = ""
+    if "/" in key:
+        try:
+            return ZoneInfo(key)
+        except Exception:  # noqa: BLE001 - unknown/broken key
+            pass
+    return datetime.now().astimezone().tzinfo
+
+
+def _iso_local_naive(iso: str) -> str:
+    """A UTC/offset ``dateTime`` as a naive LOCAL ISO string — the convention
+    the Graph path produces (the app renders naive times as local wall-clock),
+    so display, sorting and "Live now" agree across providers. Unparsable
+    input is returned unchanged; naive input is formatted uniformly."""
+    try:
+        dt = datetime.fromisoformat((iso or "").replace("Z", "+00:00"))
+    except ValueError:
+        return iso or ""
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(_local_zone()).replace(tzinfo=None)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _attendee_slot(a) -> dict | None:
+    """One attendee entry — ``"a@b.c"`` (→ required) or ``{"email": …,
+    "type": required|optional}`` — as Google's attendee JSON (``optional``
+    bool), or ``None`` for an empty entry. Keeps an attendee's original
+    type through an edit instead of clobbering everyone to required."""
+    email, typ = a, "required"
+    if isinstance(a, dict):
+        email, typ = a.get("email", ""), a.get("type") or "required"
+    return {"email": email, "optional": typ == "optional"} if email else None
 
 
 def _decode_b64url(data: str, charset: str = "") -> str:
@@ -149,6 +196,23 @@ class GoogleClient:
             raise GoogleError("not signed in (no token for the requested scopes)")
         req = urllib.request.Request(
             url, data=json.dumps(body).encode(), method="PATCH",
+            headers={"Authorization": f"Bearer {token}",
+                     "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw = resp.read().decode()
+                return json.loads(raw) if raw else {}
+        except urllib.error.HTTPError as exc:
+            raise GoogleError(f"Google {exc.code}: {exc.read().decode(errors='replace')}",
+                              status=exc.code) from exc
+
+    def _put(self, url: str, body: dict, scopes: Sequence[str]) -> dict:
+        token = self._token_provider(scopes)
+        if not token:
+            raise GoogleError("not signed in (no token for the requested scopes)")
+        req = urllib.request.Request(
+            url, data=json.dumps(body).encode(), method="PUT",
             headers={"Authorization": f"Bearer {token}",
                      "Content-Type": "application/json"},
         )
@@ -465,14 +529,23 @@ class GoogleClient:
                                 attachments=attachments, importance=importance)
         self._post(f"{GMAIL}/users/me/messages/send", {"raw": raw}, SCOPES_MAIL)
 
-    def save_draft(self, *, to, subject: str, body: str, cc=None, bcc=None,
-                   html: bool = False, attachments=None, source: str = "me",
-                   address: str | None = None) -> None:
+    def save_draft(self, to=None, subject: str = "", body: str = "", *,
+                   cc=None, bcc=None, html: bool = False, attachments=None,
+                   source: str = "me", address: str | None = None,
+                   draft_id: str | None = None) -> None:
         """Save an unfinished message into Gmail's Drafts so it can be resumed
         here or in any other client. ``source``/``address`` accepted for API
-        parity with the Graph client."""
+        parity with the Graph client.
+
+        ``draft_id`` (a previous draft's id, e.g. ``drafts/<id>``'s id part)
+        UPDATES that draft in place instead of duplicating it: PUT
+        ``/drafts/{id}`` with the rebuilt raw message."""
         raw = self._raw_message(to, subject, body, cc=cc, bcc=bcc, html=html,
                                 attachments=attachments)
+        if draft_id:
+            self._put(f"{GMAIL}/users/me/drafts/{draft_id}",
+                      {"message": {"raw": raw}}, SCOPES_MAIL)
+            return
         self._post(f"{GMAIL}/users/me/drafts", {"message": {"raw": raw}},
                    SCOPES_MAIL)
 
@@ -680,6 +753,7 @@ class GoogleClient:
                 response = a.get("responseStatus", "")
                 break
         all_day = "date" in start
+        start_value = start.get("dateTime") or start.get("date", "")
         end_value = end.get("dateTime") or end.get("date", "")
         if all_day and end_value:
             # Google returns all-day end dates as exclusive; normalize to the
@@ -689,10 +763,15 @@ class GoogleClient:
                 end_value = (datetime.fromisoformat(end_value) - timedelta(days=1)).date().isoformat()
             except ValueError:
                 pass
+        elif end_value:
+            # Timed events: normalize the UTC/offset dateTime to a naive LOCAL
+            # string, the same shape Graph's Prefer header yields — the agenda,
+            # grid and live markers all treat naive times as local wall-clock.
+            end_value = _iso_local_naive(end_value)
         return {
             "id": e.get("id", ""),
             "subject": e.get("summary", "(no title)"),
-            "start": start.get("dateTime") or start.get("date", ""),
+            "start": start_value if all_day else _iso_local_naive(start_value),
             "end": end_value,
             "location": e.get("location", ""),
             "all_day": all_day,
@@ -725,7 +804,8 @@ class GoogleClient:
         if body:
             event["description"] = body
         if attendees:
-            event["attendees"] = [{"email": a} for a in attendees if a]
+            event["attendees"] = [
+                slot for slot in map(_attendee_slot, attendees) if slot]
         # sendUpdates=all: Google defaults to NONE, so attendees were never
         # emailed the invitation (Graph auto-sends; this restores parity).
         url = f"{CALENDAR}/calendars/primary/events?sendUpdates=all"
@@ -753,8 +833,10 @@ class GoogleClient:
             event["description"] = body
         # attendees: ``None`` = leave untouched; a list (even empty) = set it, so
         # removing every attendee in the editor actually clears them server-side.
+        # Entries are emails or ``{"email":…, "type": required|optional}`` dicts.
         if attendees is not None:
-            event["attendees"] = [{"email": a} for a in attendees if a]
+            event["attendees"] = [
+                slot for slot in map(_attendee_slot, attendees) if slot]
         return self._patch(
             f"{CALENDAR}/calendars/{self._cal_path(cal)}/events/{raw}"
             "?sendUpdates=all",  # notify attendees of the change (default: none)
@@ -774,12 +856,15 @@ class GoogleClient:
         base = self._event_from_json(data)
         base["id"] = event_id  # keep the wrapped id so edit/delete route correctly
         organizer = data.get("organizer") or {}
-        # {name, email, response}; Google response:
+        # {name, email, response, type}; Google response:
         # needsAction|declined|tentative|accepted. email lets the inline editor
-        # re-send the full desired attendee list when one is removed.
+        # re-send the full desired attendee list when one is removed; ``type``
+        # (from Google's ``optional`` bool) survives an edit instead of every
+        # attendee being clobbered back to required.
         attendees = [{"name": a.get("displayName") or a.get("email", ""),
                       "email": a.get("email", ""),
-                      "response": a.get("responseStatus", "needsAction")}
+                      "response": a.get("responseStatus", "needsAction"),
+                      "type": "optional" if a.get("optional") else "required"}
                      for a in data.get("attendees", []) or []]
         description = data.get("description", "") or ""
         # The user can RSVP when they are an attendee and not the organizer.

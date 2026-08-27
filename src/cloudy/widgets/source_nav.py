@@ -18,6 +18,7 @@ from typing import Callable
 
 from gi.repository import Adw, GLib, Gtk, Pango
 
+from .format import esc
 from .metrics import ICON_LG, SPACE_L, SPACE_M
 
 
@@ -205,10 +206,14 @@ def status_page(icon: str, title: str, description: str | None = None
                 ) -> Adw.StatusPage:
     """The one empty/error-state widget for the whole app. Use this instead of
     hand-rolling icon+title boxes so every "nothing here" / "couldn't load"
-    surface looks the same."""
-    page = Adw.StatusPage(icon_name=icon, title=title, vexpand=True)
+    surface looks the same.
+
+    Pass RAW text: Adw.StatusPage parses title/description as Pango markup, so
+    this helper escapes both here — a raw server error ('&', '<' in JSON/HTML
+    payloads) would otherwise render blank."""
+    page = Adw.StatusPage(icon_name=icon, title=esc(title), vexpand=True)
     if description:
-        page.set_description(description)
+        page.set_description(esc(description))
     return page
 
 

@@ -215,17 +215,40 @@ def _date_only(value: str) -> str | None:
     return None
 
 
+def _all_day_last_day(raw_end: str, start_compact: str) -> str:
+    """The last covered (inclusive) day of an all-day event's end value.
+
+    Bare dates (Google, normalized inclusive by google_client) pass through.
+    Graph all-day ends at the midnight AFTER the last day (``…T00:00:00``,
+    exclusive) — those step back one day so both providers speak the same
+    "inclusive last day" convention here."""
+    day = _date_only(raw_end)
+    if day is None:
+        return start_compact
+    time_part = raw_end.partition("T")[2].split(".")[0]
+    if time_part == "00:00:00" and day > start_compact:
+        return (datetime.strptime(day, "%Y%m%d").date()
+                - timedelta(days=1)).strftime("%Y%m%d")
+    return day
+
+
 def _vevent(uid: str, ev: dict) -> str | None:
     """Build a VEVENT block for one normalized event, or None if untimed/bad."""
     summary = ev.get("subject") or "(no title)"
     if ev.get("all_day"):
         start = _date_only(ev.get("start", ""))
-        end = _date_only(ev.get("end", ""))
         if start is None:
             return None
-        if end is None:
-            end = start
-        dt_lines = f"DTSTART;VALUE=DATE:{start}\r\nDTEND;VALUE=DATE:{end}"
+        # iCal DTEND;VALUE=DATE is EXCLUSIVE, while our internal convention is
+        # an inclusive last day — emit the day AFTER the last covered day
+        # (Google ends used to publish one day short in GNOME Calendar).
+        last = _all_day_last_day(ev.get("end", ""), start)
+        try:
+            dtend = (datetime.strptime(last, "%Y%m%d").date()
+                     + timedelta(days=1)).strftime("%Y%m%d")
+        except ValueError:
+            dtend = last
+        dt_lines = f"DTSTART;VALUE=DATE:{start}\r\nDTEND;VALUE=DATE:{dtend}"
     else:
         start = _utc_datetime(ev.get("start", ""), ev.get("start_tz"))
         end = _utc_datetime(ev.get("end", ""), ev.get("end_tz"))
