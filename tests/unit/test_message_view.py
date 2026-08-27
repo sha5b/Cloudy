@@ -3,17 +3,22 @@
 
 import unittest
 
-import gi_setup  # noqa: F401 - pins GI versions before import
+import gi_setup  # pins GI versions; exposes AVAILABLE
 
-from cloudy.widgets.message_view import (
-    _block_remote_images,
-    _has_remote_images,
-    _resolve_cids,
-    _to_text,
-    _wrap_html,
-)
+if gi_setup.AVAILABLE:
+    from cloudy.widgets.message_view import (
+        _block_remote_images,
+        _has_remote_images,
+        _resolve_cids,
+        _to_text,
+        _wrap_html,
+    )
+
+_skip = unittest.skipUnless(gi_setup.AVAILABLE,
+                            "GTK/Adw typelibs unavailable (headless build)")
 
 
+@_skip
 class TestToText(unittest.TestCase):
     def test_html_to_text(self):
         text = _to_text("<p>Hello<br/>world</p>")
@@ -24,6 +29,7 @@ class TestToText(unittest.TestCase):
         self.assertEqual(_to_text("plain text"), "plain text")
 
 
+@_skip
 class TestResolveCids(unittest.TestCase):
     def test_inline_image_replaced_with_data_uri(self):
         inline = [{"content_id": "img1", "content_bytes": "YWJj",
@@ -36,6 +42,7 @@ class TestResolveCids(unittest.TestCase):
         self.assertIn('src="cid:missing"', out)
 
 
+@_skip
 class TestBlockRemoteImages(unittest.TestCase):
     def test_http_image_blocked(self):
         body = '<img src="http://evil.com/track.png">'
@@ -81,6 +88,7 @@ class TestBlockRemoteImages(unittest.TestCase):
         self.assertNotIn("http://x.com/bg.png", out)
 
 
+@_skip
 class TestRemoteImageOptIn(unittest.TestCase):
     """The un-block path: the same body rendered with load_remote=True."""
 
@@ -104,6 +112,7 @@ class TestRemoteImageOptIn(unittest.TestCase):
         self.assertFalse(_has_remote_images("plain text"))
 
 
+@_skip
 class TestLoadImagesBanner(unittest.TestCase):
     """The reader banner: shown only when remote images were neutralized."""
 
