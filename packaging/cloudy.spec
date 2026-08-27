@@ -13,7 +13,7 @@
 %global appid io.github.sha5b.Cloudy
 
 Name:           cloudy
-Version:        0.3.4
+Version:        0.3.5
 Release:        1%{?dist}
 Summary:        Use OneDrive, SharePoint and unified mail on your desktop
 
@@ -115,6 +115,12 @@ meson test -C %{_vpath_builddir} --print-errorlogs
 %{_datadir}/%{name}/
 
 %changelog
+* Thu Aug 27 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.3.5-1
+- Full-app audit fix pass (~70 fixes) plus a second wave: parallel startup
+  mounts, chat send/adoption state machine fixes, calendar DST/TZ and
+  multi-day spans, mail pagination merge + remote-image blocking, Teams
+  channel notifications with mute, OneNote editor window, Google OAuth
+  state hardening, headless UI sweep harness (153->360 tests).
 * Tue Aug 04 2026 Shahab Nedaei <ned.tabulov@gmail.com> - 0.3.4-1
 - Full-app stability audit: file-browser freezes on FUSE mounts fixed (async
   open, mount-table cache, dead-mount detection), chat unread/badge coherence

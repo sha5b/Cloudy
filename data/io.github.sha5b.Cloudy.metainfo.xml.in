@@ -91,6 +91,20 @@ SPDX-FileCopyrightText: 2026 Shahab Nedaei
   </screenshots>
 
   <releases>
+    <release version="0.3.5" date="2026-08-27">
+      <description>
+        <p>A deep audit pass across every tab, plus Teams channel notifications and a faster, parallel drive-mount startup.</p>
+        <ul>
+          <li>Drives mount much faster at startup (parallel remounts, no redundant rclone configuration writes) and the file manager no longer freezes on dead or slow mounts</li>
+          <li>Chat: messages stay in their own conversation (no more migrating or duplicated bubbles), drafts never leak into the wrong chat, and messages are no longer marked read while the tab is hidden</li>
+          <li>Calendar: opening Outlook meeting invites no longer fails, saving an event no longer shifts its time across daylight-saving changes, multi-day events show their full span, and time zones are handled correctly for Google and .ics invites</li>
+          <li>Mail: timestamps shown in your time zone, attachments open from the pop-out reader, live refreshes keep loaded pages, and remote images are blocked by default to protect your privacy</li>
+          <li>Teams: channel notifications with a Teams-tab badge (the mute bell works now), forwarded posts render their content, failed posts keep your text, and OneNote drafts survive navigation</li>
+          <li>Sign-in hardening: Google sign-ins validate the OAuth state parameter and can no longer cross-contaminate concurrent flows</li>
+          <li>Dashboard: unread counts use the server-side totals, event ordering is time-zone correct, and the file upload indicator works</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.4" date="2026-08-04">
       <description>
         <p>A full-app stability audit: the file browser can no longer freeze the app, and chat unread state finally behaves.</p>
